@@ -57,10 +57,12 @@ impl SessionManager {
         let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
         let last_heartbeat_ms = Arc::new(AtomicU64::new(now_ms()));
         let semaphore = Arc::new(Semaphore::new(0)); // Attach 时 add_permits
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
         // 心跳
         let hb_tx = outbound_tx.clone();
         let hb_last = Arc::clone(&last_heartbeat_ms);
+        let hb_shutdown = shutdown_tx.clone();
         let hb_handle = tokio::spawn(async move {
             loop {
                 time::sleep(HEARTBEAT_INTERVAL).await;
@@ -70,11 +72,13 @@ impl SessionManager {
                 if hb_tx.send(msg).await.is_err() { break; }
                 let elapsed = now_ms().saturating_sub(hb_last.load(Ordering::Relaxed));
                 if elapsed > HEARTBEAT_TIMEOUT.as_millis() as u64 {
-                    tracing::warn!(elapsed_ms = elapsed, "heartbeat timeout");
+                    tracing::warn!(elapsed_ms = elapsed, "heartbeat timeout, forcing session shutdown");
+                    let _ = hb_shutdown.send(true);
                     break;
                 }
             }
         });
+        drop(shutdown_tx);
 
         // 超时扫描
         let timeout_pending = Arc::clone(&pending);
@@ -100,7 +104,20 @@ impl SessionManager {
             }
         });
 
-        while let Ok(Some(msg)) = inbound.message().await {
+        loop {
+            let msg = tokio::select! {
+                result = inbound.message() => {
+                    match result {
+                        Ok(Some(msg)) => msg,
+                        _ => break,
+                    }
+                }
+                _ = shutdown_rx.changed() => {
+                    tracing::info!("session shutdown signal received");
+                    break;
+                }
+            };
+
             match msg.payload {
                 Some(session_message::Payload::Attach(attach)) => {
                     let id = attach.caster_id.clone();
