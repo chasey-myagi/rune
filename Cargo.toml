@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "runtime/rune-proto",
+    "runtime/rune-core",
+    "runtime/rune-gate",
+    "runtime/rune-flow",
+    "runtime/rune-server",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+axum = "0.7"
+bytes = "1"
+dashmap = "6"
+thiserror = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1"
+tokio-stream = "0.1"
+tonic-build = "0.12"
