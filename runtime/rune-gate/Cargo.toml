@@ -2,3 +2,16 @@
 name = "rune-gate"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+rune-core = { path = "../rune-core" }
+rune-flow = { path = "../rune-flow" }  # TODO(phase3): decouple — Gate should not depend on Flow
+rune-proto = { path = "../rune-proto" }
+axum.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio-stream.workspace = true
+tracing.workspace = true
