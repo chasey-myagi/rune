@@ -50,8 +50,7 @@ message RuneDeclaration {
     string name = 1;
     string version = 2;
     string description = 3;
-    bytes input_schema = 4;
-    bytes output_schema = 5;
+    reserved 4, 5;  // input_schema, output_schema — removed in v0.1.0, reserved for future contract support
     bool supports_stream = 6;
     GateConfig gate = 7;
 }

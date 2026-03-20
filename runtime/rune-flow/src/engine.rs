@@ -125,7 +125,7 @@ mod tests {
         relay.register(
             RuneConfig { name: "step_a".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
             Arc::new(LocalInvoker::new(ha)), None,
-        );
+        ).unwrap();
 
         // step_b: 给 JSON 加 "b": true
         let hb = make_handler(|_ctx, input| async move {
@@ -137,7 +137,7 @@ mod tests {
         relay.register(
             RuneConfig { name: "step_b".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
             Arc::new(LocalInvoker::new(hb)), None,
-        );
+        ).unwrap();
 
         // step_c: 给 JSON 加 "c": true
         let hc = make_handler(|_ctx, input| async move {
@@ -149,7 +149,7 @@ mod tests {
         relay.register(
             RuneConfig { name: "step_c".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
             Arc::new(LocalInvoker::new(hc)), None,
-        );
+        ).unwrap();
 
         // fail_step: 总是失败
         let hf = make_handler(|_ctx, _input| async move {
@@ -161,7 +161,7 @@ mod tests {
         relay.register(
             RuneConfig { name: "fail_step".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
             Arc::new(LocalInvoker::new(hf)), None,
-        );
+        ).unwrap();
 
         relay
     }

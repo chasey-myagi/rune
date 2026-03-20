@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -11,8 +12,16 @@ use crate::rune::{RuneConfig, RuneError};
 use crate::relay::Relay;
 use crate::invoker::RemoteInvoker;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SessionState {
+    Attaching,
+    Active,
+    Disconnected,
+}
+
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(35);
+#[cfg(test)]
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) enum PendingResponse {
@@ -54,6 +63,7 @@ impl SessionManager {
         outbound_tx: mpsc::Sender<SessionMessage>,
     ) {
         let mut caster_id: Option<String> = None;
+        let mut _state = SessionState::Attaching;
         let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
         let last_heartbeat_ms = Arc::new(AtomicU64::new(now_ms()));
         let semaphore = Arc::new(Semaphore::new(0)); // Attach 时 add_permits
@@ -148,7 +158,9 @@ impl SessionManager {
                             session: Arc::clone(self) as Arc<SessionManager>,
                             caster_id: id.clone(),
                         });
-                        relay.register(config, invoker, Some(id.clone()));
+                        if let Err(reason) = relay.register(config, invoker, Some(id.clone())) {
+                            tracing::warn!(rune = %decl.name, %reason, "skipping rune registration");
+                        }
                     }
 
                     let ack = SessionMessage {
@@ -157,6 +169,7 @@ impl SessionManager {
                         })),
                     };
                     let _ = outbound_tx.send(ack).await;
+                    _state = SessionState::Active;
                     caster_id = Some(id);
                 }
 
@@ -223,6 +236,7 @@ impl SessionManager {
 
         hb_handle.abort();
         timeout_handle.abort();
+        _state = SessionState::Disconnected;
         if let Some(id) = &caster_id {
             tracing::info!(caster_id = %id, "cleaning up disconnected caster");
             self.sessions.remove(id);
@@ -242,6 +256,7 @@ impl SessionManager {
 
     pub async fn execute(
         &self, caster_id: &str, request_id: &str, rune_name: &str, input: Bytes,
+        context: HashMap<String, String>, timeout: Duration,
     ) -> Result<Bytes, RuneError> {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
         let _permit = session.semaphore.try_acquire().map_err(|_| RuneError::Unavailable)?;
@@ -249,14 +264,14 @@ impl SessionManager {
 
         let (tx, rx) = oneshot::channel();
         session.pending.insert(request_id.to_string(), PendingRequest {
-            tx: PendingResponse::Once(tx), created_at: Instant::now(), timeout: DEFAULT_TIMEOUT,
+            tx: PendingResponse::Once(tx), created_at: Instant::now(), timeout,
         });
 
         let msg = SessionMessage {
             payload: Some(session_message::Payload::Execute(ExecuteRequest {
                 request_id: request_id.to_string(), rune_name: rune_name.to_string(),
-                input: input.to_vec(), context: Default::default(),
-                timeout_ms: DEFAULT_TIMEOUT.as_millis() as u32,
+                input: input.to_vec(), context,
+                timeout_ms: timeout.as_millis() as u32,
             })),
         };
 
@@ -271,6 +286,7 @@ impl SessionManager {
 
     pub async fn execute_stream(
         &self, caster_id: &str, request_id: &str, rune_name: &str, input: Bytes,
+        context: HashMap<String, String>, timeout: Duration,
     ) -> Result<mpsc::Receiver<Result<Bytes, RuneError>>, RuneError> {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
         let _permit = session.semaphore.try_acquire().map_err(|_| RuneError::Unavailable)?;
@@ -278,14 +294,14 @@ impl SessionManager {
 
         let (tx, rx) = mpsc::channel(32);
         session.pending.insert(request_id.to_string(), PendingRequest {
-            tx: PendingResponse::Stream(tx), created_at: Instant::now(), timeout: DEFAULT_TIMEOUT,
+            tx: PendingResponse::Stream(tx), created_at: Instant::now(), timeout,
         });
 
         let msg = SessionMessage {
             payload: Some(session_message::Payload::Execute(ExecuteRequest {
                 request_id: request_id.to_string(), rune_name: rune_name.to_string(),
-                input: input.to_vec(), context: Default::default(),
-                timeout_ms: DEFAULT_TIMEOUT.as_millis() as u32,
+                input: input.to_vec(), context,
+                timeout_ms: timeout.as_millis() as u32,
             })),
         };
 
@@ -372,7 +388,7 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "r-1", "echo", Bytes::from("hello")).await
+                mgr.execute(&cid, "r-1", "echo", Bytes::from("hello"), Default::default(), DEFAULT_TIMEOUT).await
             })
         };
 
@@ -402,7 +418,7 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "r-timeout", "slow", Bytes::new()).await
+                mgr.execute(&cid, "r-timeout", "slow", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
             })
         };
 
@@ -438,7 +454,7 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "r-cancel", "slow", Bytes::new()).await
+                mgr.execute(&cid, "r-cancel", "slow", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
             })
         };
 
@@ -461,7 +477,7 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "r-1", "echo", Bytes::new()).await
+                mgr.execute(&cid, "r-1", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
             })
         };
 
@@ -469,7 +485,7 @@ mod tests {
         assert_eq!(sem.available_permits(), 0);
 
         // Second execute should fail immediately
-        let result = mgr.execute(&caster_id, "r-2", "echo", Bytes::new()).await;
+        let result = mgr.execute(&caster_id, "r-2", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await;
         assert!(matches!(result, Err(RuneError::Unavailable)),
             "second request must be rejected when max_concurrent=1");
     }

@@ -83,12 +83,18 @@ pub struct RemoteInvoker {
 #[async_trait::async_trait]
 impl RuneInvoker for RemoteInvoker {
     async fn invoke_once(&self, ctx: RuneContext, input: Bytes) -> Result<Bytes, RuneError> {
-        self.session.execute(&self.caster_id, &ctx.request_id, &ctx.rune_name, input).await
+        self.session.execute(
+            &self.caster_id, &ctx.request_id, &ctx.rune_name, input,
+            ctx.context.clone(), ctx.timeout,
+        ).await
     }
 
     async fn invoke_stream(&self, ctx: RuneContext, input: Bytes)
         -> Result<mpsc::Receiver<Result<Bytes, RuneError>>, RuneError>
     {
-        self.session.execute_stream(&self.caster_id, &ctx.request_id, &ctx.rune_name, input).await
+        self.session.execute_stream(
+            &self.caster_id, &ctx.request_id, &ctx.rune_name, input,
+            ctx.context.clone(), ctx.timeout,
+        ).await
     }
 }

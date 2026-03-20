@@ -23,13 +23,40 @@ impl Relay {
         }
     }
 
-    /// 注册一个 Rune（进程内或远程）
-    pub fn register(&self, config: RuneConfig, invoker: Arc<dyn RuneInvoker>, caster_id: Option<String>) {
+    /// 注册一个 Rune（进程内或远程），检查 gate.path 冲突
+    pub fn register(&self, config: RuneConfig, invoker: Arc<dyn RuneInvoker>, caster_id: Option<String>) -> Result<(), String> {
+        // Check gate.path conflict: different rune_name with same path+method is a hard error
+        if let Some(ref gate) = config.gate {
+            for entry in self.entries.iter() {
+                for e in entry.value() {
+                    if let Some(ref existing_gate) = e.config.gate {
+                        if existing_gate.path == gate.path
+                            && existing_gate.method == gate.method
+                            && e.config.name != config.name
+                        {
+                            return Err(format!(
+                                "route conflict: '{}' and '{}' both declare gate path '{}' method '{}'",
+                                e.config.name, config.name, gate.path, gate.method
+                            ));
+                        }
+                    }
+                }
+            }
+            // Also check conflict with reserved management routes
+            let reserved = ["/health", "/api/v1/runes", "/api/v1/tasks", "/api/v1/flows"];
+            for r in reserved {
+                if gate.path == r || gate.path.starts_with(&format!("{}/", r)) {
+                    return Err(format!(
+                        "route conflict: gate path '{}' conflicts with management route '{}'",
+                        gate.path, r
+                    ));
+                }
+            }
+        }
+
         let name = config.name.clone();
-        self.entries
-            .entry(name)
-            .or_default()
-            .push(RuneEntry { config, invoker, caster_id });
+        self.entries.entry(name).or_default().push(RuneEntry { config, invoker, caster_id });
+        Ok(())
     }
 
     /// 移除某个 Caster 的所有 Rune
@@ -89,7 +116,7 @@ mod tests {
             supports_stream: false,
             gate: None,
         };
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
+        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
 
         let resolver = RoundRobinResolver::new();
         let invoker = relay.resolve("echo", &resolver).expect("should resolve");
@@ -125,8 +152,8 @@ mod tests {
             supports_stream: false,
             gate: None,
         };
-        relay.register(cfg("rr"), Arc::new(crate::invoker::LocalInvoker::new(h1)), None);
-        relay.register(cfg("rr"), Arc::new(crate::invoker::LocalInvoker::new(h2)), None);
+        relay.register(cfg("rr"), Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
+        relay.register(cfg("rr"), Arc::new(crate::invoker::LocalInvoker::new(h2)), None).unwrap();
 
         let resolver = RoundRobinResolver::new();
         let ctx = || RuneContext {
@@ -153,7 +180,7 @@ mod tests {
             supports_stream: false,
             gate: None,
         };
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), Some("c1".into()));
+        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), Some("c1".into())).unwrap();
 
         let resolver = RoundRobinResolver::new();
         assert!(relay.resolve("x", &resolver).is_some());

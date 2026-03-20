@@ -200,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(Bytes::from(r#"{"message":"hello from local rune!"}"#))
         }))),
         None,
-    );
+    ).expect("route conflict");
 
     // step_b: 本地 Rust 步骤（给 JSON 加 step_b 字段）
     relay.register(
@@ -220,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
         }))),
         None,
-    );
+    ).expect("route conflict");
 
     tracing::info!("registered local runes: hello, step_b");
 

@@ -33,12 +33,14 @@ impl App {
     }
 
     pub fn rune(&mut self, config: RuneConfig, handler: RuneHandler) -> &mut Self {
-        self.relay.register(config, Arc::new(LocalInvoker::new(handler)), None);
+        self.relay.register(config, Arc::new(LocalInvoker::new(handler)), None)
+            .expect("route conflict in local rune registration");
         self
     }
 
     pub fn stream_rune(&mut self, config: RuneConfig, handler: impl StreamRuneHandler) -> &mut Self {
-        self.relay.register(config, Arc::new(LocalStreamInvoker::new(Arc::new(handler))), None);
+        self.relay.register(config, Arc::new(LocalStreamInvoker::new(Arc::new(handler))), None)
+            .expect("route conflict in local stream rune registration");
         self
     }
 
