@@ -140,10 +140,10 @@ impl SessionManager {
 
                 Some(session_message::Payload::Result(result)) => {
                     let req_id = result.request_id.clone();
-                    if let Some(session) = caster_id.as_ref().and_then(|id| self.sessions.get(id)) {
-                        session.semaphore.add_permits(1);
-                    }
                     if let Some((_, p)) = pending.remove(&req_id) {
+                        if let Some(session) = caster_id.as_ref().and_then(|id| self.sessions.get(id)) {
+                            session.semaphore.add_permits(1);
+                        }
                         let outcome = match result.status() {
                             Status::Completed => Ok(Bytes::from(result.output)),
                             _ => Err(RuneError::ExecutionFailed {
@@ -156,6 +156,7 @@ impl SessionManager {
                             PendingResponse::Stream(tx) => { let _ = tx.send(outcome).await; }
                         }
                     }
+                    // Late result (already timed out / cancelled): silently ignored
                 }
 
                 Some(session_message::Payload::StreamEvent(event)) => {
@@ -169,10 +170,10 @@ impl SessionManager {
 
                 Some(session_message::Payload::StreamEnd(end)) => {
                     let req_id = end.request_id.clone();
-                    if let Some(session) = caster_id.as_ref().and_then(|id| self.sessions.get(id)) {
-                        session.semaphore.add_permits(1);
-                    }
                     if let Some((_, p)) = pending.remove(&req_id) {
+                        if let Some(session) = caster_id.as_ref().and_then(|id| self.sessions.get(id)) {
+                            session.semaphore.add_permits(1);
+                        }
                         if let PendingResponse::Stream(tx) = p.tx {
                             if end.status() != Status::Completed {
                                 let _ = tx.send(Err(RuneError::ExecutionFailed {
@@ -182,6 +183,7 @@ impl SessionManager {
                             }
                         }
                     }
+                    // Late stream end: silently ignored
                 }
 
                 Some(session_message::Payload::Detach(detach)) => {
