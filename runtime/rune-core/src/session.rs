@@ -136,8 +136,13 @@ impl SessionManager {
                     for decl in &attach.runes {
                         let config = RuneConfig {
                             name: decl.name.clone(),
+                            version: decl.version.clone(),
                             description: decl.description.clone(),
-                            gate_path: decl.gate.as_ref().map(|g| g.path.clone()),
+                            supports_stream: decl.supports_stream,
+                            gate: decl.gate.as_ref().map(|g| crate::rune::GateConfig {
+                                path: g.path.clone(),
+                                method: if g.method.is_empty() { "POST".to_string() } else { g.method.clone() },
+                            }),
                         };
                         let invoker = Arc::new(RemoteInvoker {
                             session: Arc::clone(self) as Arc<SessionManager>,

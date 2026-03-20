@@ -1,8 +1,8 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 use crate::rune::RuneConfig;
 use crate::invoker::RuneInvoker;
+use crate::resolver::Resolver;
 
 /// 一个 Rune 的注册条目
 pub struct RuneEntry {
@@ -11,17 +11,15 @@ pub struct RuneEntry {
     pub caster_id: Option<String>,  // None = 进程内
 }
 
-/// Relay = 注册表 + 轮询 Resolver（POC 合一，正式版拆开）
+/// Relay = 注册表
 pub struct Relay {
     entries: DashMap<String, Vec<RuneEntry>>,
-    counters: DashMap<String, AtomicUsize>,
 }
 
 impl Relay {
     pub fn new() -> Self {
         Self {
             entries: DashMap::new(),
-            counters: DashMap::new(),
         }
     }
 
@@ -45,26 +43,27 @@ impl Relay {
         self.entries.retain(|_, v| !v.is_empty());
     }
 
-    /// 选一个 Invoker（轮询）
-    pub fn resolve(&self, rune_name: &str) -> Option<Arc<dyn RuneInvoker>> {
-        let entries = self.entries.get(rune_name)?;
-        let candidates = entries.value();
-        if candidates.is_empty() {
-            return None;
-        }
-        let idx = self.counters
-            .entry(rune_name.to_string())
-            .or_insert_with(|| AtomicUsize::new(0))
-            .fetch_add(1, Ordering::Relaxed);
-        Some(Arc::clone(&candidates[idx % candidates.len()].invoker))
+    /// Find all candidates for a rune name
+    pub fn find(&self, rune_name: &str) -> Option<dashmap::mapref::one::Ref<'_, String, Vec<RuneEntry>>> {
+        let entry = self.entries.get(rune_name)?;
+        if entry.value().is_empty() { return None; }
+        Some(entry)
     }
 
-    /// 列出所有已注册 Rune 的名称和 gate_path
+    /// Convenience: find + pick using a resolver
+    pub fn resolve(&self, rune_name: &str, resolver: &dyn Resolver) -> Option<Arc<dyn RuneInvoker>> {
+        let entries = self.find(rune_name)?;
+        let picked = resolver.pick(rune_name, entries.value())?;
+        Some(Arc::clone(&picked.invoker))
+    }
+
+    /// 列出所有已注册 Rune 的名称和 gate path
     pub fn list(&self) -> Vec<(String, Option<String>)> {
         let mut result = Vec::new();
         for entry in self.entries.iter() {
             for e in entry.value() {
-                result.push((e.config.name.clone(), e.config.gate_path.clone()));
+                let gate_path = e.config.gate.as_ref().map(|g| g.path.clone());
+                result.push((e.config.name.clone(), gate_path));
             }
         }
         result
@@ -74,8 +73,10 @@ impl Relay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rune::{RuneContext, RuneError, make_handler};
+    use crate::rune::{RuneContext, make_handler};
+    use crate::resolver::RoundRobinResolver;
     use bytes::Bytes;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_register_and_resolve() {
@@ -83,21 +84,30 @@ mod tests {
         let handler = make_handler(|_ctx, input| async move { Ok(input) });
         let config = RuneConfig {
             name: "echo".into(),
+            version: String::new(),
             description: "echo test".into(),
-            gate_path: None,
+            supports_stream: false,
+            gate: None,
         };
         relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
 
-        let invoker = relay.resolve("echo").expect("should resolve");
-        let ctx = RuneContext { rune_name: "echo".into(), request_id: "r1".into() };
-        let result = invoker.invoke(ctx, Bytes::from("hello")).await.unwrap();
+        let resolver = RoundRobinResolver::new();
+        let invoker = relay.resolve("echo", &resolver).expect("should resolve");
+        let ctx = RuneContext {
+            rune_name: "echo".into(),
+            request_id: "r1".into(),
+            context: Default::default(),
+            timeout: Duration::from_secs(30),
+        };
+        let result = invoker.invoke_once(ctx, Bytes::from("hello")).await.unwrap();
         assert_eq!(result, Bytes::from("hello"));
     }
 
     #[test]
     fn test_resolve_not_found() {
         let relay = Relay::new();
-        assert!(relay.resolve("nonexistent").is_none());
+        let resolver = RoundRobinResolver::new();
+        assert!(relay.resolve("nonexistent", &resolver).is_none());
     }
 
     #[tokio::test]
@@ -108,13 +118,25 @@ mod tests {
         let h1 = make_handler(|_ctx, _input| async { Ok(Bytes::from("a")) });
         let h2 = make_handler(|_ctx, _input| async { Ok(Bytes::from("b")) });
 
-        let cfg = |n: &str| RuneConfig { name: n.into(), description: "".into(), gate_path: None };
+        let cfg = |n: &str| RuneConfig {
+            name: n.into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: None,
+        };
         relay.register(cfg("rr"), Arc::new(crate::invoker::LocalInvoker::new(h1)), None);
         relay.register(cfg("rr"), Arc::new(crate::invoker::LocalInvoker::new(h2)), None);
 
-        let ctx = || RuneContext { rune_name: "rr".into(), request_id: "r".into() };
-        let r1 = relay.resolve("rr").unwrap().invoke(ctx(), Bytes::new()).await.unwrap();
-        let r2 = relay.resolve("rr").unwrap().invoke(ctx(), Bytes::new()).await.unwrap();
+        let resolver = RoundRobinResolver::new();
+        let ctx = || RuneContext {
+            rune_name: "rr".into(),
+            request_id: "r".into(),
+            context: Default::default(),
+            timeout: Duration::from_secs(30),
+        };
+        let r1 = relay.resolve("rr", &resolver).unwrap().invoke_once(ctx(), Bytes::new()).await.unwrap();
+        let r2 = relay.resolve("rr", &resolver).unwrap().invoke_once(ctx(), Bytes::new()).await.unwrap();
 
         // 轮询应该交替
         assert_ne!(r1, r2);
@@ -124,11 +146,18 @@ mod tests {
     fn test_remove_caster() {
         let relay = Relay::new();
         let handler = make_handler(|_ctx, input| async move { Ok(input) });
-        let config = RuneConfig { name: "x".into(), description: "".into(), gate_path: None };
+        let config = RuneConfig {
+            name: "x".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: None,
+        };
         relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), Some("c1".into()));
 
-        assert!(relay.resolve("x").is_some());
+        let resolver = RoundRobinResolver::new();
+        assert!(relay.resolve("x", &resolver).is_some());
         relay.remove_caster("c1");
-        assert!(relay.resolve("x").is_none());
+        assert!(relay.resolve("x", &resolver).is_none());
     }
 }

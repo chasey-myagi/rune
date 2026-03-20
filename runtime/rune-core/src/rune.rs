@@ -2,20 +2,37 @@ use bytes::Bytes;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Rune 的执行上下文
 #[derive(Debug, Clone)]
 pub struct RuneContext {
     pub rune_name: String,
     pub request_id: String,
+    pub context: std::collections::HashMap<String, String>,
+    pub timeout: std::time::Duration,
 }
 
 /// Rune 注册配置
 #[derive(Debug, Clone)]
 pub struct RuneConfig {
     pub name: String,
+    pub version: String,
     pub description: String,
-    pub gate_path: Option<String>,
+    pub supports_stream: bool,
+    pub gate: Option<GateConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GateConfig {
+    pub path: String,
+    pub method: String, // default "POST"
+}
+
+impl Default for GateConfig {
+    fn default() -> Self {
+        Self { path: String::new(), method: "POST".to_string() }
+    }
 }
 
 /// Rune 执行错误
@@ -31,6 +48,8 @@ pub enum RuneError {
     Unavailable,
     #[error("timeout")]
     Timeout,
+    #[error("cancelled")]
+    Cancelled,
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -49,4 +68,31 @@ where
     Fut: Future<Output = Result<Bytes, RuneError>> + Send + 'static,
 {
     Arc::new(move |ctx, input| Box::pin(f(ctx, input)))
+}
+
+/// 流式 Rune handler
+#[async_trait::async_trait]
+pub trait StreamRuneHandler: Send + Sync + 'static {
+    async fn execute(&self, ctx: RuneContext, input: Bytes, tx: StreamSender) -> Result<(), RuneError>;
+}
+
+/// StreamSender — handler pushes stream events through this
+pub struct StreamSender {
+    tx: mpsc::Sender<Result<Bytes, RuneError>>,
+}
+
+impl StreamSender {
+    pub fn new(tx: mpsc::Sender<Result<Bytes, RuneError>>) -> Self {
+        Self { tx }
+    }
+
+    pub async fn emit(&self, data: Bytes) -> Result<(), RuneError> {
+        self.tx.send(Ok(data)).await
+            .map_err(|_| RuneError::Internal(anyhow::anyhow!("stream receiver dropped")))
+    }
+
+    pub async fn end(self) -> Result<(), RuneError> {
+        // Drop self, closing the channel
+        Ok(())
+    }
 }
