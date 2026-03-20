@@ -834,6 +834,8 @@ dependencies = [
  "axum",
  "bytes",
  "dashmap",
+ "http-body-util",
+ "hyper",
  "rune-core",
  "rune-proto",
  "serde",
@@ -841,6 +843,7 @@ dependencies = [
  "serde_urlencoded",
  "tokio",
  "tokio-stream",
+ "tower 0.5.3",
  "tracing",
 ]
 
