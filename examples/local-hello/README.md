@@ -1,3 +1,5 @@
 # Local Hello Example
 
-进程内 Rune 示例。开发中。
+Minimal example showing how to register local Runes using the App builder API.
+
+See `main.rs` for the code.

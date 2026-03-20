@@ -1,3 +1,21 @@
 # Python Caster Example
 
-Python Caster 示例。开发中。
+Example Python Caster that registers runes and connects to a Rune runtime server.
+
+## Prerequisites
+
+```bash
+cd sdks/python && pip install -e .
+```
+
+## Usage
+
+```bash
+# Start the server first
+cargo run -p rune-server
+
+# Then run the caster
+python examples/python-caster/main.py
+```
+
+Registered runes: echo, slow, step_a, step_c, streamer
