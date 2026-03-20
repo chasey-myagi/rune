@@ -2,6 +2,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use rune_core::rune::{RuneContext, RuneError};
 use rune_core::relay::Relay;
+use rune_core::resolver::Resolver;
 use crate::dsl::Flow;
 
 /// Flow 执行结果
@@ -29,13 +30,15 @@ pub enum FlowError {
 pub struct FlowEngine {
     flows: std::collections::HashMap<String, Flow>,
     relay: Arc<Relay>,
+    resolver: Arc<dyn Resolver>,
 }
 
 impl FlowEngine {
-    pub fn new(relay: Arc<Relay>) -> Self {
+    pub fn new(relay: Arc<Relay>, resolver: Arc<dyn Resolver>) -> Self {
         Self {
             flows: std::collections::HashMap::new(),
             relay,
+            resolver,
         }
     }
 
@@ -64,7 +67,7 @@ impl FlowEngine {
         for (i, rune_name) in flow.steps.iter().enumerate() {
             tracing::info!(flow = flow_name, step = i, rune = %rune_name, "executing step");
 
-            let invoker = self.relay.resolve(rune_name)
+            let invoker = self.relay.resolve(rune_name, &*self.resolver)
                 .ok_or_else(|| FlowError::StepFailed {
                     step_index: i,
                     rune_name: rune_name.clone(),
@@ -74,9 +77,11 @@ impl FlowEngine {
             let ctx = RuneContext {
                 rune_name: rune_name.clone(),
                 request_id: unique_flow_request_id(flow_name, i),
+                context: Default::default(),
+                timeout: std::time::Duration::from_secs(30),
             };
 
-            current = invoker.invoke(ctx, current).await
+            current = invoker.invoke_once(ctx, current).await
                 .map_err(|e| FlowError::StepFailed {
                     step_index: i,
                     rune_name: rune_name.clone(),
@@ -103,9 +108,9 @@ fn unique_flow_request_id(flow_name: &str, step: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rune_core::rune::make_handler;
+    use rune_core::rune::{make_handler, RuneConfig};
     use rune_core::invoker::LocalInvoker;
-    use rune_core::rune::RuneConfig;
+    use rune_core::resolver::RoundRobinResolver;
 
     fn test_relay() -> Arc<Relay> {
         let relay = Arc::new(Relay::new());
@@ -118,7 +123,7 @@ mod tests {
             Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
         });
         relay.register(
-            RuneConfig { name: "step_a".into(), description: "".into(), gate_path: None },
+            RuneConfig { name: "step_a".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
             Arc::new(LocalInvoker::new(ha)), None,
         );
 
@@ -130,7 +135,7 @@ mod tests {
             Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
         });
         relay.register(
-            RuneConfig { name: "step_b".into(), description: "".into(), gate_path: None },
+            RuneConfig { name: "step_b".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
             Arc::new(LocalInvoker::new(hb)), None,
         );
 
@@ -142,7 +147,7 @@ mod tests {
             Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
         });
         relay.register(
-            RuneConfig { name: "step_c".into(), description: "".into(), gate_path: None },
+            RuneConfig { name: "step_c".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
             Arc::new(LocalInvoker::new(hc)), None,
         );
 
@@ -154,7 +159,7 @@ mod tests {
             })
         });
         relay.register(
-            RuneConfig { name: "fail_step".into(), description: "".into(), gate_path: None },
+            RuneConfig { name: "fail_step".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
             Arc::new(LocalInvoker::new(hf)), None,
         );
 
@@ -164,7 +169,8 @@ mod tests {
     #[tokio::test]
     async fn test_engine_execute_chain() {
         let relay = test_relay();
-        let mut engine = FlowEngine::new(relay);
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let mut engine = FlowEngine::new(relay, resolver);
         engine.register(
             crate::dsl::Flow::new("test").chain(vec!["step_a", "step_b", "step_c"]).build()
         );
@@ -182,7 +188,8 @@ mod tests {
     #[tokio::test]
     async fn test_engine_step_fail() {
         let relay = test_relay();
-        let mut engine = FlowEngine::new(relay);
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let mut engine = FlowEngine::new(relay, resolver);
         engine.register(
             crate::dsl::Flow::new("fail").chain(vec!["step_a", "fail_step", "step_c"]).build()
         );
@@ -200,7 +207,8 @@ mod tests {
     #[tokio::test]
     async fn test_engine_empty_chain() {
         let relay = test_relay();
-        let mut engine = FlowEngine::new(relay);
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let mut engine = FlowEngine::new(relay, resolver);
         engine.register(crate::dsl::Flow::new("empty").build());
 
         let result = engine.execute("empty", Bytes::from(r#"{"pass":"through"}"#)).await.unwrap();
@@ -211,7 +219,8 @@ mod tests {
     #[tokio::test]
     async fn test_engine_flow_not_found() {
         let relay = test_relay();
-        let engine = FlowEngine::new(relay);
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let engine = FlowEngine::new(relay, resolver);
         let err = engine.execute("nope", Bytes::new()).await.unwrap_err();
         assert!(matches!(err, FlowError::FlowNotFound(_)));
     }
@@ -219,7 +228,8 @@ mod tests {
     #[tokio::test]
     async fn test_engine_rune_not_found_in_step() {
         let relay = test_relay();
-        let mut engine = FlowEngine::new(relay);
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let mut engine = FlowEngine::new(relay, resolver);
         engine.register(
             crate::dsl::Flow::new("bad").chain(vec!["step_a", "nonexistent"]).build()
         );

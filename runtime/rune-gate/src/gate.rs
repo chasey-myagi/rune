@@ -12,6 +12,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use rune_core::rune::{RuneContext, RuneError};
 use rune_core::relay::Relay;
+use rune_core::resolver::Resolver;
 use rune_flow::engine::FlowEngine;
 
 /// 异步 Task 状态
@@ -27,6 +28,7 @@ pub struct TaskInfo {
 #[derive(Clone)]
 pub struct GateState {
     pub relay: Arc<Relay>,
+    pub resolver: Arc<dyn Resolver>,
     pub tasks: Arc<DashMap<String, TaskInfo>>,
     pub flow_engine: Arc<FlowEngine>,
 }
@@ -75,13 +77,18 @@ async fn run_rune(
     Query(params): Query<RunParams>,
     body: Bytes,
 ) -> impl IntoResponse {
-    let invoker = match state.relay.resolve(&name) {
+    let invoker = match state.relay.resolve(&name, &*state.resolver) {
         Some(inv) => inv,
         None => return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", &format!("rune '{}' not found", name)),
     };
 
     let request_id = unique_request_id();
-    let ctx = RuneContext { rune_name: name.clone(), request_id: request_id.clone() };
+    let ctx = RuneContext {
+        rune_name: name.clone(),
+        request_id: request_id.clone(),
+        context: Default::default(),
+        timeout: std::time::Duration::from_secs(30),
+    };
 
     // async 模式
     if params.async_mode.unwrap_or(false) {
@@ -96,7 +103,7 @@ async fn run_rune(
         let tasks = Arc::clone(&state.tasks);
         let body_clone = body.clone();
         tokio::spawn(async move {
-            match invoker.invoke(ctx, body_clone).await {
+            match invoker.invoke_once(ctx, body_clone).await {
                 Ok(output) => {
                     let result = serde_json::from_slice(&output).unwrap_or(serde_json::Value::Null);
                     tasks.insert(task_id.clone(), TaskInfo {
@@ -124,7 +131,7 @@ async fn run_rune(
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
 
         tokio::spawn(async move {
-            match invoker.invoke(ctx, body).await {
+            match invoker.invoke_once(ctx, body).await {
                 Ok(output) => {
                     // 把结果分成多个 chunk 发（模拟流式）
                     let output_str = String::from_utf8_lossy(&output);
@@ -151,7 +158,7 @@ async fn run_rune(
     }
 
     // sync 模式（默认）
-    match invoker.invoke(ctx, body).await {
+    match invoker.invoke_once(ctx, body).await {
         Ok(output) => {
             match serde_json::from_slice::<serde_json::Value>(&output) {
                 Ok(json) => (StatusCode::OK, Json(json)).into_response(),
@@ -174,6 +181,7 @@ fn map_error(e: RuneError) -> axum::response::Response {
         RuneError::Timeout => (StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
         RuneError::ExecutionFailed { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "EXECUTION_FAILED"),
         RuneError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL"),
+        RuneError::Cancelled => (StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST), "CANCELLED"),
     };
     error_response(status, code, &e.to_string())
 }

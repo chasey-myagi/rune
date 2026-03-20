@@ -4,8 +4,9 @@ use tonic::{Request, Response, Status};
 use rune_proto::rune_service_server::{RuneService, RuneServiceServer};
 use rune_proto::SessionMessage;
 use rune_core::relay::Relay;
-use rune_core::rune::{RuneConfig, RuneError, make_handler};
+use rune_core::rune::{RuneConfig, RuneError, GateConfig, make_handler};
 use rune_core::invoker::LocalInvoker;
+use rune_core::resolver::RoundRobinResolver;
 use rune_core::session::SessionManager;
 use rune_flow::dsl::Flow;
 use rune_flow::engine::FlowEngine;
@@ -57,7 +58,13 @@ async fn main() -> anyhow::Result<()> {
 
     // hello: 静态响应
     relay.register(
-        RuneConfig { name: "hello".into(), description: "local hello".into(), gate_path: Some("/hello".into()) },
+        RuneConfig {
+            name: "hello".into(),
+            version: String::new(),
+            description: "local hello".into(),
+            supports_stream: false,
+            gate: Some(GateConfig { path: "/hello".into(), method: "POST".into() }),
+        },
         Arc::new(LocalInvoker::new(make_handler(|_ctx, _input| async {
             Ok(Bytes::from(r#"{"message":"hello from local rune!"}"#))
         }))),
@@ -66,7 +73,13 @@ async fn main() -> anyhow::Result<()> {
 
     // step_b: 本地 Rust 步骤（给 JSON 加 step_b 字段）
     relay.register(
-        RuneConfig { name: "step_b".into(), description: "local step_b".into(), gate_path: None },
+        RuneConfig {
+            name: "step_b".into(),
+            version: String::new(),
+            description: "local step_b".into(),
+            supports_stream: false,
+            gate: None,
+        },
         Arc::new(LocalInvoker::new(make_handler(|_ctx, input| async move {
             let mut v: serde_json::Value = serde_json::from_slice(&input)
                 .map_err(|e| RuneError::InvalidInput(e.to_string()))?;
@@ -80,7 +93,9 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Flow 引擎 ──
 
-    let mut flow_engine = FlowEngine::new(Arc::clone(&relay));
+    let resolver: Arc<dyn rune_core::resolver::Resolver> = Arc::new(RoundRobinResolver::new());
+
+    let mut flow_engine = FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver));
 
     // pipeline: step_a (Python) → step_b (Rust) → step_c (Python)
     flow_engine.register(
@@ -105,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
 
     let gate_state = GateState {
         relay: Arc::clone(&relay),
+        resolver,
         tasks: Arc::new(dashmap::DashMap::new()),
         flow_engine: Arc::new(flow_engine),
     };
