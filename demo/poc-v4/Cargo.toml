@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    "rune-proto",
+    "rune-core",
+    "rune-gate",
+    "rune-flow",
+    "rune-server",
+    "examples/hello",
+]

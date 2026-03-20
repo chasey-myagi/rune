@@ -1,0 +1,16 @@
+[package]
+name = "rune-gate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rune-core = { path = "../rune-core" }
+rune-proto = { path = "../rune-proto" }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+dashmap = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-stream = "0.1"
+tracing = "0.1"
