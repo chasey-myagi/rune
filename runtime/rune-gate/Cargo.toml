@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 rune-core = { path = "../rune-core" }
-rune-flow = { path = "../rune-flow" }  # TODO(phase3): decouple — Gate should not depend on Flow
 rune-proto = { path = "../rune-proto" }
+serde_urlencoded = "0.7"
 axum.workspace = true
 tokio.workspace = true
 bytes.workspace = true
