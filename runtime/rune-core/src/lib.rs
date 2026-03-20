@@ -5,3 +5,4 @@ pub mod resolver;
 pub mod session;
 pub mod app;
 pub mod config;
+pub mod grpc_service;
