@@ -15,25 +15,25 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(35);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-enum PendingResponse {
+pub(crate) enum PendingResponse {
     Once(oneshot::Sender<Result<Bytes, RuneError>>),
     Stream(mpsc::Sender<Result<Bytes, RuneError>>),
 }
 
-struct PendingRequest {
-    tx: PendingResponse,
-    created_at: Instant,
-    timeout: Duration,
+pub(crate) struct PendingRequest {
+    pub(crate) tx: PendingResponse,
+    pub(crate) created_at: Instant,
+    pub(crate) timeout: Duration,
 }
 
 pub struct SessionManager {
     sessions: DashMap<String, CasterState>,
 }
 
-struct CasterState {
-    outbound: mpsc::Sender<SessionMessage>,
-    pending: Arc<DashMap<String, PendingRequest>>,
-    semaphore: Arc<Semaphore>,
+pub(crate) struct CasterState {
+    pub(crate) outbound: mpsc::Sender<SessionMessage>,
+    pub(crate) pending: Arc<DashMap<String, PendingRequest>>,
+    pub(crate) semaphore: Arc<Semaphore>,
 }
 
 impl SessionManager {
@@ -317,4 +317,180 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Helper: creates a SessionManager with one registered caster session.
+    /// Returns the receiver too so the outbound channel stays open.
+    fn setup_session(max_concurrent: usize) -> (
+        Arc<SessionManager>,
+        String,
+        Arc<Semaphore>,
+        Arc<DashMap<String, PendingRequest>>,
+        mpsc::Receiver<SessionMessage>,
+    ) {
+        let mgr = Arc::new(SessionManager::new());
+        let (tx, rx) = mpsc::channel(16);
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
+        let caster_id = "test-caster".to_string();
+
+        mgr.sessions.insert(caster_id.clone(), CasterState {
+            outbound: tx,
+            pending: Arc::clone(&pending),
+            semaphore: Arc::clone(&semaphore),
+        });
+
+        (mgr, caster_id, semaphore, pending, rx)
+    }
+
+    /// Poll until a key appears in the pending map (max 1 second).
+    async fn wait_for_pending(pending: &DashMap<String, PendingRequest>, key: &str) {
+        for _ in 0..100 {
+            if pending.contains_key(key) { return; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for pending key '{}'", key);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_execute_returns_permit_on_normal_completion() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(2);
+        assert_eq!(sem.available_permits(), 2);
+
+        // execute() consumes one permit
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "r-1", "echo", Bytes::from("hello")).await
+            })
+        };
+
+        // Wait for pending entry to appear
+        wait_for_pending(&pending, "r-1").await;
+        assert_eq!(sem.available_permits(), 1);
+
+        // Simulate result arriving: remove from pending + return permit
+        if let Some((_, p)) = pending.remove("r-1") {
+            sem.add_permits(1);
+            match p.tx {
+                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("world"))); }
+                _ => panic!("expected Once"),
+            }
+        }
+
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result, Bytes::from("world"));
+        assert_eq!(sem.available_permits(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_late_result_does_not_inflate_permits() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(2);
+
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "r-timeout", "slow", Bytes::new()).await
+            })
+        };
+
+        wait_for_pending(&pending, "r-timeout").await;
+        assert_eq!(sem.available_permits(), 1);
+
+        // Simulate timeout: remove from pending + return permit
+        if let Some((_, p)) = pending.remove("r-timeout") {
+            sem.add_permits(1);
+            match p.tx {
+                PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
+                _ => panic!("expected Once"),
+            }
+        }
+
+        assert_eq!(sem.available_permits(), 2);
+
+        // Simulate late result: pending.remove returns None
+        let late_found = pending.remove("r-timeout");
+        assert!(late_found.is_none(), "late result should find nothing in pending");
+        // KEY ASSERTION: permit count must NOT exceed max_concurrent
+        assert_eq!(sem.available_permits(), 2, "late result must not inflate permits");
+
+        let result = handle.await.unwrap();
+        assert!(matches!(result, Err(RuneError::Timeout)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_cancel_returns_permit() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(2);
+
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "r-cancel", "slow", Bytes::new()).await
+            })
+        };
+
+        wait_for_pending(&pending, "r-cancel").await;
+        assert_eq!(sem.available_permits(), 1);
+
+        mgr.cancel(&caster_id, "r-cancel", "user requested").await.unwrap();
+        assert_eq!(sem.available_permits(), 2, "cancel must return permit");
+
+        let result = handle.await.unwrap();
+        assert!(matches!(result, Err(RuneError::ExecutionFailed { .. })));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_max_concurrent_enforced() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(1);
+
+        // First execute consumes the only permit
+        let _handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "r-1", "echo", Bytes::new()).await
+            })
+        };
+
+        wait_for_pending(&pending, "r-1").await;
+        assert_eq!(sem.available_permits(), 0);
+
+        // Second execute should fail immediately
+        let result = mgr.execute(&caster_id, "r-2", "echo", Bytes::new()).await;
+        assert!(matches!(result, Err(RuneError::Unavailable)),
+            "second request must be rejected when max_concurrent=1");
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_clears_all_pending() {
+        let (_mgr, _caster_id, _sem, pending, _rx) = setup_session(5);
+
+        // Insert 3 pending requests
+        for i in 0..3 {
+            let (tx, _rx) = oneshot::channel();
+            pending.insert(format!("r-{}", i), PendingRequest {
+                tx: PendingResponse::Once(tx),
+                created_at: Instant::now(),
+                timeout: DEFAULT_TIMEOUT,
+            });
+        }
+
+        assert_eq!(pending.len(), 3);
+
+        // Simulate disconnect cleanup
+        let keys: Vec<String> = pending.iter().map(|e| e.key().clone()).collect();
+        for req_id in keys {
+            let _ = pending.remove(&req_id);
+        }
+
+        assert!(pending.is_empty(), "all pending should be cleared after disconnect");
+    }
 }
