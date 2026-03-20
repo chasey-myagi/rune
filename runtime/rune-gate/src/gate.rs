@@ -32,6 +32,7 @@ pub struct GateState {
     pub relay: Arc<Relay>,
     pub resolver: Arc<dyn Resolver>,
     pub tasks: Arc<DashMap<String, TaskInfo>>,
+    pub session_mgr: Arc<rune_core::session::SessionManager>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -109,6 +110,7 @@ async fn delete_task(
                 }
                 _ => {
                     // running 或 pending — 执行取消
+                    state.session_mgr.cancel_by_request_id(&id, "cancelled by user").await;
                     state.tasks.insert(
                         id.clone(),
                         TaskInfo {
@@ -235,7 +237,7 @@ async fn execute_rune(
 
     // stream 模式（真正流式，通过 invoke_stream）
     if params.stream.unwrap_or(false) {
-        return stream_execute(invoker, ctx, body).await;
+        return stream_execute(state, &request_id, invoker, ctx, body).await;
     }
 
     // sync 模式（默认）
@@ -257,12 +259,16 @@ async fn sync_execute(
 }
 
 async fn stream_execute(
+    state: &GateState,
+    request_id: &str,
     invoker: Arc<dyn RuneInvoker>,
     ctx: RuneContext,
     body: Bytes,
 ) -> axum::response::Response {
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
 
+    let state_clone = state.clone();
+    let req_id = request_id.to_string();
     tokio::spawn(async move {
         match invoker.invoke_stream(ctx, body).await {
             Ok(mut stream_rx) => {
@@ -273,7 +279,9 @@ async fn stream_execute(
                                 .event("message")
                                 .data(String::from_utf8_lossy(&data).to_string());
                             if tx.send(Ok(event)).await.is_err() {
-                                break;
+                                // SSE client disconnected — cancel the request
+                                state_clone.session_mgr.cancel_by_request_id(&req_id, "SSE client disconnected").await;
+                                return;
                             }
                         }
                         Err(e) => {
@@ -320,16 +328,25 @@ async fn async_execute(
 
     let tasks = Arc::clone(&state.tasks);
     tokio::spawn(async move {
-        match invoker.invoke_once(ctx, body).await {
+        let result = invoker.invoke_once(ctx, body).await;
+
+        // Check if task was cancelled during execution — don't overwrite
+        if let Some(task) = tasks.get(&task_id) {
+            if task.status == "cancelled" {
+                return;
+            }
+        }
+
+        match result {
             Ok(output) => {
-                let result =
+                let val =
                     serde_json::from_slice(&output).unwrap_or(serde_json::Value::Null);
                 tasks.insert(
                     task_id.clone(),
                     TaskInfo {
                         task_id,
                         status: "completed".into(),
-                        result: Some(result),
+                        result: Some(val),
                         error: None,
                     },
                 );

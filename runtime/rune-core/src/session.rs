@@ -314,6 +314,20 @@ impl SessionManager {
         Ok(rx)
     }
 
+    /// Cancel a request by searching all sessions for the request_id.
+    /// Returns true if the request was found and cancelled.
+    pub async fn cancel_by_request_id(&self, request_id: &str, reason: &str) -> bool {
+        for session in self.sessions.iter() {
+            if session.pending.contains_key(request_id) {
+                let caster_id = session.key().clone();
+                drop(session); // release DashMap ref before calling cancel
+                let _ = self.cancel(&caster_id, request_id, reason).await;
+                return true;
+            }
+        }
+        false
+    }
+
     pub async fn cancel(&self, caster_id: &str, request_id: &str, reason: &str) -> Result<(), RuneError> {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
         if let Some((_, p)) = session.pending.remove(request_id) {

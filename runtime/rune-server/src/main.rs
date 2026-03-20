@@ -252,6 +252,7 @@ async fn main() -> anyhow::Result<()> {
         relay: Arc::clone(&relay),
         resolver,
         tasks: Arc::new(dashmap::DashMap::new()),
+        session_mgr: Arc::clone(&session_mgr),
     };
 
     // Flow routes as extra router, injected via Extension
