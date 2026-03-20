@@ -1,0 +1,1 @@
+"""Handler registration utilities."""
