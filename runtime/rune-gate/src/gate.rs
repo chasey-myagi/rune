@@ -411,3 +411,197 @@ fn unique_request_id() -> String {
         .as_millis() as u64;
     format!("r-{:x}-{:x}", ts, seq)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::Router;
+    use tower::ServiceExt; // for oneshot
+    use rune_core::invoker::LocalInvoker;
+    use rune_core::relay::Relay;
+    use rune_core::resolver::RoundRobinResolver;
+    use rune_core::rune::{GateConfig, RuneConfig, make_handler};
+
+    fn test_state() -> GateState {
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+
+        // Register a simple echo rune with gate_path="/echo"
+        let echo_handler = make_handler(|_ctx, input| async move { Ok(input) });
+        relay
+            .register(
+                RuneConfig {
+                    name: "echo".into(),
+                    version: "1.0.0".into(),
+                    description: "test echo".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/echo".into(),
+                        method: "POST".into(),
+                    }),
+                },
+                Arc::new(LocalInvoker::new(echo_handler)),
+                None,
+            )
+            .unwrap();
+
+        // Register a rune WITHOUT gate_path
+        let internal_handler = make_handler(|_ctx, input| async move { Ok(input) });
+        relay
+            .register(
+                RuneConfig {
+                    name: "internal".into(),
+                    version: "1.0.0".into(),
+                    description: "no gate".into(),
+                    supports_stream: false,
+                    gate: None,
+                },
+                Arc::new(LocalInvoker::new(internal_handler)),
+                None,
+            )
+            .unwrap();
+
+        GateState {
+            relay,
+            resolver,
+            tasks: Arc::new(DashMap::new()),
+            session_mgr: Arc::new(rune_core::session::SessionManager::new()),
+        }
+    }
+
+    fn test_router() -> Router {
+        build_router(test_state(), None)
+    }
+
+    #[tokio::test]
+    async fn test_gate_path_sync() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"msg":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["msg"], "hello");
+    }
+
+    #[tokio::test]
+    async fn test_debug_route_sync() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/echo/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"test":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_unknown_rune_404() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_no_gate_path_not_exposed() {
+        let app = test_router();
+        // "internal" has no gate_path — should not be accessible via /internal
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_async_returns_task_id() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo?async=true")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"x":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["task_id"].is_string());
+        assert_eq!(json["status"], "running");
+    }
+
+    #[tokio::test]
+    async fn test_health() {
+        let app = test_router();
+        let response = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_list_runes() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/runes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["runes"].is_array());
+    }
+}
