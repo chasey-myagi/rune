@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import json
 import logging
+import threading
 import time
 from typing import Callable, Awaitable
 
@@ -45,6 +46,7 @@ class Caster:
         self._heartbeat_interval = heartbeat_interval
         self._labels = labels or {}
         self._api_key = api_key
+        self._shutdown = threading.Event()
 
     # ------------------------------------------------------------------
     # Decorator API
@@ -126,21 +128,35 @@ class Caster:
         """Start the caster (blocking). Runs asyncio event loop with auto-reconnect."""
         asyncio.run(self._run_with_reconnect())
 
+    def stop(self) -> None:
+        """Signal the caster to stop its run loop.
+
+        Safe to call from any thread.  The ``run()`` method will return
+        shortly after this is called.
+        """
+        self._shutdown.set()
+
     async def _run_with_reconnect(self) -> None:
         """Reconnect loop with exponential backoff."""
         delay = self._reconnect_base_delay
-        while True:
+        while not self._shutdown.is_set():
             try:
                 await self._session()
                 # Session ended normally (detach) -- don't reconnect
                 logger.info("session ended normally")
                 break
             except grpc.aio.AioRpcError as e:
+                if self._shutdown.is_set():
+                    break
                 logger.warning("gRPC error: %s, reconnecting in %.1fs", e.code(), delay)
             except Exception as e:
+                if self._shutdown.is_set():
+                    break
                 logger.warning("session error: %s, reconnecting in %.1fs", e, delay)
 
-            await asyncio.sleep(delay)
+            # Wait for delay or shutdown, whichever comes first
+            if self._shutdown.wait(timeout=delay):
+                break  # shutdown requested
             delay = min(delay * 2, self._reconnect_max_delay)
             logger.info("reconnecting to %s ...", self._addr)
 
@@ -198,8 +214,19 @@ class Caster:
             # Start heartbeat task
             hb_task = asyncio.create_task(self._heartbeat_loop(outbound_queue))
 
+            # Monitor shutdown event to cancel the gRPC call
+            async def _watch_shutdown():
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._shutdown.wait)
+                call.cancel()
+
+            shutdown_task = asyncio.create_task(_watch_shutdown())
+
             try:
                 async for msg in call:
+                    if self._shutdown.is_set():
+                        break
+
                     payload = msg.WhichOneof("payload")
 
                     if payload == "attach_ack":
@@ -225,6 +252,7 @@ class Caster:
                         pass  # server heartbeat received
 
             finally:
+                shutdown_task.cancel()
                 hb_task.cancel()
                 await outbound_queue.put(None)  # stop outbound iter
 
