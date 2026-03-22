@@ -51,6 +51,31 @@ describe('Caster constructor', () => {
   });
 });
 
+describe('Caster caster_id security', () => {
+  it('should not use API key as casterId', () => {
+    const caster = new Caster({ key: 'secret-api-key-123' });
+    expect(caster.casterId).not.toBe('secret-api-key-123');
+  });
+
+  it('should auto-generate a casterId when not provided', () => {
+    const caster = new Caster({ key: 'rk_abc' });
+    expect(caster.casterId).toBeDefined();
+    expect(typeof caster.casterId).toBe('string');
+    expect(caster.casterId.length).toBeGreaterThan(0);
+  });
+
+  it('should use provided casterId option', () => {
+    const caster = new Caster({ key: 'rk_abc', casterId: 'my-caster-01' });
+    expect(caster.casterId).toBe('my-caster-01');
+  });
+
+  it('should generate different casterIds for different instances', () => {
+    const a = new Caster({ key: 'rk_abc' });
+    const b = new Caster({ key: 'rk_abc' });
+    expect(a.casterId).not.toBe(b.casterId);
+  });
+});
+
 describe('Caster.rune()', () => {
   it('registers a handler for a named rune', () => {
     const caster = new Caster({ key: 'rk_abc' });

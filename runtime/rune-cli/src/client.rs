@@ -20,6 +20,38 @@ impl RuneClient {
         }
     }
 
+    /// Build a URL path by replacing `{key}` placeholders with percent-encoded values.
+    ///
+    /// This prevents path traversal attacks from user-supplied path segments.
+    pub fn build_path(&self, template: &str, params: &[(&str, &str)]) -> String {
+        let mut path = template.to_string();
+        for (key, value) in params {
+            let placeholder = format!("{{{}}}", key);
+            path = path.replace(&placeholder, &urlencoding::encode(value));
+        }
+        path
+    }
+
+    /// Build a URL path with query parameters. Both path segments and query values
+    /// are percent-encoded.
+    pub fn build_path_with_query(
+        &self,
+        template: &str,
+        path_params: &[(&str, &str)],
+        query_params: &[(&str, &str)],
+    ) -> String {
+        let mut path = self.build_path(template, path_params);
+        if !query_params.is_empty() {
+            let qs: Vec<String> = query_params
+                .iter()
+                .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+                .collect();
+            path.push('?');
+            path.push_str(&qs.join("&"));
+        }
+        path
+    }
+
     /// Build a request with optional Authorization header.
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", self.base_url, path);
@@ -99,22 +131,22 @@ impl RuneClient {
 
     /// POST /api/v1/runes/:name/run
     pub async fn call_rune(&self, name: &str, input: Option<&str>) -> Result<Value> {
+        let path = self.build_path("/api/v1/runes/{name}/run", &[("name", name)]);
         let req = self
-            .request(
-                reqwest::Method::POST,
-                &format!("/api/v1/runes/{}/run", name),
-            )
+            .request(reqwest::Method::POST, &path)
             .json(&Self::parse_input(input));
         self.send_json(req).await
     }
 
     /// POST /api/v1/runes/:name/run?stream=true — prints SSE events to stdout
     pub async fn call_rune_stream(&self, name: &str, input: Option<&str>) -> Result<String> {
+        let path = self.build_path_with_query(
+            "/api/v1/runes/{name}/run",
+            &[("name", name)],
+            &[("stream", "true")],
+        );
         let resp = self
-            .request(
-                reqwest::Method::POST,
-                &format!("/api/v1/runes/{}/run?stream=true", name),
-            )
+            .request(reqwest::Method::POST, &path)
             .json(&Self::parse_input(input))
             .send()
             .await
@@ -158,18 +190,21 @@ impl RuneClient {
 
     /// POST /api/v1/runes/:name/run?async=true
     pub async fn call_rune_async(&self, name: &str, input: Option<&str>) -> Result<Value> {
+        let path = self.build_path_with_query(
+            "/api/v1/runes/{name}/run",
+            &[("name", name)],
+            &[("async", "true")],
+        );
         let req = self
-            .request(
-                reqwest::Method::POST,
-                &format!("/api/v1/runes/{}/run?async=true", name),
-            )
+            .request(reqwest::Method::POST, &path)
             .json(&Self::parse_input(input));
         self.send_json(req).await
     }
 
     /// GET /api/v1/tasks/:id
     pub async fn get_task(&self, id: &str) -> Result<Value> {
-        let req = self.request(reqwest::Method::GET, &format!("/api/v1/tasks/{}", id));
+        let path = self.build_path("/api/v1/tasks/{id}", &[("id", id)]);
+        let req = self.request(reqwest::Method::GET, &path);
         self.send_json(req).await
     }
 
@@ -191,7 +226,8 @@ impl RuneClient {
 
     /// DELETE /api/v1/keys/:id
     pub async fn revoke_key(&self, id: &str) -> Result<Value> {
-        let req = self.request(reqwest::Method::DELETE, &format!("/api/v1/keys/{}", id));
+        let path = self.build_path("/api/v1/keys/{id}", &[("id", id)]);
+        let req = self.request(reqwest::Method::DELETE, &path);
         self.send_json(req).await
     }
 
@@ -213,21 +249,17 @@ impl RuneClient {
 
     /// POST /api/v1/flows/:name/run
     pub async fn run_flow(&self, name: &str, input: Option<&str>) -> Result<Value> {
+        let path = self.build_path("/api/v1/flows/{name}/run", &[("name", name)]);
         let req = self
-            .request(
-                reqwest::Method::POST,
-                &format!("/api/v1/flows/{}/run", name),
-            )
+            .request(reqwest::Method::POST, &path)
             .json(&Self::parse_input(input));
         self.send_json(req).await
     }
 
     /// DELETE /api/v1/flows/:name
     pub async fn delete_flow(&self, name: &str) -> Result<Value> {
-        let req = self.request(
-            reqwest::Method::DELETE,
-            &format!("/api/v1/flows/{}", name),
-        );
+        let path = self.build_path("/api/v1/flows/{name}", &[("name", name)]);
+        let req = self.request(reqwest::Method::DELETE, &path);
         self.send_json(req).await
     }
 
@@ -235,10 +267,12 @@ impl RuneClient {
 
     /// GET /api/v1/logs
     pub async fn get_logs(&self, rune: Option<&str>, limit: u32) -> Result<Value> {
-        let mut path = format!("/api/v1/logs?limit={}", limit);
+        let limit_str = limit.to_string();
+        let mut query_params: Vec<(&str, &str)> = vec![("limit", &limit_str)];
         if let Some(rune_name) = rune {
-            path.push_str(&format!("&rune={}", rune_name));
+            query_params.push(("rune", rune_name));
         }
+        let path = self.build_path_with_query("/api/v1/logs", &[], &query_params);
         let req = self.request(reqwest::Method::GET, &path);
         self.send_json(req).await
     }

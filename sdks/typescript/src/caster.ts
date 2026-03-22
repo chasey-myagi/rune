@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as crypto from 'crypto';
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import type { CasterOptions, RuneConfig, RuneContext, ReconnectOptions, FileAttachment } from './types.js';
@@ -79,6 +80,7 @@ function loadProto(): {
 export class Caster {
   readonly runtime: string;
   readonly key: string;
+  readonly casterId: string;
   readonly heartbeatIntervalMs: number;
   readonly maxConcurrent: number;
   readonly labels: Record<string, string>;
@@ -91,6 +93,7 @@ export class Caster {
   constructor(options: CasterOptions) {
     this.runtime = options.runtime ?? DEFAULT_RUNTIME;
     this.key = options.key;
+    this.casterId = options.casterId ?? crypto.randomUUID();
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS;
     this.maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
     this.labels = options.labels ?? {};
@@ -202,7 +205,7 @@ export class Caster {
     const declarations = this._buildDeclarations();
     stream.write({
       attach: {
-        caster_id: this.key,
+        caster_id: this.casterId,
         runes: declarations,
         labels: this.labels,
         max_concurrent: this.maxConcurrent,

@@ -37,8 +37,39 @@ pub fn remove_pid_file() -> Result<()> {
     Ok(())
 }
 
+/// Send a signal to a process, with PID validation.
+///
+/// Rejects PID 0 (which would signal the entire process group) and ensures
+/// the PID is positive before calling libc::kill.
+pub fn send_signal(pid: u32, sig: i32) -> Result<()> {
+    if pid == 0 {
+        anyhow::bail!("invalid PID: 0 would signal the entire process group");
+    }
+    #[cfg(unix)]
+    {
+        let ret = unsafe { libc::kill(pid as i32, sig) };
+        if ret != 0 {
+            anyhow::bail!(
+                "kill({}, {}) failed: {}",
+                pid,
+                sig,
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, sig);
+        anyhow::bail!("send_signal is not supported on this platform")
+    }
+}
+
 /// Check whether a process with the given PID is still alive.
 pub fn is_process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
     // On Unix, signal 0 checks existence without actually sending a signal.
     #[cfg(unix)]
     {

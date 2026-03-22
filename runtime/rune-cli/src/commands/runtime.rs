@@ -41,12 +41,7 @@ pub async fn stop() -> Result<()> {
 
             println!("Stopping Runtime (PID {})...", pid);
 
-            #[cfg(unix)]
-            {
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
-                }
-            }
+            daemon::send_signal(pid, libc::SIGTERM)?;
 
             daemon::remove_pid_file()?;
             println!("Runtime stopped.");
