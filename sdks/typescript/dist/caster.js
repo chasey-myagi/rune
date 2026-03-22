@@ -1,0 +1,390 @@
+import * as path from 'path';
+import * as grpc from '@grpc/grpc-js';
+import * as protoLoader from '@grpc/proto-loader';
+import { StreamSender } from './stream.js';
+/** Default gRPC endpoint */
+const DEFAULT_RUNTIME = 'localhost:50070';
+/** Default heartbeat interval in ms */
+const DEFAULT_HEARTBEAT_MS = 10000;
+/** Default max concurrent requests */
+const DEFAULT_MAX_CONCURRENT = 10;
+/** Default reconnection settings */
+const DEFAULT_RECONNECT = {
+    enabled: true,
+    initialDelayMs: 1000,
+    maxDelayMs: 30000,
+    backoffMultiplier: 2,
+};
+// ---------------------------------------------------------------------------
+// Proto loading helpers
+// ---------------------------------------------------------------------------
+const PROTO_PATH = path.resolve(
+// __dirname points to src/ (dev) or dist/ (built) — go up to package root
+// then navigate to the proto file relative to the repo root
+// The SDK lives at: sdks/typescript/
+// The proto lives at: proto/rune/wire/v1/rune.proto
+path.dirname(new URL(import.meta.url).pathname), '../../../../proto/rune/wire/v1/rune.proto');
+function loadProto() {
+    const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
+        keepCase: true,
+        longs: String,
+        enums: String,
+        defaults: true,
+        oneofs: true,
+    });
+    const proto = grpc.loadPackageDefinition(packageDefinition);
+    const v1 = proto.rune.wire.v1;
+    return {
+        RuneServiceClient: v1.RuneService,
+        SessionMessage: v1.SessionMessage,
+    };
+}
+// ---------------------------------------------------------------------------
+// Caster
+// ---------------------------------------------------------------------------
+/**
+ * Caster connects to a Rune Runtime and registers Rune handlers.
+ *
+ * @example
+ * ```typescript
+ * const caster = new Caster({ key: "rk_xxx" });
+ *
+ * caster.rune({ name: "greet" }, async (ctx, input) => {
+ *   return { message: `Hello, ${(input as any).name}!` };
+ * });
+ *
+ * await caster.run();
+ * ```
+ */
+export class Caster {
+    runtime;
+    key;
+    heartbeatIntervalMs;
+    maxConcurrent;
+    labels;
+    reconnect;
+    _runes = new Map();
+    _stopped = false;
+    _abortControllers = new Map();
+    constructor(options) {
+        this.runtime = options.runtime ?? DEFAULT_RUNTIME;
+        this.key = options.key;
+        this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS;
+        this.maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+        this.labels = options.labels ?? {};
+        this.reconnect = {
+            ...DEFAULT_RECONNECT,
+            ...options.reconnect,
+        };
+    }
+    /**
+     * Register a unary Rune handler.
+     * @throws Error if a Rune with the same name is already registered
+     */
+    rune(config, handler) {
+        if (this._runes.has(config.name)) {
+            throw new Error(`Rune "${config.name}" is already registered`);
+        }
+        this._runes.set(config.name, { config, handler, isStream: false });
+    }
+    /**
+     * Register a streaming Rune handler.
+     * @throws Error if a Rune with the same name is already registered
+     */
+    streamRune(config, handler) {
+        if (this._runes.has(config.name)) {
+            throw new Error(`Rune "${config.name}" is already registered`);
+        }
+        this._runes.set(config.name, {
+            config: { ...config, supportsStream: true },
+            handler,
+            isStream: true,
+        });
+    }
+    /**
+     * Returns the number of registered Runes.
+     */
+    get runeCount() {
+        return this._runes.size;
+    }
+    /**
+     * Returns the config of a registered Rune by name, or undefined.
+     */
+    getRuneConfig(name) {
+        return this._runes.get(name)?.config;
+    }
+    /**
+     * Check if a rune is registered as a stream handler.
+     */
+    isStreamRune(name) {
+        return this._runes.get(name)?.isStream ?? false;
+    }
+    /**
+     * Stop the Caster. Current session will end and no reconnection will happen.
+     */
+    stop() {
+        this._stopped = true;
+    }
+    // -----------------------------------------------------------------------
+    // Run — public entry point
+    // -----------------------------------------------------------------------
+    /**
+     * Start the Caster: connect to Runtime, send Attach, and begin handling requests.
+     * Returns a Promise that resolves when the Caster is shut down.
+     *
+     * Auto-reconnects with exponential backoff on errors (unless reconnect.enabled is false).
+     */
+    async run() {
+        this._stopped = false;
+        let delay = this.reconnect.initialDelayMs;
+        while (!this._stopped) {
+            try {
+                await this._connectAndRun();
+                // Session ended normally — don't reconnect
+                break;
+            }
+            catch (err) {
+                if (!this.reconnect.enabled || this._stopped) {
+                    throw err;
+                }
+                // Exponential backoff
+                await this._sleep(delay);
+                delay = Math.min(delay * this.reconnect.backoffMultiplier, this.reconnect.maxDelayMs);
+            }
+        }
+    }
+    // -----------------------------------------------------------------------
+    // gRPC session
+    // -----------------------------------------------------------------------
+    async _connectAndRun() {
+        const { RuneServiceClient } = loadProto();
+        // Establish gRPC channel with API key metadata
+        const credentials = grpc.credentials.createInsecure();
+        const client = new RuneServiceClient(this.runtime, credentials);
+        // Open bidirectional stream
+        const stream = client.Session();
+        // Build and send CasterAttach
+        const declarations = this._buildDeclarations();
+        stream.write({
+            attach: {
+                caster_id: this.key,
+                runes: declarations,
+                labels: this.labels,
+                max_concurrent: this.maxConcurrent,
+            },
+        });
+        // Heartbeat timer
+        const heartbeatTimer = setInterval(() => {
+            if (!this._stopped) {
+                stream.write({
+                    heartbeat: {
+                        timestamp_ms: String(Date.now()),
+                    },
+                });
+            }
+        }, this.heartbeatIntervalMs);
+        return new Promise((resolve, reject) => {
+            stream.on('data', (msg) => {
+                const payload = msg.payload;
+                if (payload === 'attach_ack') {
+                    const ack = msg.attach_ack;
+                    if (!ack.accepted) {
+                        clearInterval(heartbeatTimer);
+                        stream.end();
+                        reject(new Error(`Attach rejected: ${ack.reason}`));
+                    }
+                    // else: attached successfully, continue
+                }
+                else if (payload === 'execute') {
+                    this._handleExecute(msg.execute, stream);
+                }
+                else if (payload === 'cancel') {
+                    this._handleCancel(msg.cancel);
+                }
+                else if (payload === 'heartbeat') {
+                    // Server heartbeat — acknowledged silently
+                }
+            });
+            stream.on('error', (err) => {
+                clearInterval(heartbeatTimer);
+                reject(err);
+            });
+            stream.on('end', () => {
+                clearInterval(heartbeatTimer);
+                resolve();
+            });
+        });
+    }
+    // -----------------------------------------------------------------------
+    // Declaration builder
+    // -----------------------------------------------------------------------
+    _buildDeclarations() {
+        const declarations = [];
+        for (const registered of this._runes.values()) {
+            const cfg = registered.config;
+            const decl = {
+                name: cfg.name,
+                version: cfg.version ?? '0.0.0',
+                description: cfg.description ?? '',
+                supports_stream: cfg.supportsStream ?? false,
+                priority: cfg.priority ?? 0,
+            };
+            if (cfg.inputSchema) {
+                decl.input_schema = JSON.stringify(cfg.inputSchema);
+            }
+            if (cfg.outputSchema) {
+                decl.output_schema = JSON.stringify(cfg.outputSchema);
+            }
+            if (cfg.gate) {
+                decl.gate = {
+                    path: cfg.gate.path,
+                    method: cfg.gate.method ?? 'POST',
+                };
+            }
+            declarations.push(decl);
+        }
+        return declarations;
+    }
+    // -----------------------------------------------------------------------
+    // Execute dispatch
+    // -----------------------------------------------------------------------
+    _handleExecute(req, stream) {
+        const registered = this._runes.get(req.rune_name);
+        if (!registered) {
+            stream.write({
+                result: {
+                    request_id: req.request_id,
+                    status: 'STATUS_FAILED',
+                    error: {
+                        code: 'NOT_FOUND',
+                        message: `rune '${req.rune_name}' not found`,
+                    },
+                },
+            });
+            return;
+        }
+        // AbortController for cancellation
+        const ac = new AbortController();
+        this._abortControllers.set(req.request_id, ac);
+        // Build context
+        const attachments = (req.attachments ?? []).map((a) => ({
+            filename: a.filename,
+            data: Buffer.from(a.data),
+            mimeType: a.mime_type,
+        }));
+        const ctx = {
+            runeName: req.rune_name,
+            requestId: req.request_id,
+            context: req.context ?? {},
+            signal: ac.signal,
+            ...(attachments.length > 0 ? { attachments } : {}),
+        };
+        // Parse input
+        let input;
+        try {
+            const inputBytes = req.input;
+            if (inputBytes && inputBytes.length > 0) {
+                input = JSON.parse(inputBytes.toString('utf-8'));
+            }
+        }
+        catch {
+            input = req.input;
+        }
+        if (registered.isStream) {
+            this._executeStream(registered, ctx, req, stream, input).finally(() => {
+                this._abortControllers.delete(req.request_id);
+            });
+        }
+        else {
+            this._executeOnce(registered, ctx, req, stream, input).finally(() => {
+                this._abortControllers.delete(req.request_id);
+            });
+        }
+    }
+    async _executeOnce(registered, ctx, req, stream, input) {
+        try {
+            const handler = registered.handler;
+            const output = await handler(ctx, input);
+            // If cancelled during execution, discard result
+            if (ctx.signal.aborted) {
+                return;
+            }
+            // Serialize output
+            const outputBuf = output instanceof Buffer
+                ? output
+                : typeof output === 'string'
+                    ? Buffer.from(output)
+                    : Buffer.from(JSON.stringify(output));
+            stream.write({
+                result: {
+                    request_id: req.request_id,
+                    status: 'STATUS_COMPLETED',
+                    output: outputBuf,
+                },
+            });
+        }
+        catch (err) {
+            stream.write({
+                result: {
+                    request_id: req.request_id,
+                    status: 'STATUS_FAILED',
+                    error: {
+                        code: 'EXECUTION_FAILED',
+                        message: String(err?.message ?? err),
+                    },
+                },
+            });
+        }
+    }
+    async _executeStream(registered, ctx, req, grpcStream, input) {
+        const sender = new StreamSender();
+        // Attach the real send function
+        sender._attach((data) => {
+            grpcStream.write({
+                stream_event: {
+                    request_id: req.request_id,
+                    data,
+                },
+            });
+        });
+        try {
+            const handler = registered.handler;
+            await handler(ctx, input, sender);
+            // Send StreamEnd on completion
+            grpcStream.write({
+                stream_end: {
+                    request_id: req.request_id,
+                    status: 'STATUS_COMPLETED',
+                },
+            });
+        }
+        catch (err) {
+            grpcStream.write({
+                stream_end: {
+                    request_id: req.request_id,
+                    status: 'STATUS_FAILED',
+                    error: {
+                        code: 'EXECUTION_FAILED',
+                        message: String(err?.message ?? err),
+                    },
+                },
+            });
+        }
+    }
+    // -----------------------------------------------------------------------
+    // Cancel
+    // -----------------------------------------------------------------------
+    _handleCancel(cancel) {
+        const ac = this._abortControllers.get(cancel.request_id);
+        if (ac) {
+            ac.abort(cancel.reason ?? 'cancelled');
+        }
+    }
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+    _sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+}
+//# sourceMappingURL=caster.js.map

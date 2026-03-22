@@ -14,6 +14,17 @@ class RuneConfig:
     supports_stream: bool = False
     gate: str | None = None  # gate path, e.g. "/translate"
     gate_method: str = "POST"
+    input_schema: dict | None = None   # JSON Schema for input validation
+    output_schema: dict | None = None  # JSON Schema for output validation
+    priority: int = 0                  # Caster priority (higher wins)
+
+
+@dataclass
+class FileAttachment:
+    """File attachment for ExecuteRequest / ExecuteResult."""
+    filename: str
+    data: bytes
+    mime_type: str
 
 
 @dataclass

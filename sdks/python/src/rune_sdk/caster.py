@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import logging
 import time
 from typing import Callable, Awaitable
 
 import grpc
 
-from .types import RuneConfig, RuneContext
+from .types import RuneConfig, RuneContext, FileAttachment
 from .stream import StreamSender
 from .handler import RegisteredRune, OnceHandler
 
@@ -48,6 +50,9 @@ class Caster:
         description: str = "",
         gate: str | None = None,
         gate_method: str = "POST",
+        input_schema: dict | None = None,
+        output_schema: dict | None = None,
+        priority: int = 0,
     ) -> Callable:
         """Decorator to register a unary rune handler."""
 
@@ -59,8 +64,14 @@ class Caster:
                 supports_stream=False,
                 gate=gate,
                 gate_method=gate_method,
+                input_schema=input_schema,
+                output_schema=output_schema,
+                priority=priority,
             )
-            self._runes[name] = RegisteredRune(config=config, handler=fn, is_stream=False)
+            accepts_files = _handler_accepts_files(fn)
+            self._runes[name] = RegisteredRune(
+                config=config, handler=fn, is_stream=False, accepts_files=accepts_files,
+            )
             return fn
 
         return decorator
@@ -73,6 +84,9 @@ class Caster:
         description: str = "",
         gate: str | None = None,
         gate_method: str = "POST",
+        input_schema: dict | None = None,
+        output_schema: dict | None = None,
+        priority: int = 0,
     ) -> Callable:
         """Decorator to register a streaming rune handler."""
 
@@ -84,8 +98,14 @@ class Caster:
                 supports_stream=True,
                 gate=gate,
                 gate_method=gate_method,
+                input_schema=input_schema,
+                output_schema=output_schema,
+                priority=priority,
             )
-            self._runes[name] = RegisteredRune(config=config, handler=fn, is_stream=True)
+            accepts_files = _handler_accepts_files(fn)
+            self._runes[name] = RegisteredRune(
+                config=config, handler=fn, is_stream=True, accepts_files=accepts_files,
+            )
             return fn
 
         return decorator
@@ -145,6 +165,9 @@ class Caster:
                     version=registered.config.version,
                     description=registered.config.description,
                     supports_stream=registered.config.supports_stream,
+                    input_schema=json.dumps(registered.config.input_schema) if registered.config.input_schema else "",
+                    output_schema=json.dumps(registered.config.output_schema) if registered.config.output_schema else "",
+                    priority=registered.config.priority,
                 )
                 if registered.config.gate:
                     decl.gate.CopyFrom(
@@ -275,7 +298,11 @@ class Caster:
         outbound_queue: asyncio.Queue,
     ) -> None:
         """Execute unary handler."""
-        output = await registered.handler(ctx, bytes(req.input))
+        if registered.accepts_files:
+            attachments = _extract_attachments(req)
+            output = await registered.handler(ctx, bytes(req.input), attachments)
+        else:
+            output = await registered.handler(ctx, bytes(req.input))
 
         # Check if cancelled during execution
         if req.request_id in self._cancelled:
@@ -315,7 +342,11 @@ class Caster:
             )
 
         sender = StreamSender(send_event)
-        await registered.handler(ctx, bytes(req.input), sender)
+        if registered.accepts_files:
+            attachments = _extract_attachments(req)
+            await registered.handler(ctx, bytes(req.input), attachments, sender)
+        else:
+            await registered.handler(ctx, bytes(req.input), sender)
 
         # Send StreamEnd
         await outbound_queue.put(
@@ -326,3 +357,34 @@ class Caster:
                 )
             )
         )
+
+
+# ------------------------------------------------------------------
+# Helpers (module-level)
+# ------------------------------------------------------------------
+
+
+def _handler_accepts_files(fn: Callable) -> bool:
+    """Check if handler function has a 'files' parameter (3rd arg for once, 3rd for stream)."""
+    sig = inspect.signature(fn)
+    params = list(sig.parameters.keys())
+    # Once handler: (ctx, input) or (ctx, input, files)
+    # Stream handler: (ctx, input, stream) or (ctx, input, files, stream)
+    # If there are >= 3 params, check the 3rd param name
+    if len(params) >= 3:
+        third = params[2]
+        if third == "files":
+            return True
+    return False
+
+
+def _extract_attachments(req: rune_pb2.ExecuteRequest) -> list[FileAttachment]:
+    """Convert proto attachments to FileAttachment dataclass list."""
+    return [
+        FileAttachment(
+            filename=att.filename,
+            data=bytes(att.data),
+            mime_type=att.mime_type,
+        )
+        for att in req.attachments
+    ]

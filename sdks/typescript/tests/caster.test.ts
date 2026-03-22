@@ -159,16 +159,16 @@ describe('Caster.streamRune()', () => {
 
 describe('Caster.run()', () => {
   it('returns a Promise', () => {
-    const caster = new Caster({ key: 'rk_abc' });
+    const caster = new Caster({ key: 'rk_abc', reconnect: { enabled: false } });
     const result = caster.run();
     expect(result).toBeInstanceOf(Promise);
-    // Catch the rejection since it throws 'not implemented'
+    // Catch the rejection since no server is available
     result.catch(() => {});
   });
 
-  it('rejects with not implemented (stub)', async () => {
-    const caster = new Caster({ key: 'rk_abc' });
-    await expect(caster.run()).rejects.toThrow('not implemented');
+  it('rejects when no server is available (reconnect disabled)', async () => {
+    const caster = new Caster({ key: 'rk_abc', reconnect: { enabled: false } });
+    await expect(caster.run()).rejects.toThrow();
   });
 });
 

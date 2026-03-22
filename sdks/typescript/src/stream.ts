@@ -11,13 +11,14 @@
 export class StreamSender {
   private _ended = false;
   private _eventCount = 0;
+  private _sendFn: ((data: Buffer) => void) | null = null;
 
   /**
    * @internal
    * Constructed by the Caster — not for public use.
    */
   constructor() {
-    // Will receive gRPC stream reference once implemented
+    // Will receive gRPC stream reference via _attach()
   }
 
   /**
@@ -35,6 +36,14 @@ export class StreamSender {
   }
 
   /**
+   * @internal
+   * Attach the underlying send function. Called by Caster before dispatching to handler.
+   */
+  _attach(sendFn: (data: Buffer) => void): void {
+    this._sendFn = sendFn;
+  }
+
+  /**
    * Emit a data chunk to the stream.
    * @throws Error if the stream has already ended
    */
@@ -43,8 +52,18 @@ export class StreamSender {
       throw new Error('Cannot emit after stream has ended');
     }
     this._eventCount++;
-    // TODO: serialize data and send via gRPC StreamEvent
-    throw new Error('not implemented');
+
+    if (!this._sendFn) {
+      throw new Error('not implemented');
+    }
+
+    const buf =
+      typeof data === 'string'
+        ? Buffer.from(data)
+        : Buffer.isBuffer(data)
+          ? data
+          : Buffer.from(JSON.stringify(data));
+    this._sendFn(buf);
   }
 
   /**
@@ -56,7 +75,9 @@ export class StreamSender {
       throw new Error('Stream already ended');
     }
     this._ended = true;
-    // TODO: send gRPC StreamEnd message
-    throw new Error('not implemented');
+
+    if (!this._sendFn) {
+      throw new Error('not implemented');
+    }
   }
 }

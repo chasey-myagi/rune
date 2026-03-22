@@ -1,10 +1,13 @@
-use anyhow::Result;
-use serde_json::Value;
+use anyhow::{Context, Result};
+use futures::StreamExt;
+use reqwest::Client;
+use serde_json::{json, Value};
 
 /// HTTP client for communicating with the Rune Runtime API.
 pub struct RuneClient {
     pub base_url: String,
     pub api_key: Option<String>,
+    http: Client,
 }
 
 impl RuneClient {
@@ -13,81 +16,236 @@ impl RuneClient {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.map(|s| s.to_string()),
+            http: Client::new(),
         }
     }
 
-    /// GET /status
+    /// Build a request with optional Authorization header.
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let url = format!("{}{}", self.base_url, path);
+        let mut req = self.http.request(method, &url);
+        if let Some(ref key) = self.api_key {
+            req = req.bearer_auth(key);
+        }
+        req
+    }
+
+    /// Parse an input string as JSON, or wrap it in `{"input": ...}`.
+    fn parse_input(input: Option<&str>) -> Value {
+        match input {
+            Some(s) => serde_json::from_str(s).unwrap_or_else(|_| json!({ "input": s })),
+            None => json!({}),
+        }
+    }
+
+    /// Send a request and parse the JSON response. Provides clear error messages
+    /// for both connection failures and non-2xx responses.
+    async fn send_json(&self, req: reqwest::RequestBuilder) -> Result<Value> {
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("Failed to connect to Runtime at {}", self.base_url))?;
+
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .with_context(|| format!("Failed to read response from {}", self.base_url))?;
+
+        let body: Value = serde_json::from_str(&text).with_context(|| {
+            if text.is_empty() {
+                format!(
+                    "Runtime at {} returned empty response (HTTP {})",
+                    self.base_url, status
+                )
+            } else {
+                format!(
+                    "Runtime at {} returned non-JSON response (HTTP {}): {}",
+                    self.base_url,
+                    status,
+                    &text[..text.len().min(200)]
+                )
+            }
+        })?;
+
+        if !status.is_success() {
+            anyhow::bail!("Server returned {}: {}", status, body);
+        }
+
+        Ok(body)
+    }
+
+    // ── Status ──────────────────────────────────────────────────────────
+
+    /// GET /api/v1/status
     pub async fn status(&self) -> Result<Value> {
-        todo!()
+        let req = self.request(reqwest::Method::GET, "/api/v1/status");
+        self.send_json(req).await
     }
 
-    /// GET /runes
+    /// GET /health
+    pub async fn health(&self) -> Result<Value> {
+        let req = self.request(reqwest::Method::GET, "/health");
+        self.send_json(req).await
+    }
+
+    // ── Rune ────────────────────────────────────────────────────────────
+
+    /// GET /api/v1/runes
     pub async fn list_runes(&self) -> Result<Value> {
-        todo!()
+        let req = self.request(reqwest::Method::GET, "/api/v1/runes");
+        self.send_json(req).await
     }
 
-    /// POST /runes/:name/call
-    pub async fn call_rune(&self, _name: &str, _input: Option<&str>) -> Result<Value> {
-        todo!()
+    /// POST /api/v1/runes/:name/run
+    pub async fn call_rune(&self, name: &str, input: Option<&str>) -> Result<Value> {
+        let req = self
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/v1/runes/{}/run", name),
+            )
+            .json(&Self::parse_input(input));
+        self.send_json(req).await
     }
 
-    /// POST /runes/:name/call (streaming)
-    pub async fn call_rune_stream(&self, _name: &str, _input: Option<&str>) -> Result<Value> {
-        todo!()
+    /// POST /api/v1/runes/:name/run?stream=true — prints SSE events to stdout
+    pub async fn call_rune_stream(&self, name: &str, input: Option<&str>) -> Result<String> {
+        let resp = self
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/v1/runes/{}/run?stream=true", name),
+            )
+            .json(&Self::parse_input(input))
+            .send()
+            .await
+            .with_context(|| format!("Failed to connect to Runtime at {}", self.base_url))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body: Value = resp
+                .json()
+                .await
+                .unwrap_or_else(|_| json!({"error": "unknown"}));
+            anyhow::bail!("Server returned {}: {}", status, body);
+        }
+
+        // Read SSE stream: each line that starts with "data: " is an event
+        let mut output = String::new();
+        let mut stream = resp.bytes_stream();
+        let mut buffer = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("Error reading stream")?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Process complete lines
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].trim_end_matches('\r').to_string();
+                buffer = buffer[pos + 1..].to_string();
+
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        return Ok(output);
+                    }
+                    println!("{}", data);
+                    output.push_str(data);
+                    output.push('\n');
+                }
+            }
+        }
+
+        Ok(output)
     }
 
-    /// POST /runes/:name/call (async)
-    pub async fn call_rune_async(&self, _name: &str, _input: Option<&str>) -> Result<Value> {
-        todo!()
+    /// POST /api/v1/runes/:name/run?async=true
+    pub async fn call_rune_async(&self, name: &str, input: Option<&str>) -> Result<Value> {
+        let req = self
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/v1/runes/{}/run?async=true", name),
+            )
+            .json(&Self::parse_input(input));
+        self.send_json(req).await
     }
 
-    /// GET /tasks/:id
-    pub async fn get_task(&self, _id: &str) -> Result<Value> {
-        todo!()
+    /// GET /api/v1/tasks/:id
+    pub async fn get_task(&self, id: &str) -> Result<Value> {
+        let req = self.request(reqwest::Method::GET, &format!("/api/v1/tasks/{}", id));
+        self.send_json(req).await
     }
 
-    /// POST /keys
-    pub async fn create_key(&self, _key_type: &str, _label: &str) -> Result<Value> {
-        todo!()
+    // ── Key ─────────────────────────────────────────────────────────────
+
+    /// POST /api/v1/keys
+    pub async fn create_key(&self, key_type: &str, label: &str) -> Result<Value> {
+        let req = self
+            .request(reqwest::Method::POST, "/api/v1/keys")
+            .json(&json!({ "type": key_type, "label": label }));
+        self.send_json(req).await
     }
 
-    /// GET /keys
+    /// GET /api/v1/keys
     pub async fn list_keys(&self) -> Result<Value> {
-        todo!()
+        let req = self.request(reqwest::Method::GET, "/api/v1/keys");
+        self.send_json(req).await
     }
 
-    /// DELETE /keys/:id
-    pub async fn revoke_key(&self, _key_id: &str) -> Result<Value> {
-        todo!()
+    /// DELETE /api/v1/keys/:id
+    pub async fn revoke_key(&self, id: &str) -> Result<Value> {
+        let req = self.request(reqwest::Method::DELETE, &format!("/api/v1/keys/{}", id));
+        self.send_json(req).await
     }
 
-    /// POST /flows
-    pub async fn register_flow(&self, _definition: &str) -> Result<Value> {
-        todo!()
+    // ── Flow ────────────────────────────────────────────────────────────
+
+    /// POST /api/v1/flows
+    pub async fn register_flow(&self, definition: Value) -> Result<Value> {
+        let req = self
+            .request(reqwest::Method::POST, "/api/v1/flows")
+            .json(&definition);
+        self.send_json(req).await
     }
 
-    /// GET /flows
+    /// GET /api/v1/flows
     pub async fn list_flows(&self) -> Result<Value> {
-        todo!()
+        let req = self.request(reqwest::Method::GET, "/api/v1/flows");
+        self.send_json(req).await
     }
 
-    /// POST /flows/:name/run
-    pub async fn run_flow(&self, _name: &str, _input: Option<&str>) -> Result<Value> {
-        todo!()
+    /// POST /api/v1/flows/:name/run
+    pub async fn run_flow(&self, name: &str, input: Option<&str>) -> Result<Value> {
+        let req = self
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/v1/flows/{}/run", name),
+            )
+            .json(&Self::parse_input(input));
+        self.send_json(req).await
     }
 
-    /// DELETE /flows/:name
-    pub async fn delete_flow(&self, _name: &str) -> Result<Value> {
-        todo!()
+    /// DELETE /api/v1/flows/:name
+    pub async fn delete_flow(&self, name: &str) -> Result<Value> {
+        let req = self.request(
+            reqwest::Method::DELETE,
+            &format!("/api/v1/flows/{}", name),
+        );
+        self.send_json(req).await
     }
 
-    /// GET /logs
-    pub async fn get_logs(&self, _rune: Option<&str>, _limit: u32) -> Result<Value> {
-        todo!()
+    // ── Logs / Stats ────────────────────────────────────────────────────
+
+    /// GET /api/v1/logs
+    pub async fn get_logs(&self, rune: Option<&str>, limit: u32) -> Result<Value> {
+        let mut path = format!("/api/v1/logs?limit={}", limit);
+        if let Some(rune_name) = rune {
+            path.push_str(&format!("&rune={}", rune_name));
+        }
+        let req = self.request(reqwest::Method::GET, &path);
+        self.send_json(req).await
     }
 
-    /// GET /stats
+    /// GET /api/v1/stats
     pub async fn get_stats(&self) -> Result<Value> {
-        todo!()
+        let req = self.request(reqwest::Method::GET, "/api/v1/stats");
+        self.send_json(req).await
     }
 }

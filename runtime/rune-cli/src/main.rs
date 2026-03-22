@@ -150,46 +150,52 @@ pub enum ConfigCommands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Resolve base URL: --remote flag > RUNE_ADDR env > default
+    let env_addr = std::env::var("RUNE_ADDR").ok();
     let base_url = cli
         .remote
         .as_deref()
-        .unwrap_or("http://127.0.0.1:3000");
+        .or(env_addr.as_deref())
+        .unwrap_or("http://127.0.0.1:50060");
 
-    let _client = client::RuneClient::new(base_url, None);
+    // API key from RUNE_KEY env var
+    let api_key = std::env::var("RUNE_KEY").ok();
+
+    let client = client::RuneClient::new(base_url, api_key.as_deref());
 
     match cli.command {
         Commands::Start { dev, config } => {
             commands::runtime::start(dev, config.as_deref()).await
         }
         Commands::Stop => commands::runtime::stop().await,
-        Commands::Status => commands::runtime::status().await,
-        Commands::List => commands::rune::list().await,
+        Commands::Status => commands::runtime::status(&client).await,
+        Commands::List => commands::rune::list(&client).await,
         Commands::Call {
             name,
             input,
             stream,
             async_mode,
-        } => commands::rune::call(&name, input.as_deref(), stream, async_mode).await,
-        Commands::Task { id } => commands::rune::task(&id).await,
+        } => commands::rune::call(&client, &name, input.as_deref(), stream, async_mode).await,
+        Commands::Task { id } => commands::rune::task(&client, &id).await,
         Commands::Key(cmd) => match cmd {
             KeyCommands::Create { key_type, label } => {
-                commands::key::create(&key_type, &label).await
+                commands::key::create(&client, &key_type, &label).await
             }
-            KeyCommands::List => commands::key::list().await,
-            KeyCommands::Revoke { key_id } => commands::key::revoke(&key_id).await,
+            KeyCommands::List => commands::key::list(&client).await,
+            KeyCommands::Revoke { key_id } => commands::key::revoke(&client, &key_id).await,
         },
         Commands::Flow(cmd) => match cmd {
-            FlowCommands::Register { file } => commands::flow::register(&file).await,
-            FlowCommands::List => commands::flow::list().await,
+            FlowCommands::Register { file } => commands::flow::register(&client, &file).await,
+            FlowCommands::List => commands::flow::list(&client).await,
             FlowCommands::Run { name, input } => {
-                commands::flow::run(&name, input.as_deref()).await
+                commands::flow::run(&client, &name, input.as_deref()).await
             }
-            FlowCommands::Delete { name } => commands::flow::delete(&name).await,
+            FlowCommands::Delete { name } => commands::flow::delete(&client, &name).await,
         },
         Commands::Logs { rune, limit } => {
-            commands::logs::logs(rune.as_deref(), limit).await
+            commands::logs::logs(&client, rune.as_deref(), limit).await
         }
-        Commands::Stats => commands::logs::stats().await,
+        Commands::Stats => commands::logs::stats(&client).await,
         Commands::Config(cmd) => match cmd {
             ConfigCommands::Init => commands::config::init().await,
             ConfigCommands::Show => commands::config::show().await,
