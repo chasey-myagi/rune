@@ -8,7 +8,7 @@ use rune_core::auth::{KeyVerifier, NoopVerifier};
 use rune_core::config::AppConfig;
 use rune_core::grpc_service::RuneGrpcService;
 use rune_core::rune::{RuneConfig, RuneError, GateConfig, make_handler};
-use rune_flow::dsl::Flow;
+use rune_flow::dag::{FlowDefinition, StepDefinition};
 use rune_flow::engine::FlowEngine;
 use rune_gate::gate;
 use rune_store::{RuneSnapshot, RuneStore, StoreKeyVerifier, TaskStatus};
@@ -131,6 +131,10 @@ async fn run_flow(
                 rune_flow::engine::FlowError::StepFailed { .. } => {
                     StatusCode::INTERNAL_SERVER_ERROR
                 }
+                rune_flow::engine::FlowError::DagError(_) => StatusCode::BAD_REQUEST,
+                rune_flow::engine::FlowError::NoTerminalStep => {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
             };
             (
                 status,
@@ -245,14 +249,28 @@ async fn main() -> anyhow::Result<()> {
     // ── Flow Engine ──
     let mut flow_engine = FlowEngine::new(Arc::clone(&running.relay), Arc::clone(&running.resolver));
 
-    flow_engine.register(
-        Flow::new("pipeline")
-            .chain(vec!["step_a", "step_b", "step_c"])
-            .build(),
-    );
+    let _ = flow_engine.register(FlowDefinition {
+        name: "pipeline".to_string(),
+        steps: vec![
+            StepDefinition { name: "s_a".into(), rune: "step_a".into(), depends_on: vec![], condition: None, input_mapping: None },
+            StepDefinition { name: "s_b".into(), rune: "step_b".into(), depends_on: vec!["s_a".into()], condition: None, input_mapping: None },
+            StepDefinition { name: "s_c".into(), rune: "step_c".into(), depends_on: vec!["s_b".into()], condition: None, input_mapping: None },
+        ],
+        gate_path: None,
+    });
 
-    flow_engine.register(Flow::new("single").step("step_a").build());
-    flow_engine.register(Flow::new("empty").build());
+    let _ = flow_engine.register(FlowDefinition {
+        name: "single".to_string(),
+        steps: vec![
+            StepDefinition { name: "s_a".into(), rune: "step_a".into(), depends_on: vec![], condition: None, input_mapping: None },
+        ],
+        gate_path: None,
+    });
+    let _ = flow_engine.register(FlowDefinition {
+        name: "empty".to_string(),
+        steps: vec![],
+        gate_path: None,
+    });
 
     tracing::info!("registered flows: pipeline, single, empty");
 

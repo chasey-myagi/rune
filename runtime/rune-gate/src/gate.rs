@@ -5403,4 +5403,1072 @@ mod tests {
             "req-2 files should still be accessible"
         );
     }
+
+    // =======================================================================
+    // Flow Gate API tests (v0.4.0)
+    // All #[ignore] — API not yet implemented
+    // =======================================================================
+
+    /// Helper: build a valid flow JSON body for testing
+    fn simple_flow_body() -> serde_json::Value {
+        serde_json::json!({
+            "name": "doc-pipeline",
+            "steps": [
+                {"name": "extract", "rune": "echo"},
+                {"name": "analyze", "rune": "echo", "depends_on": ["extract"]},
+            ]
+        })
+    }
+
+    /// Helper: build a multi-upstream flow with input_mapping
+    fn multi_upstream_flow_body() -> serde_json::Value {
+        serde_json::json!({
+            "name": "multi-pipeline",
+            "steps": [
+                {"name": "extract", "rune": "echo"},
+                {"name": "analyze", "rune": "echo", "depends_on": ["extract"]},
+                {"name": "translate", "rune": "echo", "depends_on": ["extract"]},
+                {"name": "merge", "rune": "echo", "depends_on": ["analyze", "translate"],
+                 "input_mapping": {"analysis": "analyze.output", "translation": "translate.output"}}
+            ]
+        })
+    }
+
+    /// Helper: create a flow via POST and return the router for further requests
+    async fn create_flow_helper(state: GateState) -> Router {
+        let app = build_router(state.clone(), None);
+        let _response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(simple_flow_body().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Return a fresh router sharing the same state for subsequent requests
+        build_router(state, None)
+    }
+
+    // -------------------------------------------------------------------
+    // CRUD: POST /api/v1/flows
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_create_valid() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(simple_flow_body().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["name"], "doc-pipeline");
+        assert!(json["steps"].is_array());
+        assert_eq!(json["steps"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_create_invalid_json() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{not valid json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].is_string());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_create_dag_cycle() {
+        let app = test_router();
+        let body = serde_json::json!({
+            "name": "cyclic-flow",
+            "steps": [
+                {"name": "a", "rune": "echo", "depends_on": ["b"]},
+                {"name": "b", "rune": "echo", "depends_on": ["a"]},
+            ]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().to_lowercase().contains("cycle"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_create_duplicate_step_names() {
+        let app = test_router();
+        let body = serde_json::json!({
+            "name": "dup-steps",
+            "steps": [
+                {"name": "step1", "rune": "echo"},
+                {"name": "step1", "rune": "echo"},
+            ]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().to_lowercase().contains("duplicate"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_create_multi_upstream_no_mapping() {
+        let app = test_router();
+        let body = serde_json::json!({
+            "name": "no-mapping",
+            "steps": [
+                {"name": "a", "rune": "echo"},
+                {"name": "b", "rune": "echo"},
+                {"name": "c", "rune": "echo", "depends_on": ["a", "b"]},
+            ]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().to_lowercase().contains("input_mapping"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_create_duplicate_name_conflict() {
+        let state = test_state();
+
+        // Create first flow
+        let app = build_router(state.clone(), None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(simple_flow_body().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Create flow with same name
+        let app2 = build_router(state.clone(), None);
+        let response2 = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(simple_flow_body().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response2.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response2.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].is_string());
+    }
+
+    // -------------------------------------------------------------------
+    // CRUD: GET /api/v1/flows (list)
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_list_with_entries() {
+        let state = test_state();
+        let app = create_flow_helper(state.clone()).await;
+
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/flows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = json.as_array().unwrap();
+        assert!(!arr.is_empty());
+        // Each entry should have name and steps_count
+        let entry = &arr[0];
+        assert!(entry["name"].is_string());
+        assert!(entry["steps_count"].is_number());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_list_empty() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/flows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // CRUD: GET /api/v1/flows/:name
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_get_existing() {
+        let state = test_state();
+        let app = create_flow_helper(state.clone()).await;
+
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/flows/doc-pipeline")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["name"], "doc-pipeline");
+        assert!(json["steps"].is_array());
+        assert_eq!(json["steps"].as_array().unwrap().len(), 2);
+        // Verify step details
+        assert_eq!(json["steps"][0]["name"], "extract");
+        assert_eq!(json["steps"][0]["rune"], "echo");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_get_nonexistent() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/flows/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].is_string());
+    }
+
+    // -------------------------------------------------------------------
+    // CRUD: DELETE /api/v1/flows/:name
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_delete_existing() {
+        let state = test_state();
+        let app = create_flow_helper(state.clone()).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/flows/doc-pipeline")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_delete_nonexistent() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/flows/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].is_string());
+    }
+
+    // -------------------------------------------------------------------
+    // CRUD: lifecycle integration
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_create_then_list_contains_it() {
+        let state = test_state();
+        let app = create_flow_helper(state.clone()).await;
+
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/flows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let names: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"doc-pipeline"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_delete_then_list_excludes_it() {
+        let state = test_state();
+
+        // Create
+        let app = build_router(state.clone(), None);
+        let _resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(simple_flow_body().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Delete
+        let app2 = build_router(state.clone(), None);
+        let _resp = app2
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/flows/doc-pipeline")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // List
+        let app3 = build_router(state.clone(), None);
+        let response = app3
+            .oneshot(
+                Request::get("/api/v1/flows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let names: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["name"].as_str())
+            .collect();
+        assert!(!names.contains(&"doc-pipeline"));
+    }
+
+    // -------------------------------------------------------------------
+    // Execution: sync mode
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_run_sync_simple() {
+        let state = test_state();
+        let app = create_flow_helper(state.clone()).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/doc-pipeline/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"input":"data"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Response should include execution metadata
+        assert!(json["steps_executed"].is_array() || json["steps_executed"].is_number());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_run_nonexistent_flow() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/nonexistent/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"input":"data"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].is_string());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_run_step_failure() {
+        let state = test_state();
+
+        // Register a flow referencing a rune that fails
+        let fail_handler =
+            make_handler(|_ctx, _input| async move {
+                Err(RuneError::ExecutionFailed {
+                    code: "STEP_FAILED".into(),
+                    message: "boom".into(),
+                })
+            });
+        state
+            .relay
+            .register(
+                RuneConfig {
+                    name: "fail-rune".into(),
+                    version: "1.0.0".into(),
+                    description: "always fails".into(),
+                    supports_stream: false,
+                    gate: None,
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                },
+                Arc::new(LocalInvoker::new(fail_handler)),
+                None,
+            )
+            .unwrap();
+
+        // Create a flow that uses the failing rune
+        let flow_body = serde_json::json!({
+            "name": "fail-flow",
+            "steps": [
+                {"name": "step1", "rune": "fail-rune"},
+            ]
+        });
+        let app = build_router(state.clone(), None);
+        let _resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(flow_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Run the flow
+        let app2 = build_router(state.clone(), None);
+        let response = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/fail-flow/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"x":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].is_string());
+    }
+
+    // -------------------------------------------------------------------
+    // Execution: async mode
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_run_async_returns_task_id() {
+        let state = test_state();
+        let app = create_flow_helper(state.clone()).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/doc-pipeline/run?async=true")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"input":"data"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["task_id"].is_string());
+        assert_eq!(json["flow"], "doc-pipeline");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_async_task_query() {
+        let state = test_state();
+        let app = create_flow_helper(state.clone()).await;
+
+        // Start async flow
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/doc-pipeline/run?async=true")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"input":"data"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let task_id = json["task_id"].as_str().unwrap();
+
+        // Query task status
+        let app2 = build_router(state.clone(), None);
+        let response2 = app2
+            .oneshot(
+                Request::get(format!("/api/v1/tasks/{}", task_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response2.status(), StatusCode::OK);
+        let body2 = axum::body::to_bytes(response2.into_body(), 4096)
+            .await
+            .unwrap();
+        let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+        assert!(json2["status"].is_string());
+    }
+
+    // -------------------------------------------------------------------
+    // Execution: stream mode (SSE)
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_run_stream_returns_sse() {
+        let state = test_state();
+        let app = create_flow_helper(state.clone()).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/doc-pipeline/run?stream=true")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"input":"data"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            content_type.contains("text/event-stream"),
+            "Expected SSE content-type, got: {}",
+            content_type
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Auth: Flow API requires authentication
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_api_requires_auth() {
+        let state = auth_state();
+        let app = build_router(state, None);
+
+        // POST /api/v1/flows without auth key
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(simple_flow_body().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_api_health_still_exempt() {
+        let state = auth_state();
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // -------------------------------------------------------------------
+    // Edge cases
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_create_empty_body() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Empty body is invalid JSON for flow creation
+        let status = response.status().as_u16();
+        assert!(
+            status == 400 || status == 422,
+            "Expected 400 or 422 for empty body, got: {}",
+            status
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_create_large_50_steps() {
+        let app = test_router();
+
+        // Build a linear pipeline of 50 steps
+        let mut steps = Vec::new();
+        for i in 0..50 {
+            let mut step = serde_json::json!({"name": format!("step-{}", i), "rune": "echo"});
+            if i > 0 {
+                step["depends_on"] = serde_json::json!([format!("step-{}", i - 1)]);
+            }
+            steps.push(step);
+        }
+        let body = serde_json::json!({
+            "name": "large-flow",
+            "steps": steps,
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let resp_body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert_eq!(json["steps"].as_array().unwrap().len(), 50);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_name_with_special_characters() {
+        let app = test_router();
+        let body = serde_json::json!({
+            "name": "my-flow_v2.0",
+            "steps": [
+                {"name": "step1", "rune": "echo"},
+            ]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Retrieve it by name via URL
+        let app2 = build_router(test_state(), None);
+        let response2 = app2
+            .oneshot(
+                Request::get("/api/v1/flows/my-flow_v2.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should either succeed (200) or gracefully reject (400/404)
+        let status = response2.status().as_u16();
+        assert!(
+            status == 200 || status == 400 || status == 404,
+            "Expected reasonable status for special chars in name, got: {}",
+            status
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Additional: multi-upstream with valid mapping
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_create_multi_upstream_with_mapping_valid() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(multi_upstream_flow_body().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["name"], "multi-pipeline");
+        assert_eq!(json["steps"].as_array().unwrap().len(), 4);
+        // Verify the merge step has input_mapping
+        let merge_step = json["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "merge")
+            .unwrap();
+        assert!(merge_step["input_mapping"].is_object());
+    }
+
+    // -------------------------------------------------------------------
+    // Additional: flow run with unavailable rune → 503
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_run_rune_unavailable_503() {
+        let state = test_state();
+
+        // Create a flow referencing a rune not registered in relay
+        let body = serde_json::json!({
+            "name": "bad-rune-flow",
+            "steps": [
+                {"name": "step1", "rune": "nonexistent-rune"},
+            ]
+        });
+        let app = build_router(state.clone(), None);
+        let _resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Run the flow — step references unavailable rune
+        let app2 = build_router(state.clone(), None);
+        let response = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/bad-rune-flow/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"x":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].is_string());
+    }
+
+    // -------------------------------------------------------------------
+    // Additional: verify list entry structure
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_list_entry_structure() {
+        let state = test_state();
+        let app = create_flow_helper(state.clone()).await;
+
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/flows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entry = &json.as_array().unwrap()[0];
+        assert_eq!(entry["name"], "doc-pipeline");
+        assert_eq!(entry["steps_count"], 2);
+    }
+
+    // -------------------------------------------------------------------
+    // Additional: auth on GET/DELETE flow endpoints
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_list_requires_auth() {
+        let state = auth_state();
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/flows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_run_requires_auth() {
+        let state = auth_state();
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/anything/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // -------------------------------------------------------------------
+    // Additional: DAG validation — self-referencing step
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_flow_create_self_referencing_step() {
+        let app = test_router();
+        let body = serde_json::json!({
+            "name": "self-ref",
+            "steps": [
+                {"name": "a", "rune": "echo", "depends_on": ["a"]},
+            ]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].is_string());
+    }
 }
