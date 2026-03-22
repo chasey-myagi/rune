@@ -1040,4 +1040,463 @@ mod tests {
         let task = task.unwrap();
         assert_eq!(task.status, TaskStatus::Completed);
     }
+
+    // -----------------------------------------------------------------------
+    // Stream mode: request stream on non-stream rune returns 400
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_stream_request_on_non_stream_rune_returns_400() {
+        // The default "echo" rune has supports_stream=false.
+        // Requesting ?stream=true should return 400 STREAM_NOT_SUPPORTED.
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo?stream=true")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"msg":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "STREAM_NOT_SUPPORTED");
+    }
+
+    #[tokio::test]
+    async fn test_stream_request_via_debug_route_returns_400() {
+        // Same check via the /api/v1/runes/:name/run debug route
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/echo/run?stream=true")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"msg":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "STREAM_NOT_SUPPORTED");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task DELETE on completed task returns 409 CONFLICT
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_delete_completed_task_returns_409() {
+        let state = test_state();
+
+        // Insert a task and mark it completed
+        state
+            .store
+            .insert_task("done-task", "echo", Some("input"))
+            .unwrap();
+        state
+            .store
+            .update_task_status("done-task", TaskStatus::Completed, Some("result"), None)
+            .unwrap();
+
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/tasks/done-task")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "CONFLICT");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("completed"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Task DELETE on failed task returns 409 CONFLICT
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_delete_failed_task_returns_409() {
+        let state = test_state();
+
+        // Insert a task and mark it failed
+        state
+            .store
+            .insert_task("fail-task", "echo", Some("input"))
+            .unwrap();
+        state
+            .store
+            .update_task_status("fail-task", TaskStatus::Failed, None, Some("boom"))
+            .unwrap();
+
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/tasks/fail-task")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "CONFLICT");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("failed"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Task GET for non-existent task_id returns 404
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_nonexistent_task_returns_404() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/tasks/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task DELETE for non-existent task_id returns 404
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_task_returns_404() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/tasks/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+    }
+
+    // -----------------------------------------------------------------------
+    // mgmt_create_key: invalid key_type returns 400
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_create_key_invalid_type_returns_400() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/keys")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"key_type":"admin","label":"bad type"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "BAD_REQUEST");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("key_type"));
+    }
+
+    // -----------------------------------------------------------------------
+    // mgmt_stats: empty data returns zero counts
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_mgmt_stats_empty() {
+        // Fresh state with no calls made — stats should return 0 total
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["total_calls"], 0);
+        assert_eq!(json["by_rune"].as_array().unwrap().len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bearer prefix variants
+    // -----------------------------------------------------------------------
+
+    fn auth_state() -> GateState {
+        let mut state = test_state();
+        state.auth_enabled = true;
+        state.key_verifier =
+            Arc::new(rune_store::StoreKeyVerifier::new(state.store.clone()));
+        state
+    }
+
+    #[tokio::test]
+    async fn test_bearer_lowercase_rejected() {
+        // The middleware expects exactly "Bearer " (capital B).
+        // "bearer " (lowercase) should fail to strip the prefix and return 401.
+        let state = auth_state();
+        let key_result = state
+            .store
+            .create_key(rune_store::KeyType::Gate, "test")
+            .unwrap();
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("bearer {}", key_result.raw_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_bearer_uppercase_rejected() {
+        // "BEARER " (all caps) should also fail — middleware uses strip_prefix("Bearer ")
+        let state = auth_state();
+        let key_result = state
+            .store
+            .create_key(rune_store::KeyType::Gate, "test")
+            .unwrap();
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("BEARER {}", key_result.raw_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_bearer_extra_space_rejected() {
+        // "Bearer  key" (double space) — strip_prefix("Bearer ") yields " key" with a leading space
+        // which is not a valid key, so verification should fail with 401.
+        let state = auth_state();
+        let key_result = state
+            .store
+            .create_key(rune_store::KeyType::Gate, "test")
+            .unwrap();
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "authorization",
+                        format!("Bearer  {}", key_result.raw_key),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The extra space becomes part of the key, so verify_gate_key fails
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_no_bearer_prefix_rejected() {
+        // Passing just the raw key without "Bearer " prefix should return 401
+        let state = auth_state();
+        let key_result = state
+            .store
+            .create_key(rune_store::KeyType::Gate, "test")
+            .unwrap();
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", key_result.raw_key.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // -----------------------------------------------------------------------
+    // CORS behavior verification
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_cors_permissive_allows_any_origin() {
+        // Default test_state has empty cors_origins → CorsLayer::permissive()
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/echo")
+                    .header("origin", "https://example.com")
+                    .header("access-control-request-method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Permissive CORS should respond with 200 and allow the origin
+        assert_eq!(response.status(), StatusCode::OK);
+        let acl = response
+            .headers()
+            .get("access-control-allow-origin")
+            .expect("should have ACAO header");
+        // Permissive CORS mirrors the Origin or returns "*"
+        let acl_str = acl.to_str().unwrap();
+        assert!(
+            acl_str == "*" || acl_str == "https://example.com",
+            "ACAO should be * or mirror origin, got: {}",
+            acl_str
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cors_restricted_rejects_unlisted_origin() {
+        // Configure specific allowed origins — unlisted origin should NOT get ACAO
+        let mut state = test_state();
+        state.cors_origins = vec!["https://allowed.example.com".to_string()];
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/echo")
+                    .header("origin", "https://evil.example.com")
+                    .header("access-control-request-method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // tower-http CorsLayer with explicit origins will not set ACAO for disallowed origins
+        let acao = response.headers().get("access-control-allow-origin");
+        assert!(
+            acao.is_none()
+                || acao.unwrap().to_str().unwrap() != "https://evil.example.com",
+            "ACAO should NOT echo an unlisted origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cors_restricted_allows_listed_origin() {
+        let mut state = test_state();
+        state.cors_origins = vec!["https://allowed.example.com".to_string()];
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/echo")
+                    .header("origin", "https://allowed.example.com")
+                    .header("access-control-request-method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let acao = response
+            .headers()
+            .get("access-control-allow-origin")
+            .expect("should have ACAO for allowed origin");
+        assert_eq!(
+            acao.to_str().unwrap(),
+            "https://allowed.example.com"
+        );
+    }
 }

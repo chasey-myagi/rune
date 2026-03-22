@@ -386,3 +386,168 @@ async fn test_mgmt_logs_endpoint() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["logs"].as_array().unwrap().len() >= 1);
 }
+
+// ---------------------------------------------------------------------------
+// Full auth chain: create key via API → use key to call rune → verify call log
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_full_auth_chain_create_key_call_rune_verify_log() {
+    let state = make_state(true);
+
+    // Step 1: create a gate key via management API (mgmt routes are behind auth
+    // middleware too, so we create the key directly in the store first to
+    // bootstrap, then use it)
+    let bootstrap_key = state.store.create_key(KeyType::Gate, "bootstrap").unwrap();
+
+    // Step 2: use the bootstrap key to call the echo rune
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", bootstrap_key.raw_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"chain":"test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["chain"], "test");
+
+    // Step 3: verify a call log was recorded with correct rune name and mode
+    let logs = state.store.query_logs(Some("echo"), 10).unwrap();
+    assert!(!logs.is_empty(), "call log should be recorded");
+    assert_eq!(logs[0].rune_name, "echo");
+    assert_eq!(logs[0].mode, "sync");
+    assert_eq!(logs[0].status_code, 200);
+}
+
+// ---------------------------------------------------------------------------
+// Key created is immediately usable (no delay)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_key_immediately_usable_after_creation() {
+    let state = make_state(true);
+
+    // Create a key and immediately use it in the very next request (no sleep)
+    let key = state.store.create_key(KeyType::Gate, "instant").unwrap();
+
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key.raw_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"instant":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Must succeed without any delay
+    assert_eq!(response.status(), 200);
+    let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["instant"], true);
+}
+
+// ---------------------------------------------------------------------------
+// Multiple gate keys work independently
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_multiple_keys_independent() {
+    let state = make_state(true);
+
+    // Create three independent keys
+    let key_a = state.store.create_key(KeyType::Gate, "key-a").unwrap();
+    let key_b = state.store.create_key(KeyType::Gate, "key-b").unwrap();
+    let key_c = state.store.create_key(KeyType::Gate, "key-c").unwrap();
+
+    // All three should work
+    for (label, raw_key) in [
+        ("a", &key_a.raw_key),
+        ("b", &key_b.raw_key),
+        ("c", &key_c.raw_key),
+    ] {
+        let app = gate::build_router(state.clone(), None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", raw_key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"key":"{}"}}"#, label)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            200,
+            "key {} should authenticate successfully",
+            label
+        );
+    }
+
+    // Revoke key_b — only key_b should stop working
+    state.store.revoke_key(key_b.api_key.id).unwrap();
+
+    // key_a still works
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key_a.raw_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"still":"ok"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "key_a should still work after revoking key_b");
+
+    // key_b now rejected
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key_b.raw_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 401, "key_b should be rejected after revocation");
+
+    // key_c still works
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key_c.raw_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"still":"ok"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "key_c should still work after revoking key_b");
+}
