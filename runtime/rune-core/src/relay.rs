@@ -468,4 +468,287 @@ mod tests {
         assert_eq!(relay.list().len(), 1);
         assert_eq!(relay.list()[0].0, "rune_a");
     }
+
+    // ---- Register 100 runes: verify resolve and list correctness ----
+
+    #[test]
+    fn test_register_100_runes() {
+        let relay = Relay::new();
+        let resolver = RoundRobinResolver::new();
+
+        for i in 0..100 {
+            let handler = make_handler(|_ctx, input| async move { Ok(input) });
+            let config = RuneConfig {
+                name: format!("rune_{}", i),
+                version: String::new(),
+                description: format!("rune number {}", i),
+                supports_stream: false,
+                gate: Some(crate::rune::GateConfig {
+                    path: format!("/api/rune_{}", i),
+                    method: "POST".into(),
+                }),
+            };
+            relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
+        }
+
+        // list should return exactly 100 entries
+        assert_eq!(relay.list().len(), 100);
+
+        // Every rune should be resolvable
+        for i in 0..100 {
+            let name = format!("rune_{}", i);
+            assert!(
+                relay.resolve(&name, &resolver).is_some(),
+                "rune '{}' should be resolvable",
+                name
+            );
+        }
+
+        // Non-existent rune should still be None
+        assert!(relay.resolve("rune_100", &resolver).is_none());
+    }
+
+    // ---- Same rune name, multiple casters: register 5, remove 3, verify 2 remain ----
+
+    #[tokio::test]
+    async fn test_same_rune_multiple_casters_partial_remove() {
+        let relay = Relay::new();
+        let resolver = RoundRobinResolver::new();
+
+        // Register 5 casters for the same rune
+        for i in 0..5 {
+            let handler = make_handler(move |_ctx, _input| {
+                let val = format!("caster_{}", i);
+                async move { Ok(Bytes::from(val)) }
+            });
+            let config = RuneConfig {
+                name: "shared_rune".into(),
+                version: String::new(),
+                description: "".into(),
+                supports_stream: false,
+                gate: None,
+            };
+            relay.register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some(format!("c{}", i)),
+            ).unwrap();
+        }
+
+        // Verify 5 entries
+        let list: Vec<_> = relay.list().into_iter()
+            .filter(|(n, _)| n == "shared_rune").collect();
+        assert_eq!(list.len(), 5);
+
+        // Remove casters c0, c1, c2
+        relay.remove_caster("c0");
+        relay.remove_caster("c1");
+        relay.remove_caster("c2");
+
+        // Verify 2 remaining entries
+        let list: Vec<_> = relay.list().into_iter()
+            .filter(|(n, _)| n == "shared_rune").collect();
+        assert_eq!(list.len(), 2);
+
+        // Rune should still be resolvable
+        assert!(relay.resolve("shared_rune", &resolver).is_some());
+
+        // Verify round-robin across remaining 2 casters
+        let ctx = || RuneContext {
+            rune_name: "shared_rune".into(),
+            request_id: "r".into(),
+            context: Default::default(),
+            timeout: Duration::from_secs(30),
+        };
+        let r1 = relay.resolve("shared_rune", &resolver).unwrap()
+            .invoke_once(ctx(), Bytes::new()).await.unwrap();
+        let r2 = relay.resolve("shared_rune", &resolver).unwrap()
+            .invoke_once(ctx(), Bytes::new()).await.unwrap();
+        // The two remaining casters should alternate
+        assert_ne!(r1, r2);
+    }
+
+    // ---- Interleaved register and remove ----
+
+    #[test]
+    fn test_interleaved_register_remove() {
+        let relay = Relay::new();
+        let resolver = RoundRobinResolver::new();
+
+        let make_cfg = || RuneConfig {
+            name: "interleaved".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: None,
+        };
+
+        // Register A
+        let h_a = make_handler(|_ctx, _input| async { Ok(Bytes::from("A")) });
+        relay.register(make_cfg(), Arc::new(crate::invoker::LocalInvoker::new(h_a)), Some("A".into())).unwrap();
+        assert_eq!(relay.list().len(), 1);
+
+        // Register B
+        let h_b = make_handler(|_ctx, _input| async { Ok(Bytes::from("B")) });
+        relay.register(make_cfg(), Arc::new(crate::invoker::LocalInvoker::new(h_b)), Some("B".into())).unwrap();
+        assert_eq!(relay.list().len(), 2);
+
+        // Remove A
+        relay.remove_caster("A");
+        assert_eq!(relay.list().len(), 1);
+
+        // Register C
+        let h_c = make_handler(|_ctx, _input| async { Ok(Bytes::from("C")) });
+        relay.register(make_cfg(), Arc::new(crate::invoker::LocalInvoker::new(h_c)), Some("C".into())).unwrap();
+        assert_eq!(relay.list().len(), 2);
+
+        // Remove B
+        relay.remove_caster("B");
+        assert_eq!(relay.list().len(), 1);
+
+        // Only C should remain
+        assert!(relay.resolve("interleaved", &resolver).is_some());
+        let entries = relay.find("interleaved").unwrap();
+        assert_eq!(entries.value().len(), 1);
+        assert_eq!(entries.value()[0].caster_id.as_deref(), Some("C"));
+    }
+
+    // ---- Same rune_name with different gate.path ----
+
+    #[test]
+    fn test_same_rune_name_different_gate_paths() {
+        // The same rune name with different gate paths should be allowed
+        // (same rune name = same implementation, just different entry points)
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, input| async move { Ok(input) });
+        let h2 = make_handler(|_ctx, input| async move { Ok(input) });
+
+        let config1 = RuneConfig {
+            name: "multi_path_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/path_a".into(),
+                method: "POST".into(),
+            }),
+        };
+        let config2 = RuneConfig {
+            name: "multi_path_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/path_b".into(),
+                method: "POST".into(),
+            }),
+        };
+
+        relay.register(config1, Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
+        relay.register(config2, Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c2".into())).unwrap();
+
+        let list: Vec<_> = relay.list().into_iter()
+            .filter(|(n, _)| n == "multi_path_rune").collect();
+        assert_eq!(list.len(), 2);
+
+        // Both gate paths should be present
+        let paths: Vec<_> = list.iter()
+            .map(|(_, p)| p.as_deref().unwrap_or(""))
+            .collect();
+        assert!(paths.contains(&"/api/path_a"));
+        assert!(paths.contains(&"/api/path_b"));
+    }
+
+    // ---- Gate path with query string ----
+
+    #[test]
+    fn test_gate_path_with_query_string() {
+        // Gate paths with query strings are treated as literal path strings
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+
+        let config = RuneConfig {
+            name: "query_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/translate?v=1".into(),
+                method: "POST".into(),
+            }),
+        };
+
+        // Should succeed (gate path is just a string, no URL parsing)
+        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
+
+        let list = relay.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].1.as_deref(), Some("/translate?v=1"));
+    }
+
+    #[test]
+    fn test_gate_path_with_fragment() {
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+
+        let config = RuneConfig {
+            name: "fragment_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/translate#section".into(),
+                method: "POST".into(),
+            }),
+        };
+
+        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
+        let list = relay.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].1.as_deref(), Some("/translate#section"));
+    }
+
+    // ---- Remove all casters of same rune ----
+
+    #[test]
+    fn test_remove_all_casters_empties_rune() {
+        let relay = Relay::new();
+        let resolver = RoundRobinResolver::new();
+
+        for i in 0..3 {
+            let handler = make_handler(|_ctx, input| async move { Ok(input) });
+            let config = RuneConfig {
+                name: "doomed_rune".into(),
+                version: String::new(),
+                description: "".into(),
+                supports_stream: false,
+                gate: None,
+            };
+            relay.register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some(format!("c{}", i)),
+            ).unwrap();
+        }
+
+        assert_eq!(relay.list().len(), 3);
+        assert!(relay.resolve("doomed_rune", &resolver).is_some());
+
+        // Remove all casters one by one
+        relay.remove_caster("c0");
+        relay.remove_caster("c1");
+        relay.remove_caster("c2");
+
+        // Rune should no longer be resolvable
+        assert!(relay.resolve("doomed_rune", &resolver).is_none());
+        assert!(relay.list().is_empty());
+    }
+
+    // ---- find() returns None for empty candidates ----
+
+    #[test]
+    fn test_find_returns_none_for_nonexistent() {
+        let relay = Relay::new();
+        assert!(relay.find("does_not_exist").is_none());
+    }
 }

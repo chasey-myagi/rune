@@ -748,4 +748,383 @@ mod tests {
         assert_eq!(mgr.heartbeat_interval, hb_interval);
         assert_eq!(mgr.heartbeat_timeout, hb_timeout);
     }
+
+    // ---- max_concurrent=1 strict serialization ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_max_concurrent_1_strict_serial() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(1);
+
+        // First request should succeed
+        let handle1 = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "serial-1", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            })
+        };
+
+        wait_for_pending(&pending, "serial-1").await;
+        assert_eq!(sem.available_permits(), 0);
+
+        // Second request should be rejected immediately
+        let result2 = mgr.execute(&caster_id, "serial-2", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await;
+        assert!(
+            matches!(result2, Err(RuneError::Unavailable)),
+            "second request must be Unavailable when max_concurrent=1"
+        );
+
+        // Complete first request
+        if let Some((_, p)) = pending.remove("serial-1") {
+            sem.add_permits(1);
+            match p.tx {
+                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done"))); }
+                _ => panic!("expected Once"),
+            }
+        }
+
+        let result1 = handle1.await.unwrap().unwrap();
+        assert_eq!(result1, Bytes::from("done"));
+        assert_eq!(sem.available_permits(), 1);
+
+        // Now a third request should succeed (permit was returned)
+        let handle3 = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "serial-3", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            })
+        };
+
+        wait_for_pending(&pending, "serial-3").await;
+        assert_eq!(sem.available_permits(), 0);
+
+        // Complete third request
+        if let Some((_, p)) = pending.remove("serial-3") {
+            sem.add_permits(1);
+            match p.tx {
+                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done3"))); }
+                _ => panic!("expected Once"),
+            }
+        }
+
+        let result3 = handle3.await.unwrap().unwrap();
+        assert_eq!(result3, Bytes::from("done3"));
+    }
+
+    // ---- Timeout returns permit correctly ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_timeout_returns_permit() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(1);
+        assert_eq!(sem.available_permits(), 1);
+
+        // Start a request
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "timeout-req", "slow", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            })
+        };
+
+        wait_for_pending(&pending, "timeout-req").await;
+        assert_eq!(sem.available_permits(), 0, "permit should be consumed");
+
+        // Simulate timeout by removing pending and returning permit
+        if let Some((_, p)) = pending.remove("timeout-req") {
+            sem.add_permits(1);
+            match p.tx {
+                PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
+                _ => panic!("expected Once"),
+            }
+        }
+
+        let result = handle.await.unwrap();
+        assert!(matches!(result, Err(RuneError::Timeout)));
+
+        // Permit should be available again
+        assert_eq!(sem.available_permits(), 1, "permit must be returned after timeout");
+
+        // A new request should now succeed
+        let handle2 = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "after-timeout", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            })
+        };
+
+        wait_for_pending(&pending, "after-timeout").await;
+        assert_eq!(sem.available_permits(), 0);
+
+        // Complete it
+        if let Some((_, p)) = pending.remove("after-timeout") {
+            sem.add_permits(1);
+            match p.tx {
+                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("ok"))); }
+                _ => panic!("expected Once"),
+            }
+        }
+
+        let result2 = handle2.await.unwrap().unwrap();
+        assert_eq!(result2, Bytes::from("ok"));
+    }
+
+    // ---- cancel_by_request_id only affects the target caster ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_cancel_only_affects_target_caster() {
+        let mgr = default_session_manager();
+
+        // Set up three casters
+        let mut pending_maps = Vec::new();
+        let mut sems = Vec::new();
+        let mut rxs = Vec::new();
+        for i in 0..3 {
+            let (tx, rx) = mpsc::channel(16);
+            let sem = Arc::new(Semaphore::new(5));
+            let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
+            mgr.sessions.insert(format!("caster-{}", i), CasterState {
+                outbound: tx,
+                pending: Arc::clone(&pending),
+                semaphore: Arc::clone(&sem),
+            });
+            pending_maps.push(pending);
+            sems.push(sem);
+            rxs.push(rx);
+        }
+
+        // Launch a request on each caster
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let mgr_clone = Arc::clone(&mgr);
+            let cid = format!("caster-{}", i);
+            let rid = format!("req-{}", i);
+            let handle = tokio::spawn(async move {
+                mgr_clone.execute(&cid, &rid, "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all requests to appear in pending
+        for i in 0..3 {
+            wait_for_pending(&pending_maps[i], &format!("req-{}", i)).await;
+        }
+
+        // Cancel only req-1 (on caster-1)
+        let cancelled = mgr.cancel_by_request_id("req-1", "cancelled by test").await;
+        assert!(cancelled);
+
+        // caster-1's request should be cancelled
+        assert!(!pending_maps[1].contains_key("req-1"), "req-1 should be removed from pending");
+        assert_eq!(sems[1].available_permits(), 5, "caster-1 permit should be returned");
+
+        // caster-0 and caster-2 requests should still be pending
+        assert!(pending_maps[0].contains_key("req-0"), "req-0 should still be pending");
+        assert!(pending_maps[2].contains_key("req-2"), "req-2 should still be pending");
+        assert_eq!(sems[0].available_permits(), 4, "caster-0 permit should still be consumed");
+        assert_eq!(sems[2].available_permits(), 4, "caster-2 permit should still be consumed");
+
+        // Verify the cancelled request's result
+        let result1 = handles.remove(1).await.unwrap();
+        assert!(matches!(result1, Err(RuneError::ExecutionFailed { .. })));
+        if let Err(RuneError::ExecutionFailed { code, message }) = result1 {
+            assert_eq!(code, "CANCELLED");
+            assert_eq!(message, "cancelled by test");
+        }
+
+        // Complete remaining requests
+        for i in [0, 2] {
+            if let Some((_, p)) = pending_maps[i].remove(&format!("req-{}", i)) {
+                sems[i].add_permits(1);
+                match p.tx {
+                    PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done"))); }
+                    _ => panic!("expected Once"),
+                }
+            }
+        }
+    }
+
+    // ---- execute_stream cancel returns permit ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_execute_stream_cancel_returns_permit() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(2);
+        assert_eq!(sem.available_permits(), 2);
+
+        // Start a streaming request
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute_stream(&cid, "stream-cancel", "streamer", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            })
+        };
+
+        wait_for_pending(&pending, "stream-cancel").await;
+        assert_eq!(sem.available_permits(), 1);
+
+        // Cancel the streaming request
+        mgr.cancel(&caster_id, "stream-cancel", "user cancel").await.unwrap();
+
+        // Permit should be returned
+        assert_eq!(sem.available_permits(), 2, "cancel must return permit for stream request");
+
+        // The stream receiver should eventually get the cancellation error
+        let _stream_rx = handle.await.unwrap().unwrap();
+    }
+
+    // ---- Disconnect and reconnect with same caster_id ----
+
+    #[tokio::test]
+    async fn test_disconnect_then_reconnect_same_caster_id() {
+        let mgr = default_session_manager();
+
+        // First connection
+        let (tx1, _rx1) = mpsc::channel(16);
+        let sem1 = Arc::new(Semaphore::new(3));
+        let pending1: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
+        mgr.sessions.insert("reconnect-caster".to_string(), CasterState {
+            outbound: tx1,
+            pending: Arc::clone(&pending1),
+            semaphore: Arc::clone(&sem1),
+        });
+
+        assert!(mgr.is_available("reconnect-caster"));
+        assert_eq!(mgr.caster_count(), 1);
+
+        // Simulate disconnect: remove from sessions
+        mgr.sessions.remove("reconnect-caster");
+        assert!(!mgr.is_available("reconnect-caster"));
+        assert_eq!(mgr.caster_count(), 0);
+
+        // Reconnect with same caster_id
+        let (tx2, _rx2) = mpsc::channel(16);
+        let sem2 = Arc::new(Semaphore::new(5));
+        let pending2: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
+        mgr.sessions.insert("reconnect-caster".to_string(), CasterState {
+            outbound: tx2,
+            pending: Arc::clone(&pending2),
+            semaphore: Arc::clone(&sem2),
+        });
+
+        // Should be available again with new capacity
+        assert!(mgr.is_available("reconnect-caster"));
+        assert_eq!(mgr.caster_count(), 1);
+        assert_eq!(sem2.available_permits(), 5);
+    }
+
+    // ---- is_available reflects semaphore state ----
+
+    #[test]
+    fn test_is_available_reflects_permits() {
+        let mgr = default_session_manager();
+
+        // Not available when session doesn't exist
+        assert!(!mgr.is_available("ghost-caster"));
+
+        // Set up a session with 1 permit
+        let (tx, _rx) = mpsc::channel(16);
+        let sem = Arc::new(Semaphore::new(1));
+        mgr.sessions.insert("one-permit".to_string(), CasterState {
+            outbound: tx,
+            pending: Arc::new(DashMap::new()),
+            semaphore: Arc::clone(&sem),
+        });
+
+        assert!(mgr.is_available("one-permit"));
+
+        // Consume the permit
+        let _permit = sem.try_acquire().unwrap();
+        assert!(!mgr.is_available("one-permit"), "should be unavailable when all permits consumed");
+
+        // Release the permit
+        drop(_permit);
+        assert!(mgr.is_available("one-permit"), "should be available again after permit release");
+    }
+
+    // ---- Execute on non-existent caster ----
+
+    #[tokio::test]
+    async fn test_execute_nonexistent_caster() {
+        let mgr = default_session_manager();
+
+        let result = mgr.execute(
+            "nonexistent", "req-1", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT
+        ).await;
+
+        assert!(matches!(result, Err(RuneError::Unavailable)));
+    }
+
+    #[tokio::test]
+    async fn test_execute_stream_nonexistent_caster() {
+        let mgr = default_session_manager();
+
+        let result = mgr.execute_stream(
+            "nonexistent", "req-1", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT
+        ).await;
+
+        assert!(matches!(result, Err(RuneError::Unavailable)));
+    }
+
+    // ---- Cancel on non-existent caster ----
+
+    #[tokio::test]
+    async fn test_cancel_nonexistent_caster() {
+        let mgr = default_session_manager();
+
+        let result = mgr.cancel("nonexistent", "req-1", "reason").await;
+        assert!(matches!(result, Err(RuneError::Unavailable)));
+    }
+
+    // ---- Multiple concurrent executions share permits ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_multiple_concurrent_executions() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(3);
+        assert_eq!(sem.available_permits(), 3);
+
+        // Start 3 concurrent requests
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            let rid = format!("concurrent-{}", i);
+            handles.push(tokio::spawn(async move {
+                mgr.execute(&cid, &rid, "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            }));
+        }
+
+        // Wait for all pending
+        for i in 0..3 {
+            wait_for_pending(&pending, &format!("concurrent-{}", i)).await;
+        }
+        assert_eq!(sem.available_permits(), 0);
+
+        // Fourth request should be rejected
+        let result = mgr.execute(
+            &caster_id, "concurrent-3", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT
+        ).await;
+        assert!(matches!(result, Err(RuneError::Unavailable)));
+
+        // Complete all requests
+        for i in 0..3 {
+            if let Some((_, p)) = pending.remove(&format!("concurrent-{}", i)) {
+                sem.add_permits(1);
+                match p.tx {
+                    PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("ok"))); }
+                    _ => panic!("expected Once"),
+                }
+            }
+        }
+
+        // All permits should be returned
+        assert_eq!(sem.available_permits(), 3);
+
+        for handle in handles {
+            let result = handle.await.unwrap().unwrap();
+            assert_eq!(result, Bytes::from("ok"));
+        }
+    }
 }

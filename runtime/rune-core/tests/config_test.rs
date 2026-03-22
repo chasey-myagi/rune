@@ -1,5 +1,5 @@
 use rune_core::config::AppConfig;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -474,4 +474,445 @@ enabled = 123
         "error should reference the mistyped field, got: {}",
         err_msg
     );
+}
+
+// ---- IPv6 address configuration ----
+
+#[test]
+fn test_ipv6_address_in_toml() {
+    let toml_content = r#"
+[server]
+grpc_host = "::1"
+grpc_port = 50070
+http_host = "::1"
+http_port = 50060
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(config.server.grpc_host, IpAddr::V6(Ipv6Addr::LOCALHOST));
+    assert_eq!(config.server.http_host, IpAddr::V6(Ipv6Addr::LOCALHOST));
+
+    // Verify grpc_addr() produces a valid IPv6 SocketAddr
+    let addr = config.grpc_addr();
+    assert_eq!(addr, SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 50070));
+    assert!(addr.is_ipv6());
+
+    let http = config.http_addr();
+    assert_eq!(http, SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 50060));
+    assert!(http.is_ipv6());
+}
+
+#[test]
+fn test_ipv6_unspecified_in_toml() {
+    let toml_content = r#"
+[server]
+grpc_host = "::"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(config.server.grpc_host, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+}
+
+// ---- IPv6 via environment variable ----
+
+#[test]
+fn test_ipv6_env_var_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("RUNE_SERVER__GRPC_HOST", "::1");
+    std::env::set_var("RUNE_SERVER__HTTP_HOST", "::1");
+
+    let mut config = AppConfig::default();
+    config.apply_env_overrides();
+
+    assert_eq!(config.server.grpc_host, IpAddr::V6(Ipv6Addr::LOCALHOST));
+    assert_eq!(config.server.http_host, IpAddr::V6(Ipv6Addr::LOCALHOST));
+
+    std::env::remove_var("RUNE_SERVER__GRPC_HOST");
+    std::env::remove_var("RUNE_SERVER__HTTP_HOST");
+}
+
+// ---- GRPC_HOST / HTTP_HOST env override ----
+
+#[test]
+fn test_env_var_override_grpc_host() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("RUNE_SERVER__GRPC_HOST", "10.0.0.5");
+
+    let mut config = AppConfig::default();
+    config.apply_env_overrides();
+
+    assert_eq!(
+        config.server.grpc_host,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))
+    );
+
+    std::env::remove_var("RUNE_SERVER__GRPC_HOST");
+}
+
+#[test]
+fn test_env_var_override_http_host() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("RUNE_SERVER__HTTP_HOST", "192.168.1.100");
+
+    let mut config = AppConfig::default();
+    config.apply_env_overrides();
+
+    assert_eq!(
+        config.server.http_host,
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))
+    );
+
+    std::env::remove_var("RUNE_SERVER__HTTP_HOST");
+}
+
+// ---- Multiple env vars applied simultaneously ----
+
+#[test]
+fn test_multiple_env_vars_all_take_effect() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    std::env::set_var("RUNE_SERVER__GRPC_HOST", "10.0.0.1");
+    std::env::set_var("RUNE_SERVER__GRPC_PORT", "9999");
+    std::env::set_var("RUNE_SERVER__HTTP_HOST", "10.0.0.2");
+    std::env::set_var("RUNE_SERVER__HTTP_PORT", "8888");
+    std::env::set_var("RUNE_SERVER__DEV_MODE", "true");
+    std::env::set_var("RUNE_AUTH__ENABLED", "false");
+    std::env::set_var("RUNE_STORE__DB_PATH", "/tmp/custom.db");
+    std::env::set_var("RUNE_LOG__LEVEL", "warn");
+    std::env::set_var("RUNE_RESOLVER__STRATEGY", "random");
+    std::env::set_var("RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE", "1200");
+    std::env::set_var("RUNE_SESSION__HEARTBEAT_INTERVAL_SECS", "20");
+    std::env::set_var("RUNE_SESSION__HEARTBEAT_TIMEOUT_SECS", "60");
+    std::env::set_var("RUNE_SESSION__MAX_REQUEST_TIMEOUT_SECS", "45");
+    std::env::set_var("RUNE_SERVER__DRAIN_TIMEOUT_SECS", "30");
+    std::env::set_var("RUNE_GATE__MAX_UPLOAD_SIZE_MB", "50");
+    std::env::set_var("RUNE_STORE__LOG_RETENTION_DAYS", "90");
+
+    let mut config = AppConfig::default();
+    config.apply_env_overrides();
+
+    assert_eq!(config.server.grpc_host, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    assert_eq!(config.server.grpc_port, 9999);
+    assert_eq!(config.server.http_host, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    assert_eq!(config.server.http_port, 8888);
+    assert!(config.server.dev_mode);
+    assert!(!config.auth.enabled);
+    assert_eq!(config.store.db_path, "/tmp/custom.db");
+    assert_eq!(config.log.level, "warn");
+    assert_eq!(config.resolver.strategy, "random");
+    assert_eq!(config.rate_limit.requests_per_minute, 1200);
+    assert_eq!(config.session.heartbeat_interval_secs, 20);
+    assert_eq!(config.session.heartbeat_timeout_secs, 60);
+    assert_eq!(config.session.max_request_timeout_secs, 45);
+    assert_eq!(config.server.drain_timeout_secs, 30);
+    assert_eq!(config.gate.max_upload_size_mb, 50);
+    assert_eq!(config.store.log_retention_days, 90);
+
+    // Clean up all env vars
+    std::env::remove_var("RUNE_SERVER__GRPC_HOST");
+    std::env::remove_var("RUNE_SERVER__GRPC_PORT");
+    std::env::remove_var("RUNE_SERVER__HTTP_HOST");
+    std::env::remove_var("RUNE_SERVER__HTTP_PORT");
+    std::env::remove_var("RUNE_SERVER__DEV_MODE");
+    std::env::remove_var("RUNE_AUTH__ENABLED");
+    std::env::remove_var("RUNE_STORE__DB_PATH");
+    std::env::remove_var("RUNE_LOG__LEVEL");
+    std::env::remove_var("RUNE_RESOLVER__STRATEGY");
+    std::env::remove_var("RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE");
+    std::env::remove_var("RUNE_SESSION__HEARTBEAT_INTERVAL_SECS");
+    std::env::remove_var("RUNE_SESSION__HEARTBEAT_TIMEOUT_SECS");
+    std::env::remove_var("RUNE_SESSION__MAX_REQUEST_TIMEOUT_SECS");
+    std::env::remove_var("RUNE_SERVER__DRAIN_TIMEOUT_SECS");
+    std::env::remove_var("RUNE_GATE__MAX_UPLOAD_SIZE_MB");
+    std::env::remove_var("RUNE_STORE__LOG_RETENTION_DAYS");
+}
+
+// ---- Long db_path value ----
+
+#[test]
+fn test_long_db_path_value() {
+    // 500-character path ("/data/" = 6 chars + 494 = 500)
+    let long_path = format!("/data/{}", "a".repeat(494));
+    assert_eq!(long_path.len(), 500);
+
+    let toml_content = format!(
+        r#"
+[store]
+db_path = "{}"
+"#,
+        long_path
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(config.store.db_path, long_path);
+    assert_eq!(config.store.db_path.len(), 500);
+}
+
+// ---- Special characters in db_path ----
+
+#[test]
+fn test_special_characters_in_db_path() {
+    let toml_content = r#"
+[store]
+db_path = "/data/my project/数据库/rune.db"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(config.store.db_path, "/data/my project/数据库/rune.db");
+    assert!(config.store.db_path.contains(' '));
+    assert!(config.store.db_path.contains("数据库"));
+}
+
+// ---- exempt_routes with multiple routes ----
+
+#[test]
+fn test_multiple_exempt_routes() {
+    let toml_content = r#"
+[auth]
+enabled = true
+exempt_routes = ["/health", "/metrics", "/ready", "/api/public"]
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(config.auth.exempt_routes.len(), 4);
+    assert_eq!(config.auth.exempt_routes[0], "/health");
+    assert_eq!(config.auth.exempt_routes[1], "/metrics");
+    assert_eq!(config.auth.exempt_routes[2], "/ready");
+    assert_eq!(config.auth.exempt_routes[3], "/api/public");
+}
+
+#[test]
+fn test_empty_exempt_routes() {
+    let toml_content = r#"
+[auth]
+exempt_routes = []
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert!(config.auth.exempt_routes.is_empty());
+}
+
+// ---- Duration accessor methods with custom values ----
+
+#[test]
+fn test_heartbeat_interval_custom() {
+    let mut config = AppConfig::default();
+    config.session.heartbeat_interval_secs = 3;
+    assert_eq!(config.heartbeat_interval(), Duration::from_secs(3));
+}
+
+#[test]
+fn test_heartbeat_timeout_custom() {
+    let mut config = AppConfig::default();
+    config.session.heartbeat_timeout_secs = 120;
+    assert_eq!(config.heartbeat_timeout(), Duration::from_secs(120));
+}
+
+#[test]
+fn test_default_timeout_custom() {
+    let mut config = AppConfig::default();
+    config.session.max_request_timeout_secs = 60;
+    assert_eq!(config.default_timeout(), Duration::from_secs(60));
+}
+
+#[test]
+fn test_duration_methods_zero() {
+    // Edge case: zero-second durations
+    let mut config = AppConfig::default();
+    config.session.heartbeat_interval_secs = 0;
+    config.session.heartbeat_timeout_secs = 0;
+    config.session.max_request_timeout_secs = 0;
+
+    assert_eq!(config.heartbeat_interval(), Duration::from_secs(0));
+    assert_eq!(config.heartbeat_timeout(), Duration::from_secs(0));
+    assert_eq!(config.default_timeout(), Duration::from_secs(0));
+}
+
+// ---- drain_timeout configuration ----
+
+#[test]
+fn test_drain_timeout_from_toml() {
+    let toml_content = r#"
+[server]
+drain_timeout_secs = 60
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(config.server.drain_timeout_secs, 60);
+}
+
+#[test]
+fn test_drain_timeout_env_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("RUNE_SERVER__DRAIN_TIMEOUT_SECS", "45");
+
+    let mut config = AppConfig::default();
+    config.apply_env_overrides();
+
+    assert_eq!(config.server.drain_timeout_secs, 45);
+
+    std::env::remove_var("RUNE_SERVER__DRAIN_TIMEOUT_SECS");
+}
+
+// ---- rate_limit and resolver strategy via TOML ----
+
+#[test]
+fn test_rate_limit_from_toml() {
+    let toml_content = r#"
+[rate_limit]
+requests_per_minute = 100
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(config.rate_limit.requests_per_minute, 100);
+}
+
+#[test]
+fn test_resolver_strategy_from_toml() {
+    let toml_content = r#"
+[resolver]
+strategy = "random"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(config.resolver.strategy, "random");
+}
+
+#[test]
+fn test_resolver_strategy_env_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("RUNE_RESOLVER__STRATEGY", "least_connections");
+
+    let mut config = AppConfig::default();
+    config.apply_env_overrides();
+
+    assert_eq!(config.resolver.strategy, "least_connections");
+
+    std::env::remove_var("RUNE_RESOLVER__STRATEGY");
+}
+
+#[test]
+fn test_rate_limit_env_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE", "999");
+
+    let mut config = AppConfig::default();
+    config.apply_env_overrides();
+
+    assert_eq!(config.rate_limit.requests_per_minute, 999);
+
+    std::env::remove_var("RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE");
+}
+
+// ---- LOG__FILE env override ----
+
+#[test]
+fn test_log_file_env_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("RUNE_LOG__FILE", "/var/log/rune.log");
+
+    let mut config = AppConfig::default();
+    config.apply_env_overrides();
+
+    assert_eq!(config.log.file.as_deref(), Some("/var/log/rune.log"));
+
+    std::env::remove_var("RUNE_LOG__FILE");
+}
+
+#[test]
+fn test_log_file_env_empty_clears_value() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    // First set a log file via TOML simulation
+    let mut config = AppConfig::default();
+    config.log.file = Some("/tmp/rune.log".to_string());
+
+    // Then set env to empty string to clear it
+    std::env::set_var("RUNE_LOG__FILE", "");
+    config.apply_env_overrides();
+
+    assert!(config.log.file.is_none(), "empty RUNE_LOG__FILE should clear the value");
+
+    std::env::remove_var("RUNE_LOG__FILE");
+}
+
+// ---- Full TOML roundtrip with all sections ----
+
+#[test]
+fn test_full_config_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+
+    let mut config = AppConfig::default();
+    config.server.grpc_host = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    config.server.grpc_port = 12345;
+    config.server.http_host = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+    config.server.http_port = 54321;
+    config.server.dev_mode = true;
+    config.server.drain_timeout_secs = 30;
+    config.auth.enabled = false;
+    config.auth.exempt_routes = vec!["/health".into(), "/metrics".into(), "/ready".into()];
+    config.store.db_path = "/custom/path/rune.db".to_string();
+    config.store.log_retention_days = 7;
+    config.session.heartbeat_interval_secs = 5;
+    config.session.heartbeat_timeout_secs = 20;
+    config.session.max_request_timeout_secs = 60;
+    config.gate.cors_origins = vec!["http://localhost:3000".into(), "https://example.com".into()];
+    config.gate.max_upload_size_mb = 50;
+    config.resolver.strategy = "random".to_string();
+    config.rate_limit.requests_per_minute = 1200;
+    config.log.level = "trace".to_string();
+    config.log.file = Some("/var/log/rune.log".to_string());
+
+    let toml_str = config.to_toml().unwrap();
+    std::fs::write(&path, &toml_str).unwrap();
+
+    let loaded = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+
+    // Verify every single field survives the roundtrip
+    assert_eq!(loaded.server.grpc_host, IpAddr::V6(Ipv6Addr::LOCALHOST));
+    assert_eq!(loaded.server.grpc_port, 12345);
+    assert_eq!(loaded.server.http_host, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+    assert_eq!(loaded.server.http_port, 54321);
+    assert!(loaded.server.dev_mode);
+    assert_eq!(loaded.server.drain_timeout_secs, 30);
+    assert!(!loaded.auth.enabled);
+    assert_eq!(loaded.auth.exempt_routes, vec!["/health", "/metrics", "/ready"]);
+    assert_eq!(loaded.store.db_path, "/custom/path/rune.db");
+    assert_eq!(loaded.store.log_retention_days, 7);
+    assert_eq!(loaded.session.heartbeat_interval_secs, 5);
+    assert_eq!(loaded.session.heartbeat_timeout_secs, 20);
+    assert_eq!(loaded.session.max_request_timeout_secs, 60);
+    assert_eq!(loaded.gate.cors_origins, vec!["http://localhost:3000", "https://example.com"]);
+    assert_eq!(loaded.gate.max_upload_size_mb, 50);
+    assert_eq!(loaded.resolver.strategy, "random");
+    assert_eq!(loaded.rate_limit.requests_per_minute, 1200);
+    assert_eq!(loaded.log.level, "trace");
+    assert_eq!(loaded.log.file.as_deref(), Some("/var/log/rune.log"));
 }

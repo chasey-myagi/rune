@@ -2236,4 +2236,496 @@ mod tests {
         let task = state.store.get_task(task_id).unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Completed);
     }
+
+    // =======================================================================
+    // Boundary: malformed JSON body
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_plain_text_body_to_echo() {
+        // Echo rune echoes raw bytes — plain text is not JSON but the rune
+        // does not require JSON. Should return 200 with the raw text echoed.
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("hello"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        // Echo returns input bytes as-is; non-JSON body is returned as raw bytes
+        assert_eq!(&body[..], b"hello");
+    }
+
+    #[tokio::test]
+    async fn test_malformed_json_to_create_key() {
+        // POST /api/v1/keys with malformed JSON should be rejected by axum's
+        // Json extractor, returning 4xx (400 or 422).
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/keys")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"broken":}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // axum returns 422 Unprocessable Entity for JSON parse failures
+        let status = response.status().as_u16();
+        assert!(
+            status == 400 || status == 422,
+            "malformed JSON should return 400 or 422, got: {}",
+            status
+        );
+    }
+
+    // =======================================================================
+    // Boundary: logs query parameter edge cases
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_logs_limit_zero() {
+        // limit=0 — after .min(500) it stays 0; query_logs with limit 0
+        // should return an empty list.
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/logs?limit=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["logs"].as_array().unwrap().is_empty(),
+            "limit=0 should return empty logs list"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_logs_limit_negative() {
+        // limit=-1 — .min(500) keeps -1; sqlite LIMIT -1 means unlimited
+        // but it should not crash. Verify 200 and valid response.
+        let state = test_state();
+
+        // Insert a call so there's data
+        let app = build_router(state.clone(), None);
+        let _response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"neg":"limit"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let app2 = build_router(state, None);
+        let response = app2
+            .oneshot(
+                Request::get("/api/v1/logs?limit=-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["logs"].is_array(), "should return a logs array even with negative limit");
+    }
+
+    #[tokio::test]
+    async fn test_logs_limit_exceeds_max_capped_to_500() {
+        // limit=1000 — .min(500) caps to 500. Verify no crash and response is valid.
+        // We insert a few logs to verify the cap doesn't break anything.
+        let state = test_state();
+
+        for _ in 0..3 {
+            let app = build_router(state.clone(), None);
+            let _response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"cap":"test"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/logs?limit=1000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let logs = json["logs"].as_array().unwrap();
+        // We only inserted 3 logs, so even with limit=1000 (capped to 500),
+        // we should get exactly 3.
+        assert_eq!(logs.len(), 3, "should return all 3 logs (capped at 500, but only 3 exist)");
+    }
+
+    #[tokio::test]
+    async fn test_logs_nonexistent_rune_filter() {
+        // rune=nonexistent — should return empty list, not an error
+        let state = test_state();
+
+        // Insert a log for echo
+        let app = build_router(state.clone(), None);
+        let _response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"filter":"test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Query logs for a rune that doesn't exist
+        let app2 = build_router(state, None);
+        let response = app2
+            .oneshot(
+                Request::get("/api/v1/logs?rune=nonexistent&limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["logs"].as_array().unwrap().is_empty(),
+            "querying logs for nonexistent rune should return empty list"
+        );
+    }
+
+    // =======================================================================
+    // Boundary: special characters in gate_path and rune name
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_gate_path_with_special_characters() {
+        // Register a rune whose gate_path contains URL-encodable characters.
+        // The dynamic fallback matches path literally, so a path with spaces
+        // won't match the URI (which is percent-encoded).
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let key_verifier: Arc<dyn KeyVerifier> = Arc::new(NoopVerifier);
+
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        relay
+            .register(
+                RuneConfig {
+                    name: "special".into(),
+                    version: "1.0.0".into(),
+                    description: "special path".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/my rune".into(), // path with space
+                        method: "POST".into(),
+                    }),
+                },
+                Arc::new(LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
+
+        let state = GateState {
+            relay,
+            resolver,
+            store,
+            key_verifier,
+            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            auth_enabled: false,
+            exempt_routes: vec!["/health".to_string()],
+            cors_origins: vec![],
+            dev_mode: true,
+            started_at: Instant::now(),
+        };
+
+        // Requesting the percent-encoded path — the dynamic_rune_handler
+        // compares URI path (percent-encoded) against registered gate_path
+        // (literal). "/my%20rune" != "/my rune" → 404.
+        let app = build_router(state.clone(), None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/my%20rune")
+                    .body(Body::from(r#"{"special":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "percent-encoded path should not match literal gate_path with space"
+        );
+
+        // But the rune IS listed in /api/v1/runes
+        let app2 = build_router(state, None);
+        let response = app2
+            .oneshot(
+                Request::get("/api/v1/runes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let runes = json["runes"].as_array().unwrap();
+        let special = runes.iter().find(|r| r["name"] == "special");
+        assert!(special.is_some(), "special rune should be listed");
+    }
+
+    #[tokio::test]
+    async fn test_debug_route_rune_name_with_unicode() {
+        // Register a rune with unicode name
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let key_verifier: Arc<dyn KeyVerifier> = Arc::new(NoopVerifier);
+
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        relay
+            .register(
+                RuneConfig {
+                    name: "rune-test".into(), // ascii with hyphen
+                    version: "1.0.0".into(),
+                    description: "unicode test".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/unicode-test".into(),
+                        method: "POST".into(),
+                    }),
+                },
+                Arc::new(LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
+
+        let state = GateState {
+            relay,
+            resolver,
+            store,
+            key_verifier,
+            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            auth_enabled: false,
+            exempt_routes: vec!["/health".to_string()],
+            cors_origins: vec![],
+            dev_mode: true,
+            started_at: Instant::now(),
+        };
+
+        // Debug route with a rune name that doesn't exist (contains unicode)
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/%E7%AC%A6%E6%96%87/run") // percent-encoded "符文"
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"x":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The rune "符文" is not registered, so we get 404
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "unicode rune name that doesn't exist should return 404"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_gate_path_with_unicode_literal() {
+        // Register a rune with a unicode gate_path and use it via the
+        // percent-encoded URI. Shows that percent-encoded URI path won't
+        // match a literal unicode gate_path.
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let key_verifier: Arc<dyn KeyVerifier> = Arc::new(NoopVerifier);
+
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        relay
+            .register(
+                RuneConfig {
+                    name: "unicode_path".into(),
+                    version: "1.0.0".into(),
+                    description: "unicode gate path".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/\u{7b26}\u{6587}".into(), // "/符文"
+                        method: "POST".into(),
+                    }),
+                },
+                Arc::new(LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
+
+        let state = GateState {
+            relay,
+            resolver,
+            store,
+            key_verifier,
+            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            auth_enabled: false,
+            exempt_routes: vec!["/health".to_string()],
+            cors_origins: vec![],
+            dev_mode: true,
+            started_at: Instant::now(),
+        };
+
+        // Percent-encoded request for "/符文"
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/%E7%AC%A6%E6%96%87") // percent-encoded "/符文"
+                    .body(Body::from(r#"{"uni":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // URI path is percent-encoded but gate_path is literal unicode — no match
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "percent-encoded URI should not match literal unicode gate_path"
+        );
+    }
+
+    // =======================================================================
+    // Boundary: Content-Type missing with valid JSON body
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_post_echo_without_content_type_header() {
+        // POST to echo gate_path with valid JSON body but NO content-type header.
+        // The dynamic_rune_handler reads raw bytes and passes to invoker —
+        // it does NOT check content-type. Should still succeed.
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    // deliberately omitting content-type header
+                    .body(Body::from(r#"{"no_ct":"header"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "echo should work without content-type header"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["no_ct"], "header");
+    }
+
+    #[tokio::test]
+    async fn test_post_debug_route_without_content_type() {
+        // Same test via the debug route /api/v1/runes/:name/run.
+        // run_rune uses Bytes extractor which doesn't require content-type.
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/echo/run")
+                    // deliberately omitting content-type header
+                    .body(Body::from(r#"{"debug_no_ct":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "debug route should work without content-type header"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["debug_no_ct"], true);
+    }
 }
