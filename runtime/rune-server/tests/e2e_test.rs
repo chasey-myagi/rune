@@ -475,7 +475,7 @@ async fn e2e_auth_enabled_with_valid_key_returns_200() {
 
     // Create a gate key directly through the store
     let key_result = store
-        .create_key(rune_store::KeyType::Gate, "e2e-auth-test")
+        .create_key(rune_store::KeyType::Gate, "e2e-auth-test").await
         .unwrap();
 
     let resp = c

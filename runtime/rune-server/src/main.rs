@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 gate_method: config.gate.as_ref().map(|g| g.method.clone()).unwrap_or("POST".into()),
                 last_seen: String::new(), // filled by upsert_snapshot
             };
-            if let Err(e) = store_for_attach.upsert_snapshot(&snapshot) {
+            if let Err(e) = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(store_for_attach.upsert_snapshot(&snapshot))) {
                 tracing::warn!(rune = %config.name, error = %e, "failed to record snapshot");
             }
         }

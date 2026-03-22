@@ -102,7 +102,7 @@ async fn test_full_auth_chain_reject_no_key() {
 #[tokio::test]
 async fn test_full_auth_chain_accept_valid_key() {
     let state = make_state(true);
-    let key_result = state.store.create_key(KeyType::Gate, "integration test").unwrap();
+    let key_result = state.store.create_key(KeyType::Gate, "integration test").await.unwrap();
 
     let app = gate::build_router(state, None);
     let response = app
@@ -209,7 +209,7 @@ async fn test_async_task_persisted_to_sqlite() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Verify task is in SQLite
-    let task = state.store.get_task(&task_id).unwrap().unwrap();
+    let task = state.store.get_task(&task_id).await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Completed);
     assert!(task.output.is_some());
     assert!(task.completed_at.is_some());
@@ -220,10 +220,10 @@ async fn test_task_cancel_updates_sqlite_status() {
     let state = make_state(false);
 
     // Insert a task manually in running state
-    state.store.insert_task("cancel-me", "echo", Some("test")).unwrap();
+    state.store.insert_task("cancel-me", "echo", Some("test")).await.unwrap();
     state
         .store
-        .update_task_status("cancel-me", TaskStatus::Running, None, None)
+        .update_task_status("cancel-me", TaskStatus::Running, None, None).await
         .unwrap();
 
     let app = gate::build_router(state.clone(), None);
@@ -241,7 +241,7 @@ async fn test_task_cancel_updates_sqlite_status() {
     assert_eq!(response.status(), 200);
 
     // Verify SQLite reflects cancelled status
-    let task = state.store.get_task("cancel-me").unwrap().unwrap();
+    let task = state.store.get_task("cancel-me").await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Cancelled);
 }
 
@@ -254,7 +254,7 @@ async fn test_key_create_then_authenticate() {
     let state = make_state(true);
 
     // Create a key directly in store
-    let key = state.store.create_key(KeyType::Gate, "lifecycle test").unwrap();
+    let key = state.store.create_key(KeyType::Gate, "lifecycle test").await.unwrap();
 
     // Use the key to authenticate
     let app = gate::build_router(state, None);
@@ -279,8 +279,8 @@ async fn test_revoked_key_fails_auth() {
     let state = make_state(true);
 
     // Create and then revoke a key
-    let key = state.store.create_key(KeyType::Gate, "revocable").unwrap();
-    state.store.revoke_key(key.api_key.id).unwrap();
+    let key = state.store.create_key(KeyType::Gate, "revocable").await.unwrap();
+    state.store.revoke_key(key.api_key.id).await.unwrap();
 
     let app = gate::build_router(state, None);
     let response = app
@@ -320,7 +320,7 @@ async fn test_sync_call_recorded_in_logs() {
         .unwrap();
 
     // Check call log was recorded
-    let logs = state.store.query_logs(Some("echo"), 10).unwrap();
+    let logs = state.store.query_logs(Some("echo"), 10).await.unwrap();
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].rune_name, "echo");
     assert_eq!(logs[0].mode, "sync");
@@ -410,7 +410,7 @@ async fn test_full_auth_chain_create_key_call_rune_verify_log() {
     // Step 1: create a gate key via management API (mgmt routes are behind auth
     // middleware too, so we create the key directly in the store first to
     // bootstrap, then use it)
-    let bootstrap_key = state.store.create_key(KeyType::Gate, "bootstrap").unwrap();
+    let bootstrap_key = state.store.create_key(KeyType::Gate, "bootstrap").await.unwrap();
 
     // Step 2: use the bootstrap key to call the echo rune
     let app = gate::build_router(state.clone(), None);
@@ -433,7 +433,7 @@ async fn test_full_auth_chain_create_key_call_rune_verify_log() {
     assert_eq!(json["chain"], "test");
 
     // Step 3: verify a call log was recorded with correct rune name and mode
-    let logs = state.store.query_logs(Some("echo"), 10).unwrap();
+    let logs = state.store.query_logs(Some("echo"), 10).await.unwrap();
     assert!(!logs.is_empty(), "call log should be recorded");
     assert_eq!(logs[0].rune_name, "echo");
     assert_eq!(logs[0].mode, "sync");
@@ -449,7 +449,7 @@ async fn test_key_immediately_usable_after_creation() {
     let state = make_state(true);
 
     // Create a key and immediately use it in the very next request (no sleep)
-    let key = state.store.create_key(KeyType::Gate, "instant").unwrap();
+    let key = state.store.create_key(KeyType::Gate, "instant").await.unwrap();
 
     let app = gate::build_router(state.clone(), None);
     let response = app
@@ -481,9 +481,9 @@ async fn test_multiple_keys_independent() {
     let state = make_state(true);
 
     // Create three independent keys
-    let key_a = state.store.create_key(KeyType::Gate, "key-a").unwrap();
-    let key_b = state.store.create_key(KeyType::Gate, "key-b").unwrap();
-    let key_c = state.store.create_key(KeyType::Gate, "key-c").unwrap();
+    let key_a = state.store.create_key(KeyType::Gate, "key-a").await.unwrap();
+    let key_b = state.store.create_key(KeyType::Gate, "key-b").await.unwrap();
+    let key_c = state.store.create_key(KeyType::Gate, "key-c").await.unwrap();
 
     // All three should work
     for (label, raw_key) in [
@@ -514,7 +514,7 @@ async fn test_multiple_keys_independent() {
     }
 
     // Revoke key_b — only key_b should stop working
-    state.store.revoke_key(key_b.api_key.id).unwrap();
+    state.store.revoke_key(key_b.api_key.id).await.unwrap();
 
     // key_a still works
     let app = gate::build_router(state.clone(), None);
@@ -573,7 +573,7 @@ async fn test_concurrent_authenticated_requests() {
     let state = make_state(true);
     let key = state
         .store
-        .create_key(KeyType::Gate, "concurrent")
+        .create_key(KeyType::Gate, "concurrent").await
         .unwrap();
 
     let mut handles = Vec::new();
@@ -608,7 +608,7 @@ async fn test_concurrent_authenticated_requests() {
     }
 
     // Verify all 10 calls were logged
-    let logs = state.store.query_logs(Some("echo"), 100).unwrap();
+    let logs = state.store.query_logs(Some("echo"), 100).await.unwrap();
     assert_eq!(logs.len(), 10, "all 10 calls should be recorded");
     for log in &logs {
         assert_eq!(log.rune_name, "echo");
@@ -626,7 +626,7 @@ async fn test_full_async_chain_with_auth() {
     let state = make_state(true);
     let key = state
         .store
-        .create_key(KeyType::Gate, "async-chain")
+        .create_key(KeyType::Gate, "async-chain").await
         .unwrap();
 
     // Step 1: Authenticated async call
@@ -677,7 +677,7 @@ async fn test_full_async_chain_with_auth() {
     assert!(json["output"].is_string());
 
     // Step 4: Verify call log
-    let logs = state.store.query_logs(Some("echo"), 10).unwrap();
+    let logs = state.store.query_logs(Some("echo"), 10).await.unwrap();
     assert!(!logs.is_empty(), "async call should be logged");
     let async_log = logs.iter().find(|l| l.mode == "async");
     assert!(async_log.is_some(), "should have an async mode log entry");
@@ -692,7 +692,7 @@ async fn test_revoked_key_rejects_pending_request() {
     let state = make_state(true);
     let key = state
         .store
-        .create_key(KeyType::Gate, "to-revoke")
+        .create_key(KeyType::Gate, "to-revoke").await
         .unwrap();
 
     // First request succeeds
@@ -712,7 +712,7 @@ async fn test_revoked_key_rejects_pending_request() {
     assert_eq!(response.status(), 200, "first call should succeed");
 
     // Revoke the key
-    state.store.revoke_key(key.api_key.id).unwrap();
+    state.store.revoke_key(key.api_key.id).await.unwrap();
 
     // Next request with same key should fail
     let app2 = gate::build_router(state.clone(), None);

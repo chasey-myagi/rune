@@ -12,6 +12,8 @@ pub enum StoreError {
     InvalidKeyType(String),
     #[error("invalid task status: {0}")]
     InvalidTaskStatus(String),
+    #[error("blocking task failed: {0}")]
+    BlockingTask(#[from] tokio::task::JoinError),
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;

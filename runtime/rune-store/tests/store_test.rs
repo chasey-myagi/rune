@@ -11,27 +11,27 @@ fn new_store() -> RuneStore {
 // B1: Schema & Store
 // ============================================================
 
-#[test]
-fn test_open_in_memory() {
+#[tokio::test]
+async fn test_open_in_memory() {
     let store = new_store();
     // Verify tables exist by running queries that would fail otherwise
-    assert!(store.list_keys().is_ok());
-    assert!(store.list_tasks(None, None, 10, 0).is_ok());
-    assert!(store.query_logs(None, 10).is_ok());
-    assert!(store.list_snapshots().is_ok());
+    assert!(store.list_keys().await.is_ok());
+    assert!(store.list_tasks(None, None, 10, 0).await.is_ok());
+    assert!(store.query_logs(None, 10).await.is_ok());
+    assert!(store.list_snapshots().await.is_ok());
 }
 
-#[test]
-fn test_open_file_based() {
+#[tokio::test]
+async fn test_open_file_based() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.db");
     let store = RuneStore::open(&db_path).expect("failed to open file-based store");
-    store.insert_task("t1", "rune_a", None).unwrap();
+    store.insert_task("t1", "rune_a", None).await.unwrap();
 
     // Reopen and verify data persists
     drop(store);
     let store2 = RuneStore::open(&db_path).unwrap();
-    let task = store2.get_task("t1").unwrap();
+    let task = store2.get_task("t1").await.unwrap();
     assert!(task.is_some());
 }
 
@@ -39,120 +39,120 @@ fn test_open_file_based() {
 // B2: API Key CRUD
 // ============================================================
 
-#[test]
-fn test_create_and_verify_gate_key() {
+#[tokio::test]
+async fn test_create_and_verify_gate_key() {
     let store = new_store();
-    let result = store.create_key(KeyType::Gate, "test gate").unwrap();
-    let verified = store.verify_key(&result.raw_key, KeyType::Gate).unwrap();
+    let result = store.create_key(KeyType::Gate, "test gate").await.unwrap();
+    let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
     assert!(verified.is_some());
     let key = verified.unwrap();
     assert_eq!(key.key_type, KeyType::Gate);
     assert_eq!(key.label, "test gate");
 }
 
-#[test]
-fn test_create_and_verify_caster_key() {
+#[tokio::test]
+async fn test_create_and_verify_caster_key() {
     let store = new_store();
-    let result = store.create_key(KeyType::Caster, "test caster").unwrap();
-    let verified = store.verify_key(&result.raw_key, KeyType::Caster).unwrap();
+    let result = store.create_key(KeyType::Caster, "test caster").await.unwrap();
+    let verified = store.verify_key(&result.raw_key, KeyType::Caster).await.unwrap();
     assert!(verified.is_some());
     assert_eq!(verified.unwrap().key_type, KeyType::Caster);
 }
 
-#[test]
-fn test_wrong_key_type_fails() {
+#[tokio::test]
+async fn test_wrong_key_type_fails() {
     let store = new_store();
-    let result = store.create_key(KeyType::Gate, "gate key").unwrap();
+    let result = store.create_key(KeyType::Gate, "gate key").await.unwrap();
     // Verify as caster should fail
-    let verified = store.verify_key(&result.raw_key, KeyType::Caster).unwrap();
+    let verified = store.verify_key(&result.raw_key, KeyType::Caster).await.unwrap();
     assert!(verified.is_none());
 }
 
-#[test]
-fn test_invalid_key_fails() {
+#[tokio::test]
+async fn test_invalid_key_fails() {
     let store = new_store();
-    let verified = store.verify_key("some_random_string_not_a_key", KeyType::Gate).unwrap();
+    let verified = store.verify_key("some_random_string_not_a_key", KeyType::Gate).await.unwrap();
     assert!(verified.is_none());
 }
 
-#[test]
-fn test_empty_key_fails() {
+#[tokio::test]
+async fn test_empty_key_fails() {
     let store = new_store();
-    let verified = store.verify_key("", KeyType::Gate).unwrap();
+    let verified = store.verify_key("", KeyType::Gate).await.unwrap();
     assert!(verified.is_none());
 }
 
-#[test]
-fn test_list_keys() {
+#[tokio::test]
+async fn test_list_keys() {
     let store = new_store();
-    store.create_key(KeyType::Gate, "key1").unwrap();
-    store.create_key(KeyType::Caster, "key2").unwrap();
-    store.create_key(KeyType::Gate, "key3").unwrap();
+    store.create_key(KeyType::Gate, "key1").await.unwrap();
+    store.create_key(KeyType::Caster, "key2").await.unwrap();
+    store.create_key(KeyType::Gate, "key3").await.unwrap();
 
-    let keys = store.list_keys().unwrap();
+    let keys = store.list_keys().await.unwrap();
     assert_eq!(keys.len(), 3);
     assert_eq!(keys[0].label, "key1");
     assert_eq!(keys[1].label, "key2");
     assert_eq!(keys[2].label, "key3");
 }
 
-#[test]
-fn test_list_keys_hides_hash() {
+#[tokio::test]
+async fn test_list_keys_hides_hash() {
     let store = new_store();
-    store.create_key(KeyType::Gate, "secret").unwrap();
+    store.create_key(KeyType::Gate, "secret").await.unwrap();
 
-    let keys = store.list_keys().unwrap();
+    let keys = store.list_keys().await.unwrap();
     assert_eq!(keys.len(), 1);
     assert!(keys[0].key_hash.is_none(), "key_hash should be None in list results");
 }
 
-#[test]
-fn test_revoke_key() {
+#[tokio::test]
+async fn test_revoke_key() {
     let store = new_store();
-    let result = store.create_key(KeyType::Gate, "to revoke").unwrap();
+    let result = store.create_key(KeyType::Gate, "to revoke").await.unwrap();
 
     // Verify works before revoke
-    assert!(store.verify_key(&result.raw_key, KeyType::Gate).unwrap().is_some());
+    assert!(store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap().is_some());
 
     // Revoke
-    store.revoke_key(result.api_key.id).unwrap();
+    store.revoke_key(result.api_key.id).await.unwrap();
 
     // Verify fails after revoke
-    assert!(store.verify_key(&result.raw_key, KeyType::Gate).unwrap().is_none());
+    assert!(store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap().is_none());
 
     // Check revoked_at is set in list
-    let keys = store.list_keys().unwrap();
+    let keys = store.list_keys().await.unwrap();
     assert!(keys[0].revoked_at.is_some());
 }
 
-#[test]
-fn test_revoke_nonexistent_key() {
+#[tokio::test]
+async fn test_revoke_nonexistent_key() {
     let store = new_store();
     // Should not error
-    let result = store.revoke_key(99999);
+    let result = store.revoke_key(99999).await;
     assert!(result.is_ok());
 }
 
-#[test]
-fn test_create_multiple_same_label() {
+#[tokio::test]
+async fn test_create_multiple_same_label() {
     let store = new_store();
-    let r1 = store.create_key(KeyType::Gate, "same-label").unwrap();
-    let r2 = store.create_key(KeyType::Gate, "same-label").unwrap();
+    let r1 = store.create_key(KeyType::Gate, "same-label").await.unwrap();
+    let r2 = store.create_key(KeyType::Gate, "same-label").await.unwrap();
 
     // Both should be different keys
     assert_ne!(r1.raw_key, r2.raw_key);
     assert_ne!(r1.api_key.id, r2.api_key.id);
 
-    let keys = store.list_keys().unwrap();
+    let keys = store.list_keys().await.unwrap();
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[0].label, "same-label");
     assert_eq!(keys[1].label, "same-label");
 }
 
-#[test]
-fn test_key_format() {
+#[tokio::test]
+async fn test_key_format() {
     let store = new_store();
-    let result = store.create_key(KeyType::Gate, "fmt test").unwrap();
+    let result = store.create_key(KeyType::Gate, "fmt test").await.unwrap();
     let raw = &result.raw_key;
 
     // Format: rk_{32_hex_chars}
@@ -169,120 +169,120 @@ fn test_key_format() {
 // B3: Task CRUD
 // ============================================================
 
-#[test]
-fn test_task_insert_and_get() {
+#[tokio::test]
+async fn test_task_insert_and_get() {
     let store = new_store();
     let input = r#"{"prompt": "hello"}"#;
-    let task = store.insert_task("task-001", "echo_rune", Some(input)).unwrap();
+    let task = store.insert_task("task-001", "echo_rune", Some(input)).await.unwrap();
 
     assert_eq!(task.task_id, "task-001");
     assert_eq!(task.rune_name, "echo_rune");
     assert_eq!(task.status, TaskStatus::Pending);
     assert_eq!(task.input.as_deref(), Some(input));
 
-    let fetched = store.get_task("task-001").unwrap().unwrap();
+    let fetched = store.get_task("task-001").await.unwrap().unwrap();
     assert_eq!(fetched.task_id, "task-001");
     assert_eq!(fetched.input.as_deref(), Some(input));
 }
 
-#[test]
-fn test_task_not_found() {
+#[tokio::test]
+async fn test_task_not_found() {
     let store = new_store();
-    let result = store.get_task("nonexistent").unwrap();
+    let result = store.get_task("nonexistent").await.unwrap();
     assert!(result.is_none());
 }
 
-#[test]
-fn test_task_lifecycle() {
+#[tokio::test]
+async fn test_task_lifecycle() {
     let store = new_store();
-    store.insert_task("lc-1", "rune_a", Some("{}")).unwrap();
+    store.insert_task("lc-1", "rune_a", Some("{}")).await.unwrap();
 
     // pending → running
-    store.update_task_status("lc-1", TaskStatus::Running, None, None).unwrap();
-    let task = store.get_task("lc-1").unwrap().unwrap();
+    store.update_task_status("lc-1", TaskStatus::Running, None, None).await.unwrap();
+    let task = store.get_task("lc-1").await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Running);
     assert!(task.started_at.is_some());
 
     // running → completed
-    store.update_task_status("lc-1", TaskStatus::Completed, Some(r#"{"result": 42}"#), None).unwrap();
-    let task = store.get_task("lc-1").unwrap().unwrap();
+    store.update_task_status("lc-1", TaskStatus::Completed, Some(r#"{"result": 42}"#), None).await.unwrap();
+    let task = store.get_task("lc-1").await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Completed);
     assert!(task.completed_at.is_some());
     assert_eq!(task.output.as_deref(), Some(r#"{"result": 42}"#));
 }
 
-#[test]
-fn test_task_failed() {
+#[tokio::test]
+async fn test_task_failed() {
     let store = new_store();
-    store.insert_task("fail-1", "rune_a", None).unwrap();
-    store.update_task_status("fail-1", TaskStatus::Running, None, None).unwrap();
-    store.update_task_status("fail-1", TaskStatus::Failed, None, Some("timeout after 30s")).unwrap();
+    store.insert_task("fail-1", "rune_a", None).await.unwrap();
+    store.update_task_status("fail-1", TaskStatus::Running, None, None).await.unwrap();
+    store.update_task_status("fail-1", TaskStatus::Failed, None, Some("timeout after 30s")).await.unwrap();
 
-    let task = store.get_task("fail-1").unwrap().unwrap();
+    let task = store.get_task("fail-1").await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Failed);
     assert_eq!(task.error.as_deref(), Some("timeout after 30s"));
     assert!(task.completed_at.is_some());
 }
 
-#[test]
-fn test_task_cancelled() {
+#[tokio::test]
+async fn test_task_cancelled() {
     let store = new_store();
-    store.insert_task("cancel-1", "rune_a", None).unwrap();
-    store.update_task_status("cancel-1", TaskStatus::Running, None, None).unwrap();
-    store.update_task_status("cancel-1", TaskStatus::Cancelled, None, None).unwrap();
+    store.insert_task("cancel-1", "rune_a", None).await.unwrap();
+    store.update_task_status("cancel-1", TaskStatus::Running, None, None).await.unwrap();
+    store.update_task_status("cancel-1", TaskStatus::Cancelled, None, None).await.unwrap();
 
-    let task = store.get_task("cancel-1").unwrap().unwrap();
+    let task = store.get_task("cancel-1").await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Cancelled);
     assert!(task.completed_at.is_some());
 }
 
-#[test]
-fn test_list_tasks_by_status() {
+#[tokio::test]
+async fn test_list_tasks_by_status() {
     let store = new_store();
-    store.insert_task("s1", "rune_a", None).unwrap();
-    store.insert_task("s2", "rune_a", None).unwrap();
-    store.insert_task("s3", "rune_a", None).unwrap();
-    store.update_task_status("s2", TaskStatus::Running, None, None).unwrap();
-    store.update_task_status("s3", TaskStatus::Completed, Some("done"), None).unwrap();
+    store.insert_task("s1", "rune_a", None).await.unwrap();
+    store.insert_task("s2", "rune_a", None).await.unwrap();
+    store.insert_task("s3", "rune_a", None).await.unwrap();
+    store.update_task_status("s2", TaskStatus::Running, None, None).await.unwrap();
+    store.update_task_status("s3", TaskStatus::Completed, Some("done"), None).await.unwrap();
 
-    let pending = store.list_tasks(Some(TaskStatus::Pending), None, 100, 0).unwrap();
+    let pending = store.list_tasks(Some(TaskStatus::Pending), None, 100, 0).await.unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].task_id, "s1");
 
-    let running = store.list_tasks(Some(TaskStatus::Running), None, 100, 0).unwrap();
+    let running = store.list_tasks(Some(TaskStatus::Running), None, 100, 0).await.unwrap();
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].task_id, "s2");
 
-    let completed = store.list_tasks(Some(TaskStatus::Completed), None, 100, 0).unwrap();
+    let completed = store.list_tasks(Some(TaskStatus::Completed), None, 100, 0).await.unwrap();
     assert_eq!(completed.len(), 1);
     assert_eq!(completed[0].task_id, "s3");
 }
 
-#[test]
-fn test_list_tasks_by_rune() {
+#[tokio::test]
+async fn test_list_tasks_by_rune() {
     let store = new_store();
-    store.insert_task("r1", "alpha", None).unwrap();
-    store.insert_task("r2", "beta", None).unwrap();
-    store.insert_task("r3", "alpha", None).unwrap();
+    store.insert_task("r1", "alpha", None).await.unwrap();
+    store.insert_task("r2", "beta", None).await.unwrap();
+    store.insert_task("r3", "alpha", None).await.unwrap();
 
-    let alpha = store.list_tasks(None, Some("alpha"), 100, 0).unwrap();
+    let alpha = store.list_tasks(None, Some("alpha"), 100, 0).await.unwrap();
     assert_eq!(alpha.len(), 2);
 
-    let beta = store.list_tasks(None, Some("beta"), 100, 0).unwrap();
+    let beta = store.list_tasks(None, Some("beta"), 100, 0).await.unwrap();
     assert_eq!(beta.len(), 1);
 }
 
-#[test]
-fn test_list_tasks_pagination() {
+#[tokio::test]
+async fn test_list_tasks_pagination() {
     let store = new_store();
     for i in 0..10 {
-        store.insert_task(&format!("p{}", i), "rune_a", None).unwrap();
+        store.insert_task(&format!("p{}", i), "rune_a", None).await.unwrap();
     }
 
-    let page1 = store.list_tasks(None, None, 3, 0).unwrap();
+    let page1 = store.list_tasks(None, None, 3, 0).await.unwrap();
     assert_eq!(page1.len(), 3);
 
-    let page2 = store.list_tasks(None, None, 3, 3).unwrap();
+    let page2 = store.list_tasks(None, None, 3, 3).await.unwrap();
     assert_eq!(page2.len(), 3);
 
     // Pages should not overlap
@@ -293,29 +293,29 @@ fn test_list_tasks_pagination() {
     }
 
     // Beyond range
-    let page_far = store.list_tasks(None, None, 3, 100).unwrap();
+    let page_far = store.list_tasks(None, None, 3, 100).await.unwrap();
     assert_eq!(page_far.len(), 0);
 }
 
-#[test]
-fn test_list_tasks_empty() {
+#[tokio::test]
+async fn test_list_tasks_empty() {
     let store = new_store();
-    let result = store.list_tasks(None, None, 100, 0).unwrap();
+    let result = store.list_tasks(None, None, 100, 0).await.unwrap();
     assert!(result.is_empty());
 }
 
-#[test]
-fn test_update_nonexistent_task() {
+#[tokio::test]
+async fn test_update_nonexistent_task() {
     let store = new_store();
     // Should not error
-    let result = store.update_task_status("ghost", TaskStatus::Running, None, None);
+    let result = store.update_task_status("ghost", TaskStatus::Running, None, None).await;
     assert!(result.is_ok());
 }
 
-#[test]
-fn test_task_with_large_output() {
+#[tokio::test]
+async fn test_task_with_large_output() {
     let store = new_store();
-    store.insert_task("big-1", "rune_a", None).unwrap();
+    store.insert_task("big-1", "rune_a", None).await.unwrap();
 
     // Generate a large JSON output (~1MB)
     let large_obj: serde_json::Value = serde_json::json!({
@@ -326,9 +326,9 @@ fn test_task_with_large_output() {
     });
     let large_output = serde_json::to_string(&large_obj).unwrap();
 
-    store.update_task_status("big-1", TaskStatus::Completed, Some(&large_output), None).unwrap();
+    store.update_task_status("big-1", TaskStatus::Completed, Some(&large_output), None).await.unwrap();
 
-    let task = store.get_task("big-1").unwrap().unwrap();
+    let task = store.get_task("big-1").await.unwrap().unwrap();
     assert_eq!(task.output.as_deref(), Some(large_output.as_str()));
 
     // Verify the JSON can be parsed back
@@ -336,22 +336,22 @@ fn test_task_with_large_output() {
     assert_eq!(parsed["data"].as_str().unwrap().len(), 1_000_000);
 }
 
-#[test]
-fn test_task_concurrent_updates() {
+#[tokio::test]
+async fn test_task_concurrent_updates() {
     let store = Arc::new(new_store());
 
     // Create 20 tasks
     for i in 0..20 {
-        store.insert_task(&format!("conc-{}", i), "rune_a", None).unwrap();
+        store.insert_task(&format!("conc-{}", i), "rune_a", None).await.unwrap();
     }
 
     // Spawn threads to update different tasks concurrently
     let mut handles = vec![];
     for i in 0..20 {
         let store = Arc::clone(&store);
-        let handle = thread::spawn(move || {
+        let handle = tokio::spawn(async move {
             let task_id = format!("conc-{}", i);
-            store.update_task_status(&task_id, TaskStatus::Running, None, None).unwrap();
+            store.update_task_status(&task_id, TaskStatus::Running, None, None).await.unwrap();
             // Small work simulation
             std::thread::sleep(std::time::Duration::from_millis(1));
             store.update_task_status(
@@ -359,17 +359,17 @@ fn test_task_concurrent_updates() {
                 TaskStatus::Completed,
                 Some(&format!(r#"{{"thread": {}}}"#, i)),
                 None,
-            ).unwrap();
+            ).await.unwrap();
         });
         handles.push(handle);
     }
 
     for h in handles {
-        h.join().unwrap();
+        h.await.unwrap();
     }
 
     // Verify all tasks are completed
-    let tasks = store.list_tasks(Some(TaskStatus::Completed), None, 100, 0).unwrap();
+    let tasks = store.list_tasks(Some(TaskStatus::Completed), None, 100, 0).await.unwrap();
     assert_eq!(tasks.len(), 20);
 }
 
@@ -392,53 +392,53 @@ fn make_log(rune_name: &str, request_id: &str, timestamp: &str) -> CallLog {
     }
 }
 
-#[test]
-fn test_insert_and_query_logs() {
+#[tokio::test]
+async fn test_insert_and_query_logs() {
     let store = new_store();
     let log = make_log("rune_a", "req-1", "2026-01-01T00:00:00Z");
-    let id = store.insert_log(&log).unwrap();
+    let id = store.insert_log(&log).await.unwrap();
     assert!(id > 0);
 
-    let logs = store.query_logs(None, 10).unwrap();
+    let logs = store.query_logs(None, 10).await.unwrap();
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].request_id, "req-1");
     assert_eq!(logs[0].rune_name, "rune_a");
     assert_eq!(logs[0].latency_ms, 42);
 }
 
-#[test]
-fn test_query_logs_by_rune() {
+#[tokio::test]
+async fn test_query_logs_by_rune() {
     let store = new_store();
-    store.insert_log(&make_log("alpha", "r1", "2026-01-01T00:00:01Z")).unwrap();
-    store.insert_log(&make_log("beta", "r2", "2026-01-01T00:00:02Z")).unwrap();
-    store.insert_log(&make_log("alpha", "r3", "2026-01-01T00:00:03Z")).unwrap();
+    store.insert_log(&make_log("alpha", "r1", "2026-01-01T00:00:01Z")).await.unwrap();
+    store.insert_log(&make_log("beta", "r2", "2026-01-01T00:00:02Z")).await.unwrap();
+    store.insert_log(&make_log("alpha", "r3", "2026-01-01T00:00:03Z")).await.unwrap();
 
-    let alpha_logs = store.query_logs(Some("alpha"), 100).unwrap();
+    let alpha_logs = store.query_logs(Some("alpha"), 100).await.unwrap();
     assert_eq!(alpha_logs.len(), 2);
 
-    let beta_logs = store.query_logs(Some("beta"), 100).unwrap();
+    let beta_logs = store.query_logs(Some("beta"), 100).await.unwrap();
     assert_eq!(beta_logs.len(), 1);
 }
 
-#[test]
-fn test_query_logs_limit() {
+#[tokio::test]
+async fn test_query_logs_limit() {
     let store = new_store();
     for i in 0..10 {
-        store.insert_log(&make_log("rune_a", &format!("r{}", i), &format!("2026-01-01T00:00:{:02}Z", i))).unwrap();
+        store.insert_log(&make_log("rune_a", &format!("r{}", i), &format!("2026-01-01T00:00:{:02}Z", i))).await.unwrap();
     }
 
-    let logs = store.query_logs(None, 3).unwrap();
+    let logs = store.query_logs(None, 3).await.unwrap();
     assert_eq!(logs.len(), 3);
 }
 
-#[test]
-fn test_query_logs_order() {
+#[tokio::test]
+async fn test_query_logs_order() {
     let store = new_store();
-    store.insert_log(&make_log("rune_a", "old", "2025-01-01T00:00:00Z")).unwrap();
-    store.insert_log(&make_log("rune_a", "new", "2026-06-01T00:00:00Z")).unwrap();
-    store.insert_log(&make_log("rune_a", "mid", "2025-06-01T00:00:00Z")).unwrap();
+    store.insert_log(&make_log("rune_a", "old", "2025-01-01T00:00:00Z")).await.unwrap();
+    store.insert_log(&make_log("rune_a", "new", "2026-06-01T00:00:00Z")).await.unwrap();
+    store.insert_log(&make_log("rune_a", "mid", "2025-06-01T00:00:00Z")).await.unwrap();
 
-    let logs = store.query_logs(None, 10).unwrap();
+    let logs = store.query_logs(None, 10).await.unwrap();
     assert_eq!(logs.len(), 3);
     // Should be newest first
     assert_eq!(logs[0].request_id, "new");
@@ -446,29 +446,29 @@ fn test_query_logs_order() {
     assert_eq!(logs[2].request_id, "old");
 }
 
-#[test]
-fn test_cleanup_old_logs() {
+#[tokio::test]
+async fn test_cleanup_old_logs() {
     let store = new_store();
-    store.insert_log(&make_log("rune_a", "old1", "2024-01-01T00:00:00Z")).unwrap();
-    store.insert_log(&make_log("rune_a", "old2", "2024-06-01T00:00:00Z")).unwrap();
-    store.insert_log(&make_log("rune_a", "recent", "2026-01-01T00:00:00Z")).unwrap();
+    store.insert_log(&make_log("rune_a", "old1", "2024-01-01T00:00:00Z")).await.unwrap();
+    store.insert_log(&make_log("rune_a", "old2", "2024-06-01T00:00:00Z")).await.unwrap();
+    store.insert_log(&make_log("rune_a", "recent", "2026-01-01T00:00:00Z")).await.unwrap();
 
-    let deleted = store.cleanup_logs_before("2025-01-01T00:00:00Z").unwrap();
+    let deleted = store.cleanup_logs_before("2025-01-01T00:00:00Z").await.unwrap();
     assert_eq!(deleted, 2);
 
-    let remaining = store.query_logs(None, 100).unwrap();
+    let remaining = store.query_logs(None, 100).await.unwrap();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].request_id, "recent");
 }
 
-#[test]
-fn test_log_with_null_caster() {
+#[tokio::test]
+async fn test_log_with_null_caster() {
     let store = new_store();
     let mut log = make_log("rune_a", "no-caster", "2026-01-01T00:00:00Z");
     log.caster_id = None;
-    store.insert_log(&log).unwrap();
+    store.insert_log(&log).await.unwrap();
 
-    let logs = store.query_logs(None, 10).unwrap();
+    let logs = store.query_logs(None, 10).await.unwrap();
     assert_eq!(logs.len(), 1);
     assert!(logs[0].caster_id.is_none());
 }
@@ -489,13 +489,13 @@ fn make_snapshot(name: &str) -> RuneSnapshot {
     }
 }
 
-#[test]
-fn test_upsert_snapshot() {
+#[tokio::test]
+async fn test_upsert_snapshot() {
     let store = new_store();
     let snap = make_snapshot("echo");
-    store.upsert_snapshot(&snap).unwrap();
+    store.upsert_snapshot(&snap).await.unwrap();
 
-    let list = store.list_snapshots().unwrap();
+    let list = store.list_snapshots().await.unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].rune_name, "echo");
     assert_eq!(list[0].version, "0.1.0");
@@ -504,22 +504,22 @@ fn test_upsert_snapshot() {
     let mut snap2 = make_snapshot("echo");
     snap2.version = "0.2.0".to_string();
     snap2.supports_stream = true;
-    store.upsert_snapshot(&snap2).unwrap();
+    store.upsert_snapshot(&snap2).await.unwrap();
 
-    let list = store.list_snapshots().unwrap();
+    let list = store.list_snapshots().await.unwrap();
     assert_eq!(list.len(), 1, "upsert should not duplicate");
     assert_eq!(list[0].version, "0.2.0");
     assert!(list[0].supports_stream);
 }
 
-#[test]
-fn test_list_snapshots() {
+#[tokio::test]
+async fn test_list_snapshots() {
     let store = new_store();
-    store.upsert_snapshot(&make_snapshot("alpha")).unwrap();
-    store.upsert_snapshot(&make_snapshot("beta")).unwrap();
-    store.upsert_snapshot(&make_snapshot("gamma")).unwrap();
+    store.upsert_snapshot(&make_snapshot("alpha")).await.unwrap();
+    store.upsert_snapshot(&make_snapshot("beta")).await.unwrap();
+    store.upsert_snapshot(&make_snapshot("gamma")).await.unwrap();
 
-    let list = store.list_snapshots().unwrap();
+    let list = store.list_snapshots().await.unwrap();
     assert_eq!(list.len(), 3);
     // Ordered by rune_name
     assert_eq!(list[0].rune_name, "alpha");
@@ -527,8 +527,8 @@ fn test_list_snapshots() {
     assert_eq!(list[2].rune_name, "gamma");
 }
 
-#[test]
-fn test_snapshot_preserves_all_fields() {
+#[tokio::test]
+async fn test_snapshot_preserves_all_fields() {
     let store = new_store();
     let snap = RuneSnapshot {
         rune_name: "full_test".to_string(),
@@ -539,9 +539,9 @@ fn test_snapshot_preserves_all_fields() {
         gate_method: "PUT".to_string(),
         last_seen: String::new(),
     };
-    store.upsert_snapshot(&snap).unwrap();
+    store.upsert_snapshot(&snap).await.unwrap();
 
-    let list = store.list_snapshots().unwrap();
+    let list = store.list_snapshots().await.unwrap();
     let s = &list[0];
     assert_eq!(s.rune_name, "full_test");
     assert_eq!(s.version, "1.2.3");
@@ -553,18 +553,18 @@ fn test_snapshot_preserves_all_fields() {
     assert!(!s.last_seen.is_empty(), "last_seen should be set by upsert");
 }
 
-#[test]
-fn test_upsert_updates_last_seen() {
+#[tokio::test]
+async fn test_upsert_updates_last_seen() {
     let store = new_store();
-    store.upsert_snapshot(&make_snapshot("ticker")).unwrap();
-    let first = store.list_snapshots().unwrap();
+    store.upsert_snapshot(&make_snapshot("ticker")).await.unwrap();
+    let first = store.list_snapshots().await.unwrap();
     let first_seen = first[0].last_seen.clone();
 
     // Small delay to ensure timestamp differs
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
-    store.upsert_snapshot(&make_snapshot("ticker")).unwrap();
-    let second = store.list_snapshots().unwrap();
+    store.upsert_snapshot(&make_snapshot("ticker")).await.unwrap();
+    let second = store.list_snapshots().await.unwrap();
     let second_seen = second[0].last_seen.clone();
 
     assert!(
@@ -597,20 +597,20 @@ fn make_log_with_latency(rune_name: &str, request_id: &str, timestamp: &str, lat
 
 // ------ 1. call_stats() direct test ------
 
-#[test]
-fn test_call_stats_returns_correct_counts_and_avg_latency() {
+#[tokio::test]
+async fn test_call_stats_returns_correct_counts_and_avg_latency() {
     let store = new_store();
 
     // Insert logs for "alpha": latencies 10, 20, 30 → avg = 20, count = 3
-    store.insert_log(&make_log_with_latency("alpha", "a1", "2026-01-01T00:00:01Z", 10)).unwrap();
-    store.insert_log(&make_log_with_latency("alpha", "a2", "2026-01-01T00:00:02Z", 20)).unwrap();
-    store.insert_log(&make_log_with_latency("alpha", "a3", "2026-01-01T00:00:03Z", 30)).unwrap();
+    store.insert_log(&make_log_with_latency("alpha", "a1", "2026-01-01T00:00:01Z", 10)).await.unwrap();
+    store.insert_log(&make_log_with_latency("alpha", "a2", "2026-01-01T00:00:02Z", 20)).await.unwrap();
+    store.insert_log(&make_log_with_latency("alpha", "a3", "2026-01-01T00:00:03Z", 30)).await.unwrap();
 
     // Insert logs for "beta": latencies 100, 200 → avg = 150, count = 2
-    store.insert_log(&make_log_with_latency("beta", "b1", "2026-01-01T00:00:04Z", 100)).unwrap();
-    store.insert_log(&make_log_with_latency("beta", "b2", "2026-01-01T00:00:05Z", 200)).unwrap();
+    store.insert_log(&make_log_with_latency("beta", "b1", "2026-01-01T00:00:04Z", 100)).await.unwrap();
+    store.insert_log(&make_log_with_latency("beta", "b2", "2026-01-01T00:00:05Z", 200)).await.unwrap();
 
-    let (total, by_rune) = store.call_stats().unwrap();
+    let (total, by_rune) = store.call_stats().await.unwrap();
     assert_eq!(total, 5);
     assert_eq!(by_rune.len(), 2);
 
@@ -624,54 +624,54 @@ fn test_call_stats_returns_correct_counts_and_avg_latency() {
     assert_eq!(by_rune[1].2, 150); // avg latency
 }
 
-#[test]
-fn test_call_stats_empty_table() {
+#[tokio::test]
+async fn test_call_stats_empty_table() {
     let store = new_store();
-    let (total, by_rune) = store.call_stats().unwrap();
+    let (total, by_rune) = store.call_stats().await.unwrap();
     assert_eq!(total, 0);
     assert!(by_rune.is_empty());
 }
 
 // ------ 2. Task duplicate insert ------
 
-#[test]
-fn test_task_duplicate_insert_returns_error() {
+#[tokio::test]
+async fn test_task_duplicate_insert_returns_error() {
     let store = new_store();
-    store.insert_task("dup-1", "rune_a", Some("first")).unwrap();
+    store.insert_task("dup-1", "rune_a", Some("first")).await.unwrap();
 
     // task_id is PRIMARY KEY, so inserting the same id again should fail
     // with a UNIQUE constraint violation.
-    let result = store.insert_task("dup-1", "rune_b", Some("second"));
+    let result = store.insert_task("dup-1", "rune_b", Some("second")).await;
     assert!(
         result.is_err(),
         "Duplicate task_id insert should fail because task_id is PRIMARY KEY"
     );
 
     // Original task should remain intact
-    let task = store.get_task("dup-1").unwrap().unwrap();
+    let task = store.get_task("dup-1").await.unwrap().unwrap();
     assert_eq!(task.rune_name, "rune_a");
     assert_eq!(task.input.as_deref(), Some("first"));
 }
 
 // ------ 3. Task illegal state transition: Completed → Running ------
 
-#[test]
-fn test_task_illegal_state_transition_completed_to_running() {
+#[tokio::test]
+async fn test_task_illegal_state_transition_completed_to_running() {
     let store = new_store();
-    store.insert_task("illegal-1", "rune_a", None).unwrap();
-    store.update_task_status("illegal-1", TaskStatus::Running, None, None).unwrap();
-    store.update_task_status("illegal-1", TaskStatus::Completed, Some("done"), None).unwrap();
+    store.insert_task("illegal-1", "rune_a", None).await.unwrap();
+    store.update_task_status("illegal-1", TaskStatus::Running, None, None).await.unwrap();
+    store.update_task_status("illegal-1", TaskStatus::Completed, Some("done"), None).await.unwrap();
 
     // NOTE: The current implementation does NOT enforce state machine transitions.
     // It allows any status to be set at any time via a plain SQL UPDATE.
     // Completed → Running should ideally be rejected, but currently it succeeds.
-    let result = store.update_task_status("illegal-1", TaskStatus::Running, None, None);
+    let result = store.update_task_status("illegal-1", TaskStatus::Running, None, None).await;
     assert!(
         result.is_ok(),
         "Current impl allows arbitrary state transitions (no state machine guard)"
     );
 
-    let task = store.get_task("illegal-1").unwrap().unwrap();
+    let task = store.get_task("illegal-1").await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Running);
     // started_at gets overwritten by the second Running transition
     assert!(task.started_at.is_some());
@@ -679,29 +679,29 @@ fn test_task_illegal_state_transition_completed_to_running() {
 
 // ------ 4. cleanup_logs on empty table ------
 
-#[test]
-fn test_cleanup_logs_empty_table() {
+#[tokio::test]
+async fn test_cleanup_logs_empty_table() {
     let store = new_store();
     // Should not panic or return error when no logs exist
-    let deleted = store.cleanup_logs_before("2099-12-31T23:59:59Z").unwrap();
+    let deleted = store.cleanup_logs_before("2099-12-31T23:59:59Z").await.unwrap();
     assert_eq!(deleted, 0);
 }
 
 // ------ 5. Concurrent key creation and verification ------
 
-#[test]
-fn test_concurrent_key_create_and_verify() {
+#[tokio::test]
+async fn test_concurrent_key_create_and_verify() {
     let store = Arc::new(new_store());
     let num_threads = 10;
     let mut handles = vec![];
 
     for i in 0..num_threads {
         let store = Arc::clone(&store);
-        let handle = thread::spawn(move || {
+        let handle = tokio::spawn(async move {
             // Each thread creates a key and immediately verifies it
             let label = format!("concurrent-key-{}", i);
-            let result = store.create_key(KeyType::Gate, &label).unwrap();
-            let verified = store.verify_key(&result.raw_key, KeyType::Gate).unwrap();
+            let result = store.create_key(KeyType::Gate, &label).await.unwrap();
+            let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
             assert!(
                 verified.is_some(),
                 "Key created in thread {} should be verifiable",
@@ -713,7 +713,8 @@ fn test_concurrent_key_create_and_verify() {
         handles.push(handle);
     }
 
-    let raw_keys: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let mut raw_keys = Vec::new();
+    for h in handles { raw_keys.push(h.await.unwrap()); }
 
     // All keys should be distinct
     let mut unique = raw_keys.clone();
@@ -723,48 +724,48 @@ fn test_concurrent_key_create_and_verify() {
 
     // Verify all keys are still valid after all threads finish
     for raw_key in &raw_keys {
-        let v = store.verify_key(raw_key, KeyType::Gate).unwrap();
+        let v = store.verify_key(raw_key, KeyType::Gate).await.unwrap();
         assert!(v.is_some());
     }
 
-    let keys = store.list_keys().unwrap();
+    let keys = store.list_keys().await.unwrap();
     assert_eq!(keys.len(), num_threads);
 }
 
 // ------ 6. Revoke key then create new key with same label ------
 
-#[test]
-fn test_revoke_key_then_create_same_label() {
+#[tokio::test]
+async fn test_revoke_key_then_create_same_label() {
     let store = new_store();
 
     // Create first key
-    let first = store.create_key(KeyType::Gate, "reusable-label").unwrap();
+    let first = store.create_key(KeyType::Gate, "reusable-label").await.unwrap();
     let first_raw = first.raw_key.clone();
     let first_id = first.api_key.id;
 
     // Revoke it
-    store.revoke_key(first_id).unwrap();
+    store.revoke_key(first_id).await.unwrap();
 
     // Old key should be invalid
-    assert!(store.verify_key(&first_raw, KeyType::Gate).unwrap().is_none());
+    assert!(store.verify_key(&first_raw, KeyType::Gate).await.unwrap().is_none());
 
     // Create a new key with the same label
-    let second = store.create_key(KeyType::Gate, "reusable-label").unwrap();
+    let second = store.create_key(KeyType::Gate, "reusable-label").await.unwrap();
     let second_raw = second.raw_key.clone();
 
     // New key should be valid
-    let verified = store.verify_key(&second_raw, KeyType::Gate).unwrap();
+    let verified = store.verify_key(&second_raw, KeyType::Gate).await.unwrap();
     assert!(verified.is_some(), "Newly created key with same label should be valid");
     assert_eq!(verified.unwrap().label, "reusable-label");
 
     // Old key should still be invalid
     assert!(
-        store.verify_key(&first_raw, KeyType::Gate).unwrap().is_none(),
+        store.verify_key(&first_raw, KeyType::Gate).await.unwrap().is_none(),
         "Revoked key should remain invalid after creating a new key with same label"
     );
 
     // Both should appear in the key list
-    let keys = store.list_keys().unwrap();
+    let keys = store.list_keys().await.unwrap();
     assert_eq!(keys.len(), 2);
     let labels: Vec<&str> = keys.iter().map(|k| k.label.as_str()).collect();
     assert_eq!(labels, vec!["reusable-label", "reusable-label"]);
@@ -772,47 +773,47 @@ fn test_revoke_key_then_create_same_label() {
 
 // ------ 7. Very long label (1000 chars) ------
 
-#[test]
-fn test_key_with_very_long_label() {
+#[tokio::test]
+async fn test_key_with_very_long_label() {
     let store = new_store();
     let long_label = "a".repeat(1000);
-    let result = store.create_key(KeyType::Caster, &long_label).unwrap();
+    let result = store.create_key(KeyType::Caster, &long_label).await.unwrap();
 
     // Verify the key works
-    let verified = store.verify_key(&result.raw_key, KeyType::Caster).unwrap();
+    let verified = store.verify_key(&result.raw_key, KeyType::Caster).await.unwrap();
     assert!(verified.is_some());
     assert_eq!(verified.unwrap().label.len(), 1000);
 
     // Verify it appears correctly in list
-    let keys = store.list_keys().unwrap();
+    let keys = store.list_keys().await.unwrap();
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].label.len(), 1000);
 }
 
 // ------ 8. Special character labels (emoji, Chinese, SQL injection) ------
 
-#[test]
-fn test_key_with_emoji_label() {
+#[tokio::test]
+async fn test_key_with_emoji_label() {
     let store = new_store();
     let label = "rocket-key-\u{1F680}\u{2728}\u{1F525}";
-    let result = store.create_key(KeyType::Gate, label).unwrap();
-    let verified = store.verify_key(&result.raw_key, KeyType::Gate).unwrap();
+    let result = store.create_key(KeyType::Gate, label).await.unwrap();
+    let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
     assert!(verified.is_some());
     assert_eq!(verified.unwrap().label, label);
 }
 
-#[test]
-fn test_key_with_chinese_label() {
+#[tokio::test]
+async fn test_key_with_chinese_label() {
     let store = new_store();
     let label = "\u{4F60}\u{597D}\u{4E16}\u{754C}\u{FF0C}\u{8FD9}\u{662F}\u{4E00}\u{4E2A}\u{6D4B}\u{8BD5}";
-    let result = store.create_key(KeyType::Gate, label).unwrap();
-    let verified = store.verify_key(&result.raw_key, KeyType::Gate).unwrap();
+    let result = store.create_key(KeyType::Gate, label).await.unwrap();
+    let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
     assert!(verified.is_some());
     assert_eq!(verified.unwrap().label, label);
 }
 
-#[test]
-fn test_key_with_sql_injection_label() {
+#[tokio::test]
+async fn test_key_with_sql_injection_label() {
     let store = new_store();
 
     // Attempt various SQL injection patterns as labels
@@ -825,8 +826,8 @@ fn test_key_with_sql_injection_label() {
     ];
 
     for (i, label) in injection_labels.iter().enumerate() {
-        let result = store.create_key(KeyType::Gate, label).unwrap();
-        let verified = store.verify_key(&result.raw_key, KeyType::Gate).unwrap();
+        let result = store.create_key(KeyType::Gate, label).await.unwrap();
+        let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
         assert!(verified.is_some(), "SQL injection label #{} should be stored safely", i);
         assert_eq!(
             verified.unwrap().label, *label,
@@ -836,85 +837,85 @@ fn test_key_with_sql_injection_label() {
     }
 
     // Verify the table is still intact
-    let keys = store.list_keys().unwrap();
+    let keys = store.list_keys().await.unwrap();
     assert_eq!(keys.len(), injection_labels.len());
 
     // Verify we can still create tasks (other tables not affected)
-    store.insert_task("post-injection", "rune_a", None).unwrap();
-    assert!(store.get_task("post-injection").unwrap().is_some());
+    store.insert_task("post-injection", "rune_a", None).await.unwrap();
+    assert!(store.get_task("post-injection").await.unwrap().is_some());
 }
 
 // ------ 9. Task filter: status + rune_name combined ------
 
-#[test]
-fn test_list_tasks_filter_by_status_and_rune_name() {
+#[tokio::test]
+async fn test_list_tasks_filter_by_status_and_rune_name() {
     let store = new_store();
 
     // Create tasks across two runes with different statuses
-    store.insert_task("t1", "alpha", None).unwrap(); // pending, alpha
-    store.insert_task("t2", "alpha", None).unwrap(); // running, alpha
-    store.insert_task("t3", "beta", None).unwrap();  // pending, beta
-    store.insert_task("t4", "alpha", None).unwrap(); // completed, alpha
-    store.insert_task("t5", "beta", None).unwrap();  // running, beta
+    store.insert_task("t1", "alpha", None).await.unwrap(); // pending, alpha
+    store.insert_task("t2", "alpha", None).await.unwrap(); // running, alpha
+    store.insert_task("t3", "beta", None).await.unwrap();  // pending, beta
+    store.insert_task("t4", "alpha", None).await.unwrap(); // completed, alpha
+    store.insert_task("t5", "beta", None).await.unwrap();  // running, beta
 
-    store.update_task_status("t2", TaskStatus::Running, None, None).unwrap();
-    store.update_task_status("t4", TaskStatus::Running, None, None).unwrap();
-    store.update_task_status("t4", TaskStatus::Completed, Some("done"), None).unwrap();
-    store.update_task_status("t5", TaskStatus::Running, None, None).unwrap();
+    store.update_task_status("t2", TaskStatus::Running, None, None).await.unwrap();
+    store.update_task_status("t4", TaskStatus::Running, None, None).await.unwrap();
+    store.update_task_status("t4", TaskStatus::Completed, Some("done"), None).await.unwrap();
+    store.update_task_status("t5", TaskStatus::Running, None, None).await.unwrap();
 
     // Filter: pending + alpha → only t1
-    let result = store.list_tasks(Some(TaskStatus::Pending), Some("alpha"), 100, 0).unwrap();
+    let result = store.list_tasks(Some(TaskStatus::Pending), Some("alpha"), 100, 0).await.unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].task_id, "t1");
 
     // Filter: running + alpha → only t2
-    let result = store.list_tasks(Some(TaskStatus::Running), Some("alpha"), 100, 0).unwrap();
+    let result = store.list_tasks(Some(TaskStatus::Running), Some("alpha"), 100, 0).await.unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].task_id, "t2");
 
     // Filter: running + beta → only t5
-    let result = store.list_tasks(Some(TaskStatus::Running), Some("beta"), 100, 0).unwrap();
+    let result = store.list_tasks(Some(TaskStatus::Running), Some("beta"), 100, 0).await.unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].task_id, "t5");
 
     // Filter: completed + alpha → only t4
-    let result = store.list_tasks(Some(TaskStatus::Completed), Some("alpha"), 100, 0).unwrap();
+    let result = store.list_tasks(Some(TaskStatus::Completed), Some("alpha"), 100, 0).await.unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].task_id, "t4");
 
     // Filter: completed + beta → none
-    let result = store.list_tasks(Some(TaskStatus::Completed), Some("beta"), 100, 0).unwrap();
+    let result = store.list_tasks(Some(TaskStatus::Completed), Some("beta"), 100, 0).await.unwrap();
     assert!(result.is_empty());
 
     // Filter: pending + nonexistent rune → none
-    let result = store.list_tasks(Some(TaskStatus::Pending), Some("nonexistent"), 100, 0).unwrap();
+    let result = store.list_tasks(Some(TaskStatus::Pending), Some("nonexistent"), 100, 0).await.unwrap();
     assert!(result.is_empty());
 }
 
 // ------ 10. Log query for nonexistent rune_name returns empty ------
 
-#[test]
-fn test_query_logs_nonexistent_rune_returns_empty() {
+#[tokio::test]
+async fn test_query_logs_nonexistent_rune_returns_empty() {
     let store = new_store();
 
     // Insert some logs for existing runes
-    store.insert_log(&make_log("alpha", "r1", "2026-01-01T00:00:01Z")).unwrap();
-    store.insert_log(&make_log("beta", "r2", "2026-01-01T00:00:02Z")).unwrap();
+    store.insert_log(&make_log("alpha", "r1", "2026-01-01T00:00:01Z")).await.unwrap();
+    store.insert_log(&make_log("beta", "r2", "2026-01-01T00:00:02Z")).await.unwrap();
 
     // Query for a rune that has no logs
-    let result = store.query_logs(Some("nonexistent_rune"), 100).unwrap();
+    let result = store.query_logs(Some("nonexistent_rune"), 100).await.unwrap();
     assert!(result.is_empty(), "Querying logs for a nonexistent rune should return empty vec");
 }
 
-#[test]
-fn test_query_logs_empty_store_returns_empty() {
+#[tokio::test]
+async fn test_query_logs_empty_store_returns_empty() {
     let store = new_store();
 
     // No logs inserted at all
-    let result = store.query_logs(Some("anything"), 100).unwrap();
+    let result = store.query_logs(Some("anything"), 100).await.unwrap();
     assert!(result.is_empty());
 
-    let result = store.query_logs(None, 100).unwrap();
+    let result = store.query_logs(None, 100).await.unwrap();
     assert!(result.is_empty());
 }
 
@@ -924,23 +925,23 @@ fn test_query_logs_empty_store_returns_empty() {
 
 // ------ Key module: double revoke ------
 
-#[test]
-fn test_double_revoke_is_idempotent() {
+#[tokio::test]
+async fn test_double_revoke_is_idempotent() {
     // Revoking an already-revoked key should be a no-op: no error, revoked_at unchanged.
     let store = new_store();
-    let result = store.create_key(KeyType::Gate, "double-revoke").unwrap();
+    let result = store.create_key(KeyType::Gate, "double-revoke").await.unwrap();
     let key_id = result.api_key.id;
 
-    store.revoke_key(key_id).unwrap();
-    let keys_after_first = store.list_keys().unwrap();
+    store.revoke_key(key_id).await.unwrap();
+    let keys_after_first = store.list_keys().await.unwrap();
     let revoked_at_first = keys_after_first[0].revoked_at.clone().unwrap();
 
     // Small delay to ensure timestamp would differ if re-written
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
     // Second revoke — should succeed without error
-    store.revoke_key(key_id).unwrap();
-    let keys_after_second = store.list_keys().unwrap();
+    store.revoke_key(key_id).await.unwrap();
+    let keys_after_second = store.list_keys().await.unwrap();
     let revoked_at_second = keys_after_second[0].revoked_at.clone().unwrap();
 
     // revoked_at must remain the same (idempotent)
@@ -952,64 +953,64 @@ fn test_double_revoke_is_idempotent() {
 
 // ------ Key module: verify a never-existing key with valid prefix ------
 
-#[test]
-fn test_verify_nonexistent_key_with_valid_prefix() {
+#[tokio::test]
+async fn test_verify_nonexistent_key_with_valid_prefix() {
     // A well-formed key that was never created should return None, not error.
     let store = new_store();
     let fake_key = "rk_00000000000000000000000000000000";
     assert_eq!(fake_key.len(), 35);
-    let verified = store.verify_key(fake_key, KeyType::Gate).unwrap();
+    let verified = store.verify_key(fake_key, KeyType::Gate).await.unwrap();
     assert!(verified.is_none(), "A never-created key should verify as None");
 }
 
 // ------ Key module: concurrent revoke same key ------
 
-#[test]
-fn test_concurrent_revoke_same_key() {
+#[tokio::test]
+async fn test_concurrent_revoke_same_key() {
     // Multiple threads revoking the same key concurrently: no panic, no error.
     let store = Arc::new(new_store());
-    let result = store.create_key(KeyType::Gate, "concurrent-revoke").unwrap();
+    let result = store.create_key(KeyType::Gate, "concurrent-revoke").await.unwrap();
     let key_id = result.api_key.id;
 
     let mut handles = vec![];
     for _ in 0..10 {
         let store = Arc::clone(&store);
-        let handle = thread::spawn(move || {
-            store.revoke_key(key_id).unwrap();
+        let handle = tokio::spawn(async move {
+            store.revoke_key(key_id).await.unwrap();
         });
         handles.push(handle);
     }
     for h in handles {
-        h.join().unwrap();
+        h.await.unwrap();
     }
 
     // Key should be revoked
-    let verified = store.verify_key(&result.raw_key, KeyType::Gate).unwrap();
+    let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
     assert!(verified.is_none(), "Key should be revoked after concurrent revoke");
 }
 
 // ------ Key module: create 100 keys then list all ------
 
-#[test]
-fn test_create_100_keys_then_list_all() {
+#[tokio::test]
+async fn test_create_100_keys_then_list_all() {
     let store = new_store();
     for i in 0..100 {
-        store.create_key(KeyType::Gate, &format!("key-{}", i)).unwrap();
+        store.create_key(KeyType::Gate, &format!("key-{}", i)).await.unwrap();
     }
 
-    let keys = store.list_keys().unwrap();
+    let keys = store.list_keys().await.unwrap();
     assert_eq!(keys.len(), 100, "All 100 keys should appear in list");
 }
 
 // ------ Key module: key_hash uniqueness ------
 
-#[test]
-fn test_key_hash_uniqueness() {
+#[tokio::test]
+async fn test_key_hash_uniqueness() {
     // Two independently created keys must have different underlying hashes.
     // We verify this indirectly: both raw keys are different and both verify independently.
     let store = new_store();
-    let r1 = store.create_key(KeyType::Gate, "unique-1").unwrap();
-    let r2 = store.create_key(KeyType::Gate, "unique-2").unwrap();
+    let r1 = store.create_key(KeyType::Gate, "unique-1").await.unwrap();
+    let r2 = store.create_key(KeyType::Gate, "unique-2").await.unwrap();
 
     assert_ne!(r1.raw_key, r2.raw_key, "Raw keys must differ");
     // key_hash from CreateKeyResult is available
@@ -1019,15 +1020,15 @@ fn test_key_hash_uniqueness() {
     );
 
     // Each key should only verify as itself
-    let v1 = store.verify_key(&r1.raw_key, KeyType::Gate).unwrap().unwrap();
-    let v2 = store.verify_key(&r2.raw_key, KeyType::Gate).unwrap().unwrap();
+    let v1 = store.verify_key(&r1.raw_key, KeyType::Gate).await.unwrap().unwrap();
+    let v2 = store.verify_key(&r2.raw_key, KeyType::Gate).await.unwrap().unwrap();
     assert_ne!(v1.id, v2.id);
 }
 
 // ------ Task module: status transition matrix ------
 
-#[test]
-fn test_task_status_transition_matrix_legal() {
+#[tokio::test]
+async fn test_task_status_transition_matrix_legal() {
     // Test all legal transitions:
     //   pending -> running
     //   running -> completed
@@ -1037,115 +1038,115 @@ fn test_task_status_transition_matrix_legal() {
     let store = new_store();
 
     // pending -> running
-    store.insert_task("tr-pr", "rune_a", None).unwrap();
-    store.update_task_status("tr-pr", TaskStatus::Running, None, None).unwrap();
-    let t = store.get_task("tr-pr").unwrap().unwrap();
+    store.insert_task("tr-pr", "rune_a", None).await.unwrap();
+    store.update_task_status("tr-pr", TaskStatus::Running, None, None).await.unwrap();
+    let t = store.get_task("tr-pr").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Running);
     assert!(t.started_at.is_some());
 
     // running -> completed
-    store.insert_task("tr-rc", "rune_a", None).unwrap();
-    store.update_task_status("tr-rc", TaskStatus::Running, None, None).unwrap();
-    store.update_task_status("tr-rc", TaskStatus::Completed, Some("ok"), None).unwrap();
-    let t = store.get_task("tr-rc").unwrap().unwrap();
+    store.insert_task("tr-rc", "rune_a", None).await.unwrap();
+    store.update_task_status("tr-rc", TaskStatus::Running, None, None).await.unwrap();
+    store.update_task_status("tr-rc", TaskStatus::Completed, Some("ok"), None).await.unwrap();
+    let t = store.get_task("tr-rc").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Completed);
     assert!(t.completed_at.is_some());
     assert_eq!(t.output.as_deref(), Some("ok"));
 
     // running -> failed
-    store.insert_task("tr-rf", "rune_a", None).unwrap();
-    store.update_task_status("tr-rf", TaskStatus::Running, None, None).unwrap();
-    store.update_task_status("tr-rf", TaskStatus::Failed, None, Some("boom")).unwrap();
-    let t = store.get_task("tr-rf").unwrap().unwrap();
+    store.insert_task("tr-rf", "rune_a", None).await.unwrap();
+    store.update_task_status("tr-rf", TaskStatus::Running, None, None).await.unwrap();
+    store.update_task_status("tr-rf", TaskStatus::Failed, None, Some("boom")).await.unwrap();
+    let t = store.get_task("tr-rf").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Failed);
     assert!(t.completed_at.is_some());
     assert_eq!(t.error.as_deref(), Some("boom"));
 
     // running -> cancelled
-    store.insert_task("tr-rx", "rune_a", None).unwrap();
-    store.update_task_status("tr-rx", TaskStatus::Running, None, None).unwrap();
-    store.update_task_status("tr-rx", TaskStatus::Cancelled, None, None).unwrap();
-    let t = store.get_task("tr-rx").unwrap().unwrap();
+    store.insert_task("tr-rx", "rune_a", None).await.unwrap();
+    store.update_task_status("tr-rx", TaskStatus::Running, None, None).await.unwrap();
+    store.update_task_status("tr-rx", TaskStatus::Cancelled, None, None).await.unwrap();
+    let t = store.get_task("tr-rx").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Cancelled);
     assert!(t.completed_at.is_some());
 
     // pending -> cancelled (skip running)
-    store.insert_task("tr-pc", "rune_a", None).unwrap();
-    store.update_task_status("tr-pc", TaskStatus::Cancelled, None, None).unwrap();
-    let t = store.get_task("tr-pc").unwrap().unwrap();
+    store.insert_task("tr-pc", "rune_a", None).await.unwrap();
+    store.update_task_status("tr-pc", TaskStatus::Cancelled, None, None).await.unwrap();
+    let t = store.get_task("tr-pc").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Cancelled);
     assert!(t.completed_at.is_some());
 }
 
 // ------ Task module: illegal transitions ------
 
-#[test]
-fn test_task_illegal_transitions_documented() {
+#[tokio::test]
+async fn test_task_illegal_transitions_documented() {
     // TODO: The current implementation does NOT enforce a state machine.
     // All transitions below should ideally be rejected but currently succeed.
     // This test documents the current permissive behavior.
     let store = new_store();
 
     // failed -> running (illegal)
-    store.insert_task("ill-fr", "rune_a", None).unwrap();
-    store.update_task_status("ill-fr", TaskStatus::Running, None, None).unwrap();
-    store.update_task_status("ill-fr", TaskStatus::Failed, None, Some("err")).unwrap();
-    let result = store.update_task_status("ill-fr", TaskStatus::Running, None, None);
+    store.insert_task("ill-fr", "rune_a", None).await.unwrap();
+    store.update_task_status("ill-fr", TaskStatus::Running, None, None).await.unwrap();
+    store.update_task_status("ill-fr", TaskStatus::Failed, None, Some("err")).await.unwrap();
+    let result = store.update_task_status("ill-fr", TaskStatus::Running, None, None).await;
     // TODO: This should ideally return an error, but currently succeeds.
     assert!(result.is_ok(), "Current impl allows failed->running (no state machine guard)");
-    let t = store.get_task("ill-fr").unwrap().unwrap();
+    let t = store.get_task("ill-fr").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Running);
 
     // cancelled -> completed (illegal)
-    store.insert_task("ill-cc", "rune_a", None).unwrap();
-    store.update_task_status("ill-cc", TaskStatus::Cancelled, None, None).unwrap();
-    let result = store.update_task_status("ill-cc", TaskStatus::Completed, Some("late"), None);
+    store.insert_task("ill-cc", "rune_a", None).await.unwrap();
+    store.update_task_status("ill-cc", TaskStatus::Cancelled, None, None).await.unwrap();
+    let result = store.update_task_status("ill-cc", TaskStatus::Completed, Some("late"), None).await;
     // TODO: This should ideally return an error, but currently succeeds.
     assert!(result.is_ok(), "Current impl allows cancelled->completed (no state machine guard)");
-    let t = store.get_task("ill-cc").unwrap().unwrap();
+    let t = store.get_task("ill-cc").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Completed);
 
     // completed -> pending (illegal)
-    store.insert_task("ill-cp", "rune_a", None).unwrap();
-    store.update_task_status("ill-cp", TaskStatus::Running, None, None).unwrap();
-    store.update_task_status("ill-cp", TaskStatus::Completed, Some("done"), None).unwrap();
-    let result = store.update_task_status("ill-cp", TaskStatus::Pending, None, None);
+    store.insert_task("ill-cp", "rune_a", None).await.unwrap();
+    store.update_task_status("ill-cp", TaskStatus::Running, None, None).await.unwrap();
+    store.update_task_status("ill-cp", TaskStatus::Completed, Some("done"), None).await.unwrap();
+    let result = store.update_task_status("ill-cp", TaskStatus::Pending, None, None).await;
     // TODO: This should ideally return an error, but currently succeeds.
     assert!(result.is_ok(), "Current impl allows completed->pending (no state machine guard)");
-    let t = store.get_task("ill-cp").unwrap().unwrap();
+    let t = store.get_task("ill-cp").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Pending);
 }
 
 // ------ Task module: input/output with special content ------
 
-#[test]
-fn test_task_input_with_unicode() {
+#[tokio::test]
+async fn test_task_input_with_unicode() {
     let store = new_store();
     let unicode_input = r#"{"msg": "你好世界 🚀 Ñoño"}"#;
-    let task = store.insert_task("uni-1", "rune_a", Some(unicode_input)).unwrap();
+    let task = store.insert_task("uni-1", "rune_a", Some(unicode_input)).await.unwrap();
     assert_eq!(task.input.as_deref(), Some(unicode_input));
 
-    let fetched = store.get_task("uni-1").unwrap().unwrap();
+    let fetched = store.get_task("uni-1").await.unwrap().unwrap();
     assert_eq!(fetched.input.as_deref(), Some(unicode_input));
 }
 
-#[test]
-fn test_task_output_with_100kb_json() {
+#[tokio::test]
+async fn test_task_output_with_100kb_json() {
     let store = new_store();
-    store.insert_task("big-json", "rune_a", None).unwrap();
+    store.insert_task("big-json", "rune_a", None).await.unwrap();
 
     // Build a ~100KB JSON string
     let big_data = "x".repeat(100_000);
     let big_json = format!(r#"{{"data": "{}"}}"#, big_data);
     assert!(big_json.len() > 100_000);
 
-    store.update_task_status("big-json", TaskStatus::Completed, Some(&big_json), None).unwrap();
-    let t = store.get_task("big-json").unwrap().unwrap();
+    store.update_task_status("big-json", TaskStatus::Completed, Some(&big_json), None).await.unwrap();
+    let t = store.get_task("big-json").await.unwrap().unwrap();
     assert_eq!(t.output.as_deref(), Some(big_json.as_str()));
 }
 
-#[test]
-fn test_task_input_deeply_nested_json() {
+#[tokio::test]
+async fn test_task_input_deeply_nested_json() {
     let store = new_store();
 
     // Build a 100-level nested JSON object: {"a":{"a":{..."a":1}...}}
@@ -1154,10 +1155,10 @@ fn test_task_input_deeply_nested_json() {
         json = format!(r#"{{"a":{}}}"#, json);
     }
 
-    let task = store.insert_task("nested-100", "rune_a", Some(&json)).unwrap();
+    let task = store.insert_task("nested-100", "rune_a", Some(&json)).await.unwrap();
     assert_eq!(task.input.as_deref(), Some(json.as_str()));
 
-    let fetched = store.get_task("nested-100").unwrap().unwrap();
+    let fetched = store.get_task("nested-100").await.unwrap().unwrap();
     // Verify it round-trips correctly
     let parsed: serde_json::Value = serde_json::from_str(fetched.input.as_ref().unwrap()).unwrap();
     // Traverse 100 levels of "a" to reach the inner value
@@ -1170,19 +1171,19 @@ fn test_task_input_deeply_nested_json() {
 
 // ------ Task module: list ordering ------
 
-#[test]
-fn test_task_list_ordered_by_created_at_desc() {
+#[tokio::test]
+async fn test_task_list_ordered_by_created_at_desc() {
     // Timestamp resolution is 1 second, so we need >1s delay between inserts
     // to guarantee different created_at values.
     let store = new_store();
 
-    store.insert_task("order-1", "rune_a", None).unwrap();
+    store.insert_task("order-1", "rune_a", None).await.unwrap();
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    store.insert_task("order-2", "rune_a", None).unwrap();
+    store.insert_task("order-2", "rune_a", None).await.unwrap();
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    store.insert_task("order-3", "rune_a", None).unwrap();
+    store.insert_task("order-3", "rune_a", None).await.unwrap();
 
-    let tasks = store.list_tasks(None, None, 100, 0).unwrap();
+    let tasks = store.list_tasks(None, None, 100, 0).await.unwrap();
     assert_eq!(tasks.len(), 3);
 
     // Verify created_at values are actually distinct
@@ -1197,34 +1198,34 @@ fn test_task_list_ordered_by_created_at_desc() {
 
 // ------ Task module: offset beyond range ------
 
-#[test]
-fn test_task_list_offset_beyond_total() {
+#[tokio::test]
+async fn test_task_list_offset_beyond_total() {
     let store = new_store();
-    store.insert_task("off-1", "rune_a", None).unwrap();
-    store.insert_task("off-2", "rune_a", None).unwrap();
+    store.insert_task("off-1", "rune_a", None).await.unwrap();
+    store.insert_task("off-2", "rune_a", None).await.unwrap();
 
-    let result = store.list_tasks(None, None, 100, 999).unwrap();
+    let result = store.list_tasks(None, None, 100, 999).await.unwrap();
     assert!(result.is_empty(), "Offset beyond total should return empty");
 }
 
 // ------ Log module: exact boundary cleanup ------
 
-#[test]
-fn test_cleanup_exact_boundary_timestamp() {
+#[tokio::test]
+async fn test_cleanup_exact_boundary_timestamp() {
     // cleanup_logs_before uses strict "<", so a log with the exact boundary timestamp
     // should NOT be deleted.
     let store = new_store();
     let boundary = "2025-06-01T00:00:00Z";
 
-    store.insert_log(&make_log("rune_a", "before", "2025-05-31T23:59:59Z")).unwrap();
-    store.insert_log(&make_log("rune_a", "exact", boundary)).unwrap();
-    store.insert_log(&make_log("rune_a", "after", "2025-06-01T00:00:01Z")).unwrap();
+    store.insert_log(&make_log("rune_a", "before", "2025-05-31T23:59:59Z")).await.unwrap();
+    store.insert_log(&make_log("rune_a", "exact", boundary)).await.unwrap();
+    store.insert_log(&make_log("rune_a", "after", "2025-06-01T00:00:01Z")).await.unwrap();
 
-    let deleted = store.cleanup_logs_before(boundary).unwrap();
+    let deleted = store.cleanup_logs_before(boundary).await.unwrap();
     // Only "before" should be deleted (strict <)
     assert_eq!(deleted, 1, "Only logs strictly before the boundary should be deleted");
 
-    let remaining = store.query_logs(None, 100).unwrap();
+    let remaining = store.query_logs(None, 100).await.unwrap();
     assert_eq!(remaining.len(), 2);
     let ids: Vec<&str> = remaining.iter().map(|l| l.request_id.as_str()).collect();
     assert!(ids.contains(&"exact"), "Exact boundary log should remain");
@@ -1233,25 +1234,25 @@ fn test_cleanup_exact_boundary_timestamp() {
 
 // ------ Log module: large query with limit ------
 
-#[test]
-fn test_query_1000_logs_with_limit_10() {
+#[tokio::test]
+async fn test_query_1000_logs_with_limit_10() {
     let store = new_store();
     for i in 0..1000 {
         store.insert_log(&make_log(
             "rune_a",
             &format!("req-{}", i),
             &format!("2026-01-01T{:02}:{:02}:{:02}Z", i / 3600, (i % 3600) / 60, i % 60),
-        )).unwrap();
+        )).await.unwrap();
     }
 
-    let logs = store.query_logs(None, 10).unwrap();
+    let logs = store.query_logs(None, 10).await.unwrap();
     assert_eq!(logs.len(), 10, "Limit should cap results at 10");
 }
 
 // ------ Log module: all three modes ------
 
-#[test]
-fn test_log_mode_all_variants() {
+#[tokio::test]
+async fn test_log_mode_all_variants() {
     // The call_logs table has CHECK(mode IN ('sync', 'stream', 'async'))
     let store = new_store();
 
@@ -1268,10 +1269,10 @@ fn test_log_mode_all_variants() {
             output_size: 100,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
         };
-        store.insert_log(&log).unwrap();
+        store.insert_log(&log).await.unwrap();
     }
 
-    let logs = store.query_logs(None, 100).unwrap();
+    let logs = store.query_logs(None, 100).await.unwrap();
     assert_eq!(logs.len(), 3);
     let modes: Vec<&str> = logs.iter().map(|l| l.mode.as_str()).collect();
     assert!(modes.contains(&"sync"));
@@ -1281,40 +1282,40 @@ fn test_log_mode_all_variants() {
 
 // ------ Log module: latency boundary values ------
 
-#[test]
-fn test_log_latency_zero() {
+#[tokio::test]
+async fn test_log_latency_zero() {
     let store = new_store();
     let log = make_log_with_latency("rune_a", "lat-0", "2026-01-01T00:00:00Z", 0);
-    store.insert_log(&log).unwrap();
+    store.insert_log(&log).await.unwrap();
 
-    let logs = store.query_logs(None, 10).unwrap();
+    let logs = store.query_logs(None, 10).await.unwrap();
     assert_eq!(logs[0].latency_ms, 0);
 }
 
-#[test]
-fn test_log_latency_i64_max() {
+#[tokio::test]
+async fn test_log_latency_i64_max() {
     let store = new_store();
     let log = make_log_with_latency("rune_a", "lat-max", "2026-01-01T00:00:00Z", i64::MAX);
-    store.insert_log(&log).unwrap();
+    store.insert_log(&log).await.unwrap();
 
-    let logs = store.query_logs(None, 10).unwrap();
+    let logs = store.query_logs(None, 10).await.unwrap();
     assert_eq!(logs[0].latency_ms, i64::MAX);
 }
 
 // ------ Log module: various status_code values ------
 
-#[test]
-fn test_log_status_codes() {
+#[tokio::test]
+async fn test_log_status_codes() {
     let store = new_store();
     let codes = [200, 400, 401, 404, 409, 500];
 
     for (i, &code) in codes.iter().enumerate() {
         let mut log = make_log("rune_a", &format!("sc-{}", i), &format!("2026-01-01T00:00:{:02}Z", i));
         log.status_code = code;
-        store.insert_log(&log).unwrap();
+        store.insert_log(&log).await.unwrap();
     }
 
-    let logs = store.query_logs(None, 100).unwrap();
+    let logs = store.query_logs(None, 100).await.unwrap();
     assert_eq!(logs.len(), codes.len());
     let stored_codes: Vec<i32> = logs.iter().map(|l| l.status_code).collect();
     for &code in &codes {
@@ -1324,14 +1325,14 @@ fn test_log_status_codes() {
 
 // ------ Snapshot module: 50 different snapshots ------
 
-#[test]
-fn test_50_snapshots_list_all() {
+#[tokio::test]
+async fn test_50_snapshots_list_all() {
     let store = new_store();
     for i in 0..50 {
-        store.upsert_snapshot(&make_snapshot(&format!("rune-{:03}", i))).unwrap();
+        store.upsert_snapshot(&make_snapshot(&format!("rune-{:03}", i))).await.unwrap();
     }
 
-    let list = store.list_snapshots().unwrap();
+    let list = store.list_snapshots().await.unwrap();
     assert_eq!(list.len(), 50, "All 50 snapshots should appear in list");
     // Verify alphabetical ordering
     for i in 1..list.len() {
@@ -1344,8 +1345,8 @@ fn test_50_snapshots_list_all() {
 
 // ------ Snapshot module: empty optional fields ------
 
-#[test]
-fn test_snapshot_with_empty_string_fields() {
+#[tokio::test]
+async fn test_snapshot_with_empty_string_fields() {
     // gate_path and gate_method are NOT NULL in schema, but can be empty strings.
     // This tests the boundary of "no meaningful value" without NULL.
     let store = new_store();
@@ -1358,9 +1359,9 @@ fn test_snapshot_with_empty_string_fields() {
         gate_method: "".to_string(),
         last_seen: String::new(),
     };
-    store.upsert_snapshot(&snap).unwrap();
+    store.upsert_snapshot(&snap).await.unwrap();
 
-    let list = store.list_snapshots().unwrap();
+    let list = store.list_snapshots().await.unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].gate_path, "");
     assert_eq!(list[0].gate_method, "");
@@ -1369,8 +1370,8 @@ fn test_snapshot_with_empty_string_fields() {
 
 // ------ Snapshot module: rune_name with special characters ------
 
-#[test]
-fn test_snapshot_rune_name_special_chars() {
+#[tokio::test]
+async fn test_snapshot_rune_name_special_chars() {
     let store = new_store();
     let names = [
         "my/rune",
@@ -1380,10 +1381,10 @@ fn test_snapshot_rune_name_special_chars() {
     ];
 
     for name in &names {
-        store.upsert_snapshot(&make_snapshot(name)).unwrap();
+        store.upsert_snapshot(&make_snapshot(name)).await.unwrap();
     }
 
-    let list = store.list_snapshots().unwrap();
+    let list = store.list_snapshots().await.unwrap();
     assert_eq!(list.len(), names.len());
     let stored_names: Vec<&str> = list.iter().map(|s| s.rune_name.as_str()).collect();
     for name in &names {
@@ -1397,18 +1398,18 @@ fn test_snapshot_rune_name_special_chars() {
 
 // ------ Snapshot module: rapid consecutive upsert ------
 
-#[test]
-fn test_snapshot_rapid_upsert_10_times() {
+#[tokio::test]
+async fn test_snapshot_rapid_upsert_10_times() {
     let store = new_store();
 
     for i in 0..10 {
         let mut snap = make_snapshot("rapid-rune");
         snap.version = format!("0.{}.0", i);
         snap.supports_stream = i % 2 == 0;
-        store.upsert_snapshot(&snap).unwrap();
+        store.upsert_snapshot(&snap).await.unwrap();
     }
 
-    let list = store.list_snapshots().unwrap();
+    let list = store.list_snapshots().await.unwrap();
     assert_eq!(list.len(), 1, "Upsert should not create duplicates");
     // The last upsert should win
     assert_eq!(list[0].version, "0.9.0");
@@ -1418,8 +1419,8 @@ fn test_snapshot_rapid_upsert_10_times() {
 
 // ------ Cross-module: store reopen persistence ------
 
-#[test]
-fn test_store_reopen_data_persists() {
+#[tokio::test]
+async fn test_store_reopen_data_persists() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("persist.db");
 
@@ -1427,10 +1428,10 @@ fn test_store_reopen_data_persists() {
     {
         let store = RuneStore::open(&db_path).unwrap();
 
-        store.create_key(KeyType::Gate, "persist-key").unwrap();
-        store.insert_task("persist-task", "persist-rune", Some(r#"{"x":1}"#)).unwrap();
-        store.insert_log(&make_log("persist-rune", "persist-req", "2026-01-01T00:00:00Z")).unwrap();
-        store.upsert_snapshot(&make_snapshot("persist-snap")).unwrap();
+        store.create_key(KeyType::Gate, "persist-key").await.unwrap();
+        store.insert_task("persist-task", "persist-rune", Some(r#"{"x":1}"#)).await.unwrap();
+        store.insert_log(&make_log("persist-rune", "persist-req", "2026-01-01T00:00:00Z")).await.unwrap();
+        store.upsert_snapshot(&make_snapshot("persist-snap")).await.unwrap();
     }
     // store is dropped (closed)
 
@@ -1438,19 +1439,19 @@ fn test_store_reopen_data_persists() {
     {
         let store = RuneStore::open(&db_path).unwrap();
 
-        let keys = store.list_keys().unwrap();
+        let keys = store.list_keys().await.unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].label, "persist-key");
 
-        let task = store.get_task("persist-task").unwrap().unwrap();
+        let task = store.get_task("persist-task").await.unwrap().unwrap();
         assert_eq!(task.rune_name, "persist-rune");
         assert_eq!(task.input.as_deref(), Some(r#"{"x":1}"#));
 
-        let logs = store.query_logs(None, 100).unwrap();
+        let logs = store.query_logs(None, 100).await.unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].request_id, "persist-req");
 
-        let snaps = store.list_snapshots().unwrap();
+        let snaps = store.list_snapshots().await.unwrap();
         assert_eq!(snaps.len(), 1);
         assert_eq!(snaps[0].rune_name, "persist-snap");
     }
@@ -1458,52 +1459,79 @@ fn test_store_reopen_data_persists() {
 
 // ------ Cross-module: empty database all queries ------
 
-#[test]
-fn test_empty_database_all_queries() {
+#[tokio::test]
+async fn test_empty_database_all_queries() {
     let store = new_store();
 
     // Keys
-    let keys = store.list_keys().unwrap();
+    let keys = store.list_keys().await.unwrap();
     assert!(keys.is_empty());
 
     // Verify non-existent key
-    let v = store.verify_key("rk_aaaabbbbccccddddaaaabbbbccccdddd", KeyType::Gate).unwrap();
+    let v = store.verify_key("rk_aaaabbbbccccddddaaaabbbbccccdddd", KeyType::Gate).await.unwrap();
     assert!(v.is_none());
 
     // Revoke non-existent key
-    assert!(store.revoke_key(1).is_ok());
+    assert!(store.revoke_key(1).await.is_ok());
 
     // Tasks
-    let tasks = store.list_tasks(None, None, 100, 0).unwrap();
+    let tasks = store.list_tasks(None, None, 100, 0).await.unwrap();
     assert!(tasks.is_empty());
 
-    let tasks_by_status = store.list_tasks(Some(TaskStatus::Pending), None, 100, 0).unwrap();
+    let tasks_by_status = store.list_tasks(Some(TaskStatus::Pending), None, 100, 0).await.unwrap();
     assert!(tasks_by_status.is_empty());
 
-    let tasks_by_rune = store.list_tasks(None, Some("anything"), 100, 0).unwrap();
+    let tasks_by_rune = store.list_tasks(None, Some("anything"), 100, 0).await.unwrap();
     assert!(tasks_by_rune.is_empty());
 
-    let task = store.get_task("nonexistent").unwrap();
+    let task = store.get_task("nonexistent").await.unwrap();
     assert!(task.is_none());
 
-    let update_result = store.update_task_status("ghost", TaskStatus::Running, None, None);
+    let update_result = store.update_task_status("ghost", TaskStatus::Running, None, None).await;
     assert!(update_result.is_ok());
 
     // Logs
-    let logs = store.query_logs(None, 100).unwrap();
+    let logs = store.query_logs(None, 100).await.unwrap();
     assert!(logs.is_empty());
 
-    let logs_filtered = store.query_logs(Some("anything"), 100).unwrap();
+    let logs_filtered = store.query_logs(Some("anything"), 100).await.unwrap();
     assert!(logs_filtered.is_empty());
 
-    let deleted = store.cleanup_logs_before("2099-12-31T23:59:59Z").unwrap();
+    let deleted = store.cleanup_logs_before("2099-12-31T23:59:59Z").await.unwrap();
     assert_eq!(deleted, 0);
 
-    let (total, by_rune) = store.call_stats().unwrap();
+    let (total, by_rune) = store.call_stats().await.unwrap();
     assert_eq!(total, 0);
     assert!(by_rune.is_empty());
 
     // Snapshots
-    let snaps = store.list_snapshots().unwrap();
+    let snaps = store.list_snapshots().await.unwrap();
     assert!(snaps.is_empty());
+}
+
+// ============================================================
+// Issue 1 Regression: store operations use spawn_blocking
+// ============================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_store_operations_dont_block_async_runtime() {
+    let store = Arc::new(new_store());
+
+    let store_clone = Arc::clone(&store);
+    let store_handle = tokio::spawn(async move {
+        store_clone.insert_task("blocking-test", "echo", Some("data")).await.unwrap();
+        store_clone.get_task("blocking-test").await.unwrap()
+    });
+
+    let fast_handle = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        42u64
+    });
+
+    let task = store_handle.await.unwrap();
+    assert!(task.is_some());
+    assert_eq!(task.unwrap().task_id, "blocking-test");
+
+    let fast_result = fast_handle.await.unwrap();
+    assert_eq!(fast_result, 42);
 }
