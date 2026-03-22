@@ -4,7 +4,9 @@ use crate::error::error_response;
 use crate::state::GateState;
 use axum::http::StatusCode;
 
-/// Threshold for inline vs broker transfer: 4MB
+/// Threshold for inline vs broker transfer: 4 MB.
+/// Files smaller than this are transferred inline in the JSON response;
+/// larger files go through the file broker and are fetched via `/api/v1/files/:id`.
 const INLINE_THRESHOLD: usize = 4 * 1024 * 1024;
 
 /// File metadata for the response JSON.

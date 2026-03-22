@@ -1764,7 +1764,7 @@ dependencies = [
 
 [[package]]
 name = "rune-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1783,7 +1783,7 @@ dependencies = [
 
 [[package]]
 name = "rune-core"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1805,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "rune-flow"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "rune-core",
@@ -1818,7 +1818,7 @@ dependencies = [
 
 [[package]]
 name = "rune-gate"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "axum",
  "bytes",
@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "rune-proto"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "prost",
  "tonic",
@@ -1852,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "rune-schema"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "jsonschema",
  "serde",
@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "rune-sdk"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "http",
@@ -1882,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "rune-server"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1908,7 +1908,7 @@ dependencies = [
 
 [[package]]
 name = "rune-store"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "hex",

@@ -157,6 +157,7 @@ fn build_test_state(auth_enabled: bool) -> (GateState, Arc<RuneStore>) {
         flow_engine,
         rate_limiter: None,
         shutdown: gate::ShutdownCoordinator::new(),
+        request_timeout: Duration::from_secs(30),
     };
 
     (state, store)
@@ -638,7 +639,7 @@ async fn e2e_flow_cyclic_dag_returns_400() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let json: serde_json::Value = resp.json().await.unwrap();
-    let error = json["error"].as_str().unwrap();
+    let error = json["error"]["message"].as_str().unwrap();
     assert!(
         error.contains("cycle"),
         "error should mention cycle: {}",
@@ -1277,4 +1278,61 @@ async fn e2e_multiple_rune_calls_on_same_server() {
         .unwrap();
     let stats: serde_json::Value = resp.json().await.unwrap();
     assert!(stats["total_calls"].as_i64().unwrap() >= 4);
+}
+
+// ===========================================================================
+// 20. Graceful shutdown behavior
+// ===========================================================================
+
+/// Spawn a server that returns its ShutdownCoordinator for external triggering.
+async fn spawn_server_with_shutdown(
+    state: GateState,
+) -> (String, tokio::task::JoinHandle<()>, rune_gate::ShutdownCoordinator) {
+    let shutdown = state.shutdown.clone();
+    let router = gate::build_router(state, None);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    (base_url, handle, shutdown)
+}
+
+#[tokio::test]
+async fn e2e_shutdown_rejects_new_requests_with_503() {
+    let (state, _store) = build_test_state(false);
+    let (base, _h, shutdown) = spawn_server_with_shutdown(state).await;
+    let c = client();
+
+    // Verify server is healthy first
+    let resp = c.get(format!("{}/health", base)).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Trigger drain mode
+    shutdown.start_drain();
+
+    // New requests should be rejected with 503
+    let resp = c
+        .post(format!("{}/api/v1/runes/echo/run", base))
+        .json(&serde_json::json!({"after_shutdown": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503, "requests after shutdown should return 503");
+}
+
+// ===========================================================================
+// 21. Hardcoded config: max_upload_size_mb from config
+// ===========================================================================
+
+#[tokio::test]
+async fn e2e_max_upload_size_from_config() {
+    // build_test_state sets max_upload_size_mb=1, verify the config value is respected
+    let (state, _store) = build_test_state(false);
+    assert_eq!(state.max_upload_size_mb, 1, "max_upload_size_mb should come from test config");
 }

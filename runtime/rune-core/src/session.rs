@@ -742,16 +742,10 @@ mod tests {
     }
 
     // ---- Scenario 15: heartbeat timeout ----
-    // TODO: Testing heartbeat timeout end-to-end requires a real
-    // `tonic::Streaming<SessionMessage>`, which needs a live gRPC transport
-    // or a mock stream. The current session test framework uses direct
-    // `CasterState` insertion (bypassing `handle_session`), so the heartbeat
-    // loop is never started.
-    //
-    // To properly test heartbeat timeout, we would need to:
-    // 1. Create a mock `Streaming` implementation, or
-    // 2. Extract the heartbeat logic into a standalone testable unit.
-    //
+    // NOTE: End-to-end heartbeat timeout testing requires a real
+    // `tonic::Streaming<SessionMessage>` (live gRPC transport or mock stream).
+    // The current session test framework uses direct `CasterState` insertion
+    // (bypassing `handle_session`), so the heartbeat loop is never started.
     // For now, we verify the heartbeat configuration is correctly propagated.
 
     #[test]

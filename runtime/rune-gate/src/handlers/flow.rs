@@ -21,12 +21,13 @@ pub async fn create_flow(
 ) -> axum::response::Response {
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
         Ok(b) => b,
-        Err(_) => return flow_error_response(StatusCode::BAD_REQUEST, "failed to read body"),
+        Err(_) => return flow_error_response(StatusCode::BAD_REQUEST, "BAD_REQUEST", "failed to read body"),
     };
 
     if body.is_empty() {
         return flow_error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_INPUT",
             "empty body: expected JSON",
         );
     }
@@ -36,6 +37,7 @@ pub async fn create_flow(
         Err(e) => {
             return flow_error_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
+                "INVALID_INPUT",
                 &format!("invalid JSON: {}", e),
             );
         }
@@ -43,12 +45,12 @@ pub async fn create_flow(
 
     // Validate: name must not be empty
     if flow.name.is_empty() {
-        return flow_error_response(StatusCode::BAD_REQUEST, "flow name must not be empty");
+        return flow_error_response(StatusCode::BAD_REQUEST, "INVALID_INPUT", "flow name must not be empty");
     }
 
     // Validate: steps must not be empty
     if flow.steps.is_empty() {
-        return flow_error_response(StatusCode::BAD_REQUEST, "flow must have at least one step");
+        return flow_error_response(StatusCode::BAD_REQUEST, "INVALID_INPUT", "flow must have at least one step");
     }
 
     let mut engine = state.flow_engine.write().await;
@@ -57,13 +59,14 @@ pub async fn create_flow(
     if engine.get(&flow.name).is_some() {
         return flow_error_response(
             StatusCode::CONFLICT,
+            "CONFLICT",
             &format!("flow '{}' already exists", flow.name),
         );
     }
 
     // Register (validates DAG)
     if let Err(e) = engine.register(flow.clone()) {
-        return flow_error_response(StatusCode::BAD_REQUEST, &e.to_string());
+        return flow_error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string());
     }
 
     (StatusCode::CREATED, Json(serde_json::json!(flow))).into_response()
@@ -98,6 +101,7 @@ pub async fn get_flow(
         Some(flow) => (StatusCode::OK, Json(serde_json::json!(flow))).into_response(),
         None => flow_error_response(
             StatusCode::NOT_FOUND,
+            "FLOW_NOT_FOUND",
             &format!("flow '{}' not found", name),
         ),
     }
@@ -113,6 +117,7 @@ pub async fn delete_flow(
     } else {
         flow_error_response(
             StatusCode::NOT_FOUND,
+            "FLOW_NOT_FOUND",
             &format!("flow '{}' not found", name),
         )
     }
@@ -126,12 +131,13 @@ pub async fn run_flow(
 ) -> axum::response::Response {
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
         Ok(b) => b,
-        Err(_) => return flow_error_response(StatusCode::BAD_REQUEST, "failed to read body"),
+        Err(_) => return flow_error_response(StatusCode::BAD_REQUEST, "BAD_REQUEST", "failed to read body"),
     };
 
     if body.is_empty() {
         return flow_error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_INPUT",
             "empty body: expected JSON",
         );
     }
@@ -140,6 +146,7 @@ pub async fn run_flow(
     if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
         return flow_error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_INPUT",
             "invalid JSON",
         );
     }
@@ -150,6 +157,7 @@ pub async fn run_flow(
         if engine.get(&name).is_none() {
             return flow_error_response(
                 StatusCode::NOT_FOUND,
+                "FLOW_NOT_FOUND",
                 &format!("flow '{}' not found", name),
             );
         }
@@ -195,6 +203,7 @@ pub async fn run_flow_async(
     if let Err(e) = state.store.insert_task(&task_id, &format!("flow:{}", flow_name), Some(&input_str)).await {
         return flow_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
             &e.to_string(),
         );
     }

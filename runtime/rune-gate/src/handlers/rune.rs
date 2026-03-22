@@ -230,7 +230,7 @@ pub async fn execute_rune(
         rune_name: rune_name.to_string(),
         request_id: request_id.clone(),
         context: Default::default(),
-        timeout: std::time::Duration::from_secs(30),
+        timeout: state.request_timeout,
     };
 
     // Determine mode string for call log

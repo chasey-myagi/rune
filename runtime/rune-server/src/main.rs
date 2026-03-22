@@ -126,7 +126,11 @@ async fn main() -> anyhow::Result<()> {
     }));
 
     // ── Flow Engine ──
-    let mut flow_engine = FlowEngine::new(Arc::clone(&running.relay), Arc::clone(&running.resolver));
+    let mut flow_engine = FlowEngine::with_timeout(
+        Arc::clone(&running.relay),
+        Arc::clone(&running.resolver),
+        config.default_timeout(),
+    );
 
     let _ = flow_engine.register(FlowDefinition {
         name: "pipeline".to_string(),
@@ -155,6 +159,9 @@ async fn main() -> anyhow::Result<()> {
 
     // ── HTTP Gate ──
     let flow_engine = Arc::new(tokio::sync::RwLock::new(flow_engine));
+    let shutdown = gate::ShutdownCoordinator::new();
+    let drain_timeout_secs = config.server.drain_timeout_secs;
+
     let gate_state = gate::GateState {
         relay: Arc::clone(&running.relay),
         resolver: Arc::clone(&running.resolver),
@@ -167,14 +174,15 @@ async fn main() -> anyhow::Result<()> {
         dev_mode: config.server.dev_mode,
         started_at: Instant::now(),
         file_broker: Arc::new(gate::FileBroker::new()),
-        max_upload_size_mb: 100,
+        max_upload_size_mb: config.gate.max_upload_size_mb,
         flow_engine: Arc::clone(&flow_engine),
         rate_limiter: if config.server.dev_mode {
             None
         } else {
             Some(gate::RateLimitState::new(config.rate_limit.requests_per_minute, 60))
         },
-        shutdown: gate::ShutdownCoordinator::new(),
+        shutdown: shutdown.clone(),
+        request_timeout: config.default_timeout(),
     };
 
     let http_router = gate::build_router(gate_state, None);
@@ -202,10 +210,23 @@ async fn main() -> anyhow::Result<()> {
             .unwrap();
     });
 
+    // ── Wait for shutdown signal ──
     tokio::select! {
         _ = http_handle => tracing::info!("http server stopped"),
         _ = grpc_handle => tracing::info!("grpc server stopped"),
-        _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("received SIGINT, starting graceful shutdown");
+
+            // 1. Signal drain mode — new requests will be rejected with 503
+            shutdown.start_drain();
+            tracing::info!(drain_timeout_secs, "draining in-flight requests");
+
+            // 2. Wait for drain timeout to let in-flight requests complete
+            tokio::time::sleep(std::time::Duration::from_secs(drain_timeout_secs)).await;
+
+            // 3. Shutdown complete — server tasks will be dropped
+            tracing::info!("drain complete, shutting down");
+        }
     }
 
     Ok(())

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rune_core::auth::KeyVerifier;
 use rune_core::relay::Relay;
@@ -10,6 +10,9 @@ use rune_store::RuneStore;
 use crate::file_broker::FileBroker;
 use crate::rate_limit::RateLimitState;
 use crate::shutdown::ShutdownCoordinator;
+
+/// Default request timeout (used when request_timeout is not set).
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Gate shared state
 #[derive(Clone)]
@@ -29,6 +32,8 @@ pub struct GateState {
     pub flow_engine: Arc<tokio::sync::RwLock<FlowEngine>>,
     pub rate_limiter: Option<RateLimitState>,
     pub shutdown: ShutdownCoordinator,
+    /// Timeout for individual rune/flow step invocations (from config).
+    pub request_timeout: Duration,
 }
 
 #[derive(serde::Deserialize, Default)]

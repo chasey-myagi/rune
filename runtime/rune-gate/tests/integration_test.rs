@@ -70,6 +70,7 @@ fn make_state(auth_enabled: bool) -> GateState {
         flow_engine,
         rate_limiter: None,
         shutdown: gate::ShutdownCoordinator::new(),
+        request_timeout: std::time::Duration::from_secs(30),
     }
 }
 
@@ -807,6 +808,7 @@ async fn test_mixed_sync_and_stream_runes() {
         flow_engine,
         rate_limiter: None,
         shutdown: gate::ShutdownCoordinator::new(),
+        request_timeout: std::time::Duration::from_secs(30),
     };
 
     // Sync rune: normal call works
@@ -938,6 +940,7 @@ async fn test_stats_accumulate_across_runes() {
         flow_engine,
         rate_limiter: None,
         shutdown: gate::ShutdownCoordinator::new(),
+        request_timeout: std::time::Duration::from_secs(30),
     };
 
     // Call rune_a 4 times

@@ -37,11 +37,15 @@ pub enum FlowError {
     NoTerminalStep,
 }
 
+/// Default step timeout when not configured.
+const DEFAULT_STEP_TIMEOUT_SECS: u64 = 30;
+
 #[allow(dead_code)]
 pub struct FlowEngine {
     flows: HashMap<String, FlowDefinition>,
     relay: Arc<Relay>,
     resolver: Arc<dyn Resolver>,
+    step_timeout: std::time::Duration,
 }
 
 impl FlowEngine {
@@ -50,6 +54,17 @@ impl FlowEngine {
             flows: HashMap::new(),
             relay,
             resolver,
+            step_timeout: std::time::Duration::from_secs(DEFAULT_STEP_TIMEOUT_SECS),
+        }
+    }
+
+    /// Create a FlowEngine with a custom step timeout.
+    pub fn with_timeout(relay: Arc<Relay>, resolver: Arc<dyn Resolver>, step_timeout: std::time::Duration) -> Self {
+        Self {
+            flows: HashMap::new(),
+            relay,
+            resolver,
+            step_timeout,
         }
     }
 
@@ -180,20 +195,18 @@ impl FlowEngine {
                 // Resolve rune invoker
                 let invoker = self.relay.resolve(&step_def.rune, self.resolver.as_ref());
 
-                let relay = Arc::clone(&self.relay);
-                let resolver = Arc::clone(&self.resolver);
                 let rune_name = step_def.rune.clone();
-                let step_name = step_def.name.clone();
                 let si = step_input;
 
                 match invoker {
                     Some(inv) => {
+                        let timeout = self.step_timeout;
                         join_set.spawn(async move {
                             let ctx = RuneContext {
                                 rune_name: rune_name.clone(),
                                 request_id: uuid_simple(),
                                 context: Default::default(),
-                                timeout: std::time::Duration::from_secs(30),
+                                timeout,
                             };
                             match inv.invoke_once(ctx, si).await {
                                 Ok(output) => Ok((step_idx, output)),

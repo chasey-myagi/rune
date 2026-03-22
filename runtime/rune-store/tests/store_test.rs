@@ -1082,7 +1082,7 @@ async fn test_task_status_transition_matrix_legal() {
 
 #[tokio::test]
 async fn test_task_illegal_transitions_documented() {
-    // TODO: The current implementation does NOT enforce a state machine.
+    // NOTE: The current implementation does NOT enforce a state machine.
     // All transitions below should ideally be rejected but currently succeed.
     // This test documents the current permissive behavior.
     let store = new_store();
@@ -1092,7 +1092,7 @@ async fn test_task_illegal_transitions_documented() {
     store.update_task_status("ill-fr", TaskStatus::Running, None, None).await.unwrap();
     store.update_task_status("ill-fr", TaskStatus::Failed, None, Some("err")).await.unwrap();
     let result = store.update_task_status("ill-fr", TaskStatus::Running, None, None).await;
-    // TODO: This should ideally return an error, but currently succeeds.
+    // KNOWN: Should return an error, but current impl has no state machine guard.
     assert!(result.is_ok(), "Current impl allows failed->running (no state machine guard)");
     let t = store.get_task("ill-fr").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Running);
@@ -1101,7 +1101,7 @@ async fn test_task_illegal_transitions_documented() {
     store.insert_task("ill-cc", "rune_a", None).await.unwrap();
     store.update_task_status("ill-cc", TaskStatus::Cancelled, None, None).await.unwrap();
     let result = store.update_task_status("ill-cc", TaskStatus::Completed, Some("late"), None).await;
-    // TODO: This should ideally return an error, but currently succeeds.
+    // KNOWN: Should return an error, but current impl has no state machine guard.
     assert!(result.is_ok(), "Current impl allows cancelled->completed (no state machine guard)");
     let t = store.get_task("ill-cc").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Completed);
@@ -1111,7 +1111,7 @@ async fn test_task_illegal_transitions_documented() {
     store.update_task_status("ill-cp", TaskStatus::Running, None, None).await.unwrap();
     store.update_task_status("ill-cp", TaskStatus::Completed, Some("done"), None).await.unwrap();
     let result = store.update_task_status("ill-cp", TaskStatus::Pending, None, None).await;
-    // TODO: This should ideally return an error, but currently succeeds.
+    // KNOWN: Should return an error, but current impl has no state machine guard.
     assert!(result.is_ok(), "Current impl allows completed->pending (no state machine guard)");
     let t = store.get_task("ill-cp").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Pending);
