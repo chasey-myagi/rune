@@ -1,13 +1,17 @@
-use rand::Rng;
-use sha2::{Digest, Sha256};
 use crate::models::{ApiKey, KeyType};
 use crate::store::{RuneStore, StoreResult};
+use rand::Rng;
+use sha2::{Digest, Sha256};
 
-pub struct CreateKeyResult { pub raw_key: String, pub api_key: ApiKey }
+pub struct CreateKeyResult {
+    pub raw_key: String,
+    pub api_key: ApiKey,
+}
 
 impl RuneStore {
     pub async fn create_key(&self, key_type: KeyType, label: &str) -> StoreResult<CreateKeyResult> {
-        let conn = self.conn.clone(); let label = label.to_string();
+        let conn = self.conn.clone();
+        let label = label.to_string();
         tokio::task::spawn_blocking(move || {
             let raw_key = generate_raw_key(); let key_prefix = format!("rk_{}", &raw_key[3..11]);
             let key_hash = hash_key(&raw_key); let now = now_iso8601();
@@ -17,9 +21,16 @@ impl RuneStore {
             Ok(CreateKeyResult { raw_key: raw_key.clone(), api_key: ApiKey { id, key_prefix, key_hash: Some(key_hash), key_type, label, created_at: now, revoked_at: None } })
         }).await?
     }
-    pub async fn verify_key(&self, raw_key: &str, expected_type: KeyType) -> StoreResult<Option<ApiKey>> {
-        if raw_key.is_empty() || !raw_key.starts_with("rk_") { return Ok(None); }
-        let conn = self.conn.clone(); let key_hash = hash_key(raw_key);
+    pub async fn verify_key(
+        &self,
+        raw_key: &str,
+        expected_type: KeyType,
+    ) -> StoreResult<Option<ApiKey>> {
+        if raw_key.is_empty() || !raw_key.starts_with("rk_") {
+            return Ok(None);
+        }
+        let conn = self.conn.clone();
+        let key_hash = hash_key(raw_key);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
             let mut stmt = conn.prepare("SELECT id, key_prefix, key_hash, key_type, label, created_at, revoked_at FROM api_keys WHERE key_hash = ?1")?;
@@ -38,11 +49,57 @@ impl RuneStore {
     }
     pub async fn revoke_key(&self, key_id: i64) -> StoreResult<()> {
         let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || { let now = now_iso8601(); let conn = conn.lock().unwrap(); conn.execute("UPDATE api_keys SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL", rusqlite::params![now, key_id])?; Ok(()) }).await?
+        tokio::task::spawn_blocking(move || {
+            let now = now_iso8601();
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "UPDATE api_keys SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
+                rusqlite::params![now, key_id],
+            )?;
+            Ok(())
+        })
+        .await?
     }
 }
-fn generate_raw_key() -> String { let mut rng = rand::rng(); let mut bytes = [0u8; 16]; rng.fill(&mut bytes); format!("rk_{}", hex::encode(bytes)) }
-fn hash_key(raw_key: &str) -> String { let mut hasher = Sha256::new(); hasher.update(raw_key.as_bytes()); hex::encode(hasher.finalize()) }
-pub fn now_iso8601() -> String { use std::time::SystemTime; let dur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap(); let secs = dur.as_secs(); let days = secs / 86400; let time_secs = secs % 86400; let hours = time_secs / 3600; let minutes = (time_secs % 3600) / 60; let seconds = time_secs % 60; let (year, month, day) = days_to_ymd(days); format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hours, minutes, seconds) }
-pub(crate) fn days_to_ymd(mut days: u64) -> (u64, u64, u64) { days += 719468; let era = days / 146097; let doe = days - era * 146097; let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; let y = yoe + era * 400; let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); let mp = (5 * doy + 2) / 153; let d = doy - (153 * mp + 2) / 5 + 1; let m = if mp < 10 { mp + 3 } else { mp - 9 }; let y = if m <= 2 { y + 1 } else { y }; (y, m, d) }
+fn generate_raw_key() -> String {
+    let mut rng = rand::rng();
+    let mut bytes = [0u8; 16];
+    rng.fill(&mut bytes);
+    format!("rk_{}", hex::encode(bytes))
+}
+fn hash_key(raw_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(raw_key.as_bytes());
+    hex::encode(hasher.finalize())
+}
+pub fn now_iso8601() -> String {
+    use std::time::SystemTime;
+    let dur = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    let secs = dur.as_secs();
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+    let (year, month, day) = days_to_ymd(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hours, minutes, seconds
+    )
+}
+pub(crate) fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    days += 719468;
+    let era = days / 146097;
+    let doe = days - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
 pub(crate) use now_iso8601 as timestamp_now;

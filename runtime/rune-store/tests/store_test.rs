@@ -43,7 +43,10 @@ async fn test_open_file_based() {
 async fn test_create_and_verify_gate_key() {
     let store = new_store();
     let result = store.create_key(KeyType::Gate, "test gate").await.unwrap();
-    let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
+    let verified = store
+        .verify_key(&result.raw_key, KeyType::Gate)
+        .await
+        .unwrap();
     assert!(verified.is_some());
     let key = verified.unwrap();
     assert_eq!(key.key_type, KeyType::Gate);
@@ -53,8 +56,14 @@ async fn test_create_and_verify_gate_key() {
 #[tokio::test]
 async fn test_create_and_verify_caster_key() {
     let store = new_store();
-    let result = store.create_key(KeyType::Caster, "test caster").await.unwrap();
-    let verified = store.verify_key(&result.raw_key, KeyType::Caster).await.unwrap();
+    let result = store
+        .create_key(KeyType::Caster, "test caster")
+        .await
+        .unwrap();
+    let verified = store
+        .verify_key(&result.raw_key, KeyType::Caster)
+        .await
+        .unwrap();
     assert!(verified.is_some());
     assert_eq!(verified.unwrap().key_type, KeyType::Caster);
 }
@@ -64,14 +73,20 @@ async fn test_wrong_key_type_fails() {
     let store = new_store();
     let result = store.create_key(KeyType::Gate, "gate key").await.unwrap();
     // Verify as caster should fail
-    let verified = store.verify_key(&result.raw_key, KeyType::Caster).await.unwrap();
+    let verified = store
+        .verify_key(&result.raw_key, KeyType::Caster)
+        .await
+        .unwrap();
     assert!(verified.is_none());
 }
 
 #[tokio::test]
 async fn test_invalid_key_fails() {
     let store = new_store();
-    let verified = store.verify_key("some_random_string_not_a_key", KeyType::Gate).await.unwrap();
+    let verified = store
+        .verify_key("some_random_string_not_a_key", KeyType::Gate)
+        .await
+        .unwrap();
     assert!(verified.is_none());
 }
 
@@ -103,7 +118,10 @@ async fn test_list_keys_hides_hash() {
 
     let keys = store.list_keys().await.unwrap();
     assert_eq!(keys.len(), 1);
-    assert!(keys[0].key_hash.is_none(), "key_hash should be None in list results");
+    assert!(
+        keys[0].key_hash.is_none(),
+        "key_hash should be None in list results"
+    );
 }
 
 #[tokio::test]
@@ -112,13 +130,21 @@ async fn test_revoke_key() {
     let result = store.create_key(KeyType::Gate, "to revoke").await.unwrap();
 
     // Verify works before revoke
-    assert!(store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap().is_some());
+    assert!(store
+        .verify_key(&result.raw_key, KeyType::Gate)
+        .await
+        .unwrap()
+        .is_some());
 
     // Revoke
     store.revoke_key(result.api_key.id).await.unwrap();
 
     // Verify fails after revoke
-    assert!(store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap().is_none());
+    assert!(store
+        .verify_key(&result.raw_key, KeyType::Gate)
+        .await
+        .unwrap()
+        .is_none());
 
     // Check revoked_at is set in list
     let keys = store.list_keys().await.unwrap();
@@ -162,7 +188,10 @@ async fn test_key_format() {
     // Verify hex portion
     let hex_part = &raw[3..];
     assert_eq!(hex_part.len(), 32);
-    assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()), "suffix should be hex");
+    assert!(
+        hex_part.chars().all(|c| c.is_ascii_hexdigit()),
+        "suffix should be hex"
+    );
 }
 
 // ============================================================
@@ -173,7 +202,10 @@ async fn test_key_format() {
 async fn test_task_insert_and_get() {
     let store = new_store();
     let input = r#"{"prompt": "hello"}"#;
-    let task = store.insert_task("task-001", "echo_rune", Some(input)).await.unwrap();
+    let task = store
+        .insert_task("task-001", "echo_rune", Some(input))
+        .await
+        .unwrap();
 
     assert_eq!(task.task_id, "task-001");
     assert_eq!(task.rune_name, "echo_rune");
@@ -195,16 +227,30 @@ async fn test_task_not_found() {
 #[tokio::test]
 async fn test_task_lifecycle() {
     let store = new_store();
-    store.insert_task("lc-1", "rune_a", Some("{}")).await.unwrap();
+    store
+        .insert_task("lc-1", "rune_a", Some("{}"))
+        .await
+        .unwrap();
 
     // pending → running
-    store.update_task_status("lc-1", TaskStatus::Running, None, None).await.unwrap();
+    store
+        .update_task_status("lc-1", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
     let task = store.get_task("lc-1").await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Running);
     assert!(task.started_at.is_some());
 
     // running → completed
-    store.update_task_status("lc-1", TaskStatus::Completed, Some(r#"{"result": 42}"#), None).await.unwrap();
+    store
+        .update_task_status(
+            "lc-1",
+            TaskStatus::Completed,
+            Some(r#"{"result": 42}"#),
+            None,
+        )
+        .await
+        .unwrap();
     let task = store.get_task("lc-1").await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Completed);
     assert!(task.completed_at.is_some());
@@ -215,8 +261,19 @@ async fn test_task_lifecycle() {
 async fn test_task_failed() {
     let store = new_store();
     store.insert_task("fail-1", "rune_a", None).await.unwrap();
-    store.update_task_status("fail-1", TaskStatus::Running, None, None).await.unwrap();
-    store.update_task_status("fail-1", TaskStatus::Failed, None, Some("timeout after 30s")).await.unwrap();
+    store
+        .update_task_status("fail-1", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
+    store
+        .update_task_status(
+            "fail-1",
+            TaskStatus::Failed,
+            None,
+            Some("timeout after 30s"),
+        )
+        .await
+        .unwrap();
 
     let task = store.get_task("fail-1").await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Failed);
@@ -228,8 +285,14 @@ async fn test_task_failed() {
 async fn test_task_cancelled() {
     let store = new_store();
     store.insert_task("cancel-1", "rune_a", None).await.unwrap();
-    store.update_task_status("cancel-1", TaskStatus::Running, None, None).await.unwrap();
-    store.update_task_status("cancel-1", TaskStatus::Cancelled, None, None).await.unwrap();
+    store
+        .update_task_status("cancel-1", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("cancel-1", TaskStatus::Cancelled, None, None)
+        .await
+        .unwrap();
 
     let task = store.get_task("cancel-1").await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Cancelled);
@@ -242,18 +305,33 @@ async fn test_list_tasks_by_status() {
     store.insert_task("s1", "rune_a", None).await.unwrap();
     store.insert_task("s2", "rune_a", None).await.unwrap();
     store.insert_task("s3", "rune_a", None).await.unwrap();
-    store.update_task_status("s2", TaskStatus::Running, None, None).await.unwrap();
-    store.update_task_status("s3", TaskStatus::Completed, Some("done"), None).await.unwrap();
+    store
+        .update_task_status("s2", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("s3", TaskStatus::Completed, Some("done"), None)
+        .await
+        .unwrap();
 
-    let pending = store.list_tasks(Some(TaskStatus::Pending), None, 100, 0).await.unwrap();
+    let pending = store
+        .list_tasks(Some(TaskStatus::Pending), None, 100, 0)
+        .await
+        .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].task_id, "s1");
 
-    let running = store.list_tasks(Some(TaskStatus::Running), None, 100, 0).await.unwrap();
+    let running = store
+        .list_tasks(Some(TaskStatus::Running), None, 100, 0)
+        .await
+        .unwrap();
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].task_id, "s2");
 
-    let completed = store.list_tasks(Some(TaskStatus::Completed), None, 100, 0).await.unwrap();
+    let completed = store
+        .list_tasks(Some(TaskStatus::Completed), None, 100, 0)
+        .await
+        .unwrap();
     assert_eq!(completed.len(), 1);
     assert_eq!(completed[0].task_id, "s3");
 }
@@ -276,7 +354,10 @@ async fn test_list_tasks_by_rune() {
 async fn test_list_tasks_pagination() {
     let store = new_store();
     for i in 0..10 {
-        store.insert_task(&format!("p{}", i), "rune_a", None).await.unwrap();
+        store
+            .insert_task(&format!("p{}", i), "rune_a", None)
+            .await
+            .unwrap();
     }
 
     let page1 = store.list_tasks(None, None, 3, 0).await.unwrap();
@@ -308,7 +389,9 @@ async fn test_list_tasks_empty() {
 async fn test_update_nonexistent_task() {
     let store = new_store();
     // Should not error
-    let result = store.update_task_status("ghost", TaskStatus::Running, None, None).await;
+    let result = store
+        .update_task_status("ghost", TaskStatus::Running, None, None)
+        .await;
     assert!(result.is_ok());
 }
 
@@ -326,7 +409,10 @@ async fn test_task_with_large_output() {
     });
     let large_output = serde_json::to_string(&large_obj).unwrap();
 
-    store.update_task_status("big-1", TaskStatus::Completed, Some(&large_output), None).await.unwrap();
+    store
+        .update_task_status("big-1", TaskStatus::Completed, Some(&large_output), None)
+        .await
+        .unwrap();
 
     let task = store.get_task("big-1").await.unwrap().unwrap();
     assert_eq!(task.output.as_deref(), Some(large_output.as_str()));
@@ -342,7 +428,10 @@ async fn test_task_concurrent_updates() {
 
     // Create 20 tasks
     for i in 0..20 {
-        store.insert_task(&format!("conc-{}", i), "rune_a", None).await.unwrap();
+        store
+            .insert_task(&format!("conc-{}", i), "rune_a", None)
+            .await
+            .unwrap();
     }
 
     // Spawn threads to update different tasks concurrently
@@ -351,15 +440,21 @@ async fn test_task_concurrent_updates() {
         let store = Arc::clone(&store);
         let handle = tokio::spawn(async move {
             let task_id = format!("conc-{}", i);
-            store.update_task_status(&task_id, TaskStatus::Running, None, None).await.unwrap();
+            store
+                .update_task_status(&task_id, TaskStatus::Running, None, None)
+                .await
+                .unwrap();
             // Small work simulation
             std::thread::sleep(std::time::Duration::from_millis(1));
-            store.update_task_status(
-                &task_id,
-                TaskStatus::Completed,
-                Some(&format!(r#"{{"thread": {}}}"#, i)),
-                None,
-            ).await.unwrap();
+            store
+                .update_task_status(
+                    &task_id,
+                    TaskStatus::Completed,
+                    Some(&format!(r#"{{"thread": {}}}"#, i)),
+                    None,
+                )
+                .await
+                .unwrap();
         });
         handles.push(handle);
     }
@@ -369,7 +464,10 @@ async fn test_task_concurrent_updates() {
     }
 
     // Verify all tasks are completed
-    let tasks = store.list_tasks(Some(TaskStatus::Completed), None, 100, 0).await.unwrap();
+    let tasks = store
+        .list_tasks(Some(TaskStatus::Completed), None, 100, 0)
+        .await
+        .unwrap();
     assert_eq!(tasks.len(), 20);
 }
 
@@ -409,9 +507,18 @@ async fn test_insert_and_query_logs() {
 #[tokio::test]
 async fn test_query_logs_by_rune() {
     let store = new_store();
-    store.insert_log(&make_log("alpha", "r1", "2026-01-01T00:00:01Z")).await.unwrap();
-    store.insert_log(&make_log("beta", "r2", "2026-01-01T00:00:02Z")).await.unwrap();
-    store.insert_log(&make_log("alpha", "r3", "2026-01-01T00:00:03Z")).await.unwrap();
+    store
+        .insert_log(&make_log("alpha", "r1", "2026-01-01T00:00:01Z"))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log("beta", "r2", "2026-01-01T00:00:02Z"))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log("alpha", "r3", "2026-01-01T00:00:03Z"))
+        .await
+        .unwrap();
 
     let alpha_logs = store.query_logs(Some("alpha"), 100).await.unwrap();
     assert_eq!(alpha_logs.len(), 2);
@@ -424,7 +531,14 @@ async fn test_query_logs_by_rune() {
 async fn test_query_logs_limit() {
     let store = new_store();
     for i in 0..10 {
-        store.insert_log(&make_log("rune_a", &format!("r{}", i), &format!("2026-01-01T00:00:{:02}Z", i))).await.unwrap();
+        store
+            .insert_log(&make_log(
+                "rune_a",
+                &format!("r{}", i),
+                &format!("2026-01-01T00:00:{:02}Z", i),
+            ))
+            .await
+            .unwrap();
     }
 
     let logs = store.query_logs(None, 3).await.unwrap();
@@ -434,9 +548,18 @@ async fn test_query_logs_limit() {
 #[tokio::test]
 async fn test_query_logs_order() {
     let store = new_store();
-    store.insert_log(&make_log("rune_a", "old", "2025-01-01T00:00:00Z")).await.unwrap();
-    store.insert_log(&make_log("rune_a", "new", "2026-06-01T00:00:00Z")).await.unwrap();
-    store.insert_log(&make_log("rune_a", "mid", "2025-06-01T00:00:00Z")).await.unwrap();
+    store
+        .insert_log(&make_log("rune_a", "old", "2025-01-01T00:00:00Z"))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log("rune_a", "new", "2026-06-01T00:00:00Z"))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log("rune_a", "mid", "2025-06-01T00:00:00Z"))
+        .await
+        .unwrap();
 
     let logs = store.query_logs(None, 10).await.unwrap();
     assert_eq!(logs.len(), 3);
@@ -449,11 +572,23 @@ async fn test_query_logs_order() {
 #[tokio::test]
 async fn test_cleanup_old_logs() {
     let store = new_store();
-    store.insert_log(&make_log("rune_a", "old1", "2024-01-01T00:00:00Z")).await.unwrap();
-    store.insert_log(&make_log("rune_a", "old2", "2024-06-01T00:00:00Z")).await.unwrap();
-    store.insert_log(&make_log("rune_a", "recent", "2026-01-01T00:00:00Z")).await.unwrap();
+    store
+        .insert_log(&make_log("rune_a", "old1", "2024-01-01T00:00:00Z"))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log("rune_a", "old2", "2024-06-01T00:00:00Z"))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log("rune_a", "recent", "2026-01-01T00:00:00Z"))
+        .await
+        .unwrap();
 
-    let deleted = store.cleanup_logs_before("2025-01-01T00:00:00Z").await.unwrap();
+    let deleted = store
+        .cleanup_logs_before("2025-01-01T00:00:00Z")
+        .await
+        .unwrap();
     assert_eq!(deleted, 2);
 
     let remaining = store.query_logs(None, 100).await.unwrap();
@@ -515,9 +650,15 @@ async fn test_upsert_snapshot() {
 #[tokio::test]
 async fn test_list_snapshots() {
     let store = new_store();
-    store.upsert_snapshot(&make_snapshot("alpha")).await.unwrap();
+    store
+        .upsert_snapshot(&make_snapshot("alpha"))
+        .await
+        .unwrap();
     store.upsert_snapshot(&make_snapshot("beta")).await.unwrap();
-    store.upsert_snapshot(&make_snapshot("gamma")).await.unwrap();
+    store
+        .upsert_snapshot(&make_snapshot("gamma"))
+        .await
+        .unwrap();
 
     let list = store.list_snapshots().await.unwrap();
     assert_eq!(list.len(), 3);
@@ -556,14 +697,20 @@ async fn test_snapshot_preserves_all_fields() {
 #[tokio::test]
 async fn test_upsert_updates_last_seen() {
     let store = new_store();
-    store.upsert_snapshot(&make_snapshot("ticker")).await.unwrap();
+    store
+        .upsert_snapshot(&make_snapshot("ticker"))
+        .await
+        .unwrap();
     let first = store.list_snapshots().await.unwrap();
     let first_seen = first[0].last_seen.clone();
 
     // Small delay to ensure timestamp differs
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
-    store.upsert_snapshot(&make_snapshot("ticker")).await.unwrap();
+    store
+        .upsert_snapshot(&make_snapshot("ticker"))
+        .await
+        .unwrap();
     let second = store.list_snapshots().await.unwrap();
     let second_seen = second[0].last_seen.clone();
 
@@ -580,7 +727,12 @@ async fn test_upsert_updates_last_seen() {
 // ============================================================
 
 /// Helper: create a CallLog with a specific latency_ms.
-fn make_log_with_latency(rune_name: &str, request_id: &str, timestamp: &str, latency_ms: i64) -> CallLog {
+fn make_log_with_latency(
+    rune_name: &str,
+    request_id: &str,
+    timestamp: &str,
+    latency_ms: i64,
+) -> CallLog {
     CallLog {
         id: 0,
         request_id: request_id.to_string(),
@@ -602,13 +754,53 @@ async fn test_call_stats_returns_correct_counts_and_avg_latency() {
     let store = new_store();
 
     // Insert logs for "alpha": latencies 10, 20, 30 → avg = 20, count = 3
-    store.insert_log(&make_log_with_latency("alpha", "a1", "2026-01-01T00:00:01Z", 10)).await.unwrap();
-    store.insert_log(&make_log_with_latency("alpha", "a2", "2026-01-01T00:00:02Z", 20)).await.unwrap();
-    store.insert_log(&make_log_with_latency("alpha", "a3", "2026-01-01T00:00:03Z", 30)).await.unwrap();
+    store
+        .insert_log(&make_log_with_latency(
+            "alpha",
+            "a1",
+            "2026-01-01T00:00:01Z",
+            10,
+        ))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log_with_latency(
+            "alpha",
+            "a2",
+            "2026-01-01T00:00:02Z",
+            20,
+        ))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log_with_latency(
+            "alpha",
+            "a3",
+            "2026-01-01T00:00:03Z",
+            30,
+        ))
+        .await
+        .unwrap();
 
     // Insert logs for "beta": latencies 100, 200 → avg = 150, count = 2
-    store.insert_log(&make_log_with_latency("beta", "b1", "2026-01-01T00:00:04Z", 100)).await.unwrap();
-    store.insert_log(&make_log_with_latency("beta", "b2", "2026-01-01T00:00:05Z", 200)).await.unwrap();
+    store
+        .insert_log(&make_log_with_latency(
+            "beta",
+            "b1",
+            "2026-01-01T00:00:04Z",
+            100,
+        ))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log_with_latency(
+            "beta",
+            "b2",
+            "2026-01-01T00:00:05Z",
+            200,
+        ))
+        .await
+        .unwrap();
 
     let (total, by_rune) = store.call_stats().await.unwrap();
     assert_eq!(total, 5);
@@ -637,7 +829,10 @@ async fn test_call_stats_empty_table() {
 #[tokio::test]
 async fn test_task_duplicate_insert_returns_error() {
     let store = new_store();
-    store.insert_task("dup-1", "rune_a", Some("first")).await.unwrap();
+    store
+        .insert_task("dup-1", "rune_a", Some("first"))
+        .await
+        .unwrap();
 
     // task_id is PRIMARY KEY, so inserting the same id again should fail
     // with a UNIQUE constraint violation.
@@ -658,14 +853,25 @@ async fn test_task_duplicate_insert_returns_error() {
 #[tokio::test]
 async fn test_task_illegal_state_transition_completed_to_running() {
     let store = new_store();
-    store.insert_task("illegal-1", "rune_a", None).await.unwrap();
-    store.update_task_status("illegal-1", TaskStatus::Running, None, None).await.unwrap();
-    store.update_task_status("illegal-1", TaskStatus::Completed, Some("done"), None).await.unwrap();
+    store
+        .insert_task("illegal-1", "rune_a", None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("illegal-1", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("illegal-1", TaskStatus::Completed, Some("done"), None)
+        .await
+        .unwrap();
 
     // NOTE: The current implementation does NOT enforce state machine transitions.
     // It allows any status to be set at any time via a plain SQL UPDATE.
     // Completed → Running should ideally be rejected, but currently it succeeds.
-    let result = store.update_task_status("illegal-1", TaskStatus::Running, None, None).await;
+    let result = store
+        .update_task_status("illegal-1", TaskStatus::Running, None, None)
+        .await;
     assert!(
         result.is_ok(),
         "Current impl allows arbitrary state transitions (no state machine guard)"
@@ -683,7 +889,10 @@ async fn test_task_illegal_state_transition_completed_to_running() {
 async fn test_cleanup_logs_empty_table() {
     let store = new_store();
     // Should not panic or return error when no logs exist
-    let deleted = store.cleanup_logs_before("2099-12-31T23:59:59Z").await.unwrap();
+    let deleted = store
+        .cleanup_logs_before("2099-12-31T23:59:59Z")
+        .await
+        .unwrap();
     assert_eq!(deleted, 0);
 }
 
@@ -701,7 +910,10 @@ async fn test_concurrent_key_create_and_verify() {
             // Each thread creates a key and immediately verifies it
             let label = format!("concurrent-key-{}", i);
             let result = store.create_key(KeyType::Gate, &label).await.unwrap();
-            let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
+            let verified = store
+                .verify_key(&result.raw_key, KeyType::Gate)
+                .await
+                .unwrap();
             assert!(
                 verified.is_some(),
                 "Key created in thread {} should be verifiable",
@@ -714,13 +926,19 @@ async fn test_concurrent_key_create_and_verify() {
     }
 
     let mut raw_keys = Vec::new();
-    for h in handles { raw_keys.push(h.await.unwrap()); }
+    for h in handles {
+        raw_keys.push(h.await.unwrap());
+    }
 
     // All keys should be distinct
     let mut unique = raw_keys.clone();
     unique.sort();
     unique.dedup();
-    assert_eq!(unique.len(), num_threads, "All generated keys should be unique");
+    assert_eq!(
+        unique.len(),
+        num_threads,
+        "All generated keys should be unique"
+    );
 
     // Verify all keys are still valid after all threads finish
     for raw_key in &raw_keys {
@@ -739,7 +957,10 @@ async fn test_revoke_key_then_create_same_label() {
     let store = new_store();
 
     // Create first key
-    let first = store.create_key(KeyType::Gate, "reusable-label").await.unwrap();
+    let first = store
+        .create_key(KeyType::Gate, "reusable-label")
+        .await
+        .unwrap();
     let first_raw = first.raw_key.clone();
     let first_id = first.api_key.id;
 
@@ -747,20 +968,34 @@ async fn test_revoke_key_then_create_same_label() {
     store.revoke_key(first_id).await.unwrap();
 
     // Old key should be invalid
-    assert!(store.verify_key(&first_raw, KeyType::Gate).await.unwrap().is_none());
+    assert!(store
+        .verify_key(&first_raw, KeyType::Gate)
+        .await
+        .unwrap()
+        .is_none());
 
     // Create a new key with the same label
-    let second = store.create_key(KeyType::Gate, "reusable-label").await.unwrap();
+    let second = store
+        .create_key(KeyType::Gate, "reusable-label")
+        .await
+        .unwrap();
     let second_raw = second.raw_key.clone();
 
     // New key should be valid
     let verified = store.verify_key(&second_raw, KeyType::Gate).await.unwrap();
-    assert!(verified.is_some(), "Newly created key with same label should be valid");
+    assert!(
+        verified.is_some(),
+        "Newly created key with same label should be valid"
+    );
     assert_eq!(verified.unwrap().label, "reusable-label");
 
     // Old key should still be invalid
     assert!(
-        store.verify_key(&first_raw, KeyType::Gate).await.unwrap().is_none(),
+        store
+            .verify_key(&first_raw, KeyType::Gate)
+            .await
+            .unwrap()
+            .is_none(),
         "Revoked key should remain invalid after creating a new key with same label"
     );
 
@@ -777,10 +1012,16 @@ async fn test_revoke_key_then_create_same_label() {
 async fn test_key_with_very_long_label() {
     let store = new_store();
     let long_label = "a".repeat(1000);
-    let result = store.create_key(KeyType::Caster, &long_label).await.unwrap();
+    let result = store
+        .create_key(KeyType::Caster, &long_label)
+        .await
+        .unwrap();
 
     // Verify the key works
-    let verified = store.verify_key(&result.raw_key, KeyType::Caster).await.unwrap();
+    let verified = store
+        .verify_key(&result.raw_key, KeyType::Caster)
+        .await
+        .unwrap();
     assert!(verified.is_some());
     assert_eq!(verified.unwrap().label.len(), 1000);
 
@@ -797,7 +1038,10 @@ async fn test_key_with_emoji_label() {
     let store = new_store();
     let label = "rocket-key-\u{1F680}\u{2728}\u{1F525}";
     let result = store.create_key(KeyType::Gate, label).await.unwrap();
-    let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
+    let verified = store
+        .verify_key(&result.raw_key, KeyType::Gate)
+        .await
+        .unwrap();
     assert!(verified.is_some());
     assert_eq!(verified.unwrap().label, label);
 }
@@ -805,9 +1049,13 @@ async fn test_key_with_emoji_label() {
 #[tokio::test]
 async fn test_key_with_chinese_label() {
     let store = new_store();
-    let label = "\u{4F60}\u{597D}\u{4E16}\u{754C}\u{FF0C}\u{8FD9}\u{662F}\u{4E00}\u{4E2A}\u{6D4B}\u{8BD5}";
+    let label =
+        "\u{4F60}\u{597D}\u{4E16}\u{754C}\u{FF0C}\u{8FD9}\u{662F}\u{4E00}\u{4E2A}\u{6D4B}\u{8BD5}";
     let result = store.create_key(KeyType::Gate, label).await.unwrap();
-    let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
+    let verified = store
+        .verify_key(&result.raw_key, KeyType::Gate)
+        .await
+        .unwrap();
     assert!(verified.is_some());
     assert_eq!(verified.unwrap().label, label);
 }
@@ -827,10 +1075,18 @@ async fn test_key_with_sql_injection_label() {
 
     for (i, label) in injection_labels.iter().enumerate() {
         let result = store.create_key(KeyType::Gate, label).await.unwrap();
-        let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
-        assert!(verified.is_some(), "SQL injection label #{} should be stored safely", i);
+        let verified = store
+            .verify_key(&result.raw_key, KeyType::Gate)
+            .await
+            .unwrap();
+        assert!(
+            verified.is_some(),
+            "SQL injection label #{} should be stored safely",
+            i
+        );
         assert_eq!(
-            verified.unwrap().label, *label,
+            verified.unwrap().label,
+            *label,
             "SQL injection label #{} should be preserved verbatim",
             i
         );
@@ -841,7 +1097,10 @@ async fn test_key_with_sql_injection_label() {
     assert_eq!(keys.len(), injection_labels.len());
 
     // Verify we can still create tasks (other tables not affected)
-    store.insert_task("post-injection", "rune_a", None).await.unwrap();
+    store
+        .insert_task("post-injection", "rune_a", None)
+        .await
+        .unwrap();
     assert!(store.get_task("post-injection").await.unwrap().is_some());
 }
 
@@ -854,41 +1113,71 @@ async fn test_list_tasks_filter_by_status_and_rune_name() {
     // Create tasks across two runes with different statuses
     store.insert_task("t1", "alpha", None).await.unwrap(); // pending, alpha
     store.insert_task("t2", "alpha", None).await.unwrap(); // running, alpha
-    store.insert_task("t3", "beta", None).await.unwrap();  // pending, beta
+    store.insert_task("t3", "beta", None).await.unwrap(); // pending, beta
     store.insert_task("t4", "alpha", None).await.unwrap(); // completed, alpha
-    store.insert_task("t5", "beta", None).await.unwrap();  // running, beta
+    store.insert_task("t5", "beta", None).await.unwrap(); // running, beta
 
-    store.update_task_status("t2", TaskStatus::Running, None, None).await.unwrap();
-    store.update_task_status("t4", TaskStatus::Running, None, None).await.unwrap();
-    store.update_task_status("t4", TaskStatus::Completed, Some("done"), None).await.unwrap();
-    store.update_task_status("t5", TaskStatus::Running, None, None).await.unwrap();
+    store
+        .update_task_status("t2", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("t4", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("t4", TaskStatus::Completed, Some("done"), None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("t5", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
 
     // Filter: pending + alpha → only t1
-    let result = store.list_tasks(Some(TaskStatus::Pending), Some("alpha"), 100, 0).await.unwrap();
+    let result = store
+        .list_tasks(Some(TaskStatus::Pending), Some("alpha"), 100, 0)
+        .await
+        .unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].task_id, "t1");
 
     // Filter: running + alpha → only t2
-    let result = store.list_tasks(Some(TaskStatus::Running), Some("alpha"), 100, 0).await.unwrap();
+    let result = store
+        .list_tasks(Some(TaskStatus::Running), Some("alpha"), 100, 0)
+        .await
+        .unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].task_id, "t2");
 
     // Filter: running + beta → only t5
-    let result = store.list_tasks(Some(TaskStatus::Running), Some("beta"), 100, 0).await.unwrap();
+    let result = store
+        .list_tasks(Some(TaskStatus::Running), Some("beta"), 100, 0)
+        .await
+        .unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].task_id, "t5");
 
     // Filter: completed + alpha → only t4
-    let result = store.list_tasks(Some(TaskStatus::Completed), Some("alpha"), 100, 0).await.unwrap();
+    let result = store
+        .list_tasks(Some(TaskStatus::Completed), Some("alpha"), 100, 0)
+        .await
+        .unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].task_id, "t4");
 
     // Filter: completed + beta → none
-    let result = store.list_tasks(Some(TaskStatus::Completed), Some("beta"), 100, 0).await.unwrap();
+    let result = store
+        .list_tasks(Some(TaskStatus::Completed), Some("beta"), 100, 0)
+        .await
+        .unwrap();
     assert!(result.is_empty());
 
     // Filter: pending + nonexistent rune → none
-    let result = store.list_tasks(Some(TaskStatus::Pending), Some("nonexistent"), 100, 0).await.unwrap();
+    let result = store
+        .list_tasks(Some(TaskStatus::Pending), Some("nonexistent"), 100, 0)
+        .await
+        .unwrap();
     assert!(result.is_empty());
 }
 
@@ -899,12 +1188,24 @@ async fn test_query_logs_nonexistent_rune_returns_empty() {
     let store = new_store();
 
     // Insert some logs for existing runes
-    store.insert_log(&make_log("alpha", "r1", "2026-01-01T00:00:01Z")).await.unwrap();
-    store.insert_log(&make_log("beta", "r2", "2026-01-01T00:00:02Z")).await.unwrap();
+    store
+        .insert_log(&make_log("alpha", "r1", "2026-01-01T00:00:01Z"))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log("beta", "r2", "2026-01-01T00:00:02Z"))
+        .await
+        .unwrap();
 
     // Query for a rune that has no logs
-    let result = store.query_logs(Some("nonexistent_rune"), 100).await.unwrap();
-    assert!(result.is_empty(), "Querying logs for a nonexistent rune should return empty vec");
+    let result = store
+        .query_logs(Some("nonexistent_rune"), 100)
+        .await
+        .unwrap();
+    assert!(
+        result.is_empty(),
+        "Querying logs for a nonexistent rune should return empty vec"
+    );
 }
 
 #[tokio::test]
@@ -929,7 +1230,10 @@ async fn test_query_logs_empty_store_returns_empty() {
 async fn test_double_revoke_is_idempotent() {
     // Revoking an already-revoked key should be a no-op: no error, revoked_at unchanged.
     let store = new_store();
-    let result = store.create_key(KeyType::Gate, "double-revoke").await.unwrap();
+    let result = store
+        .create_key(KeyType::Gate, "double-revoke")
+        .await
+        .unwrap();
     let key_id = result.api_key.id;
 
     store.revoke_key(key_id).await.unwrap();
@@ -960,7 +1264,10 @@ async fn test_verify_nonexistent_key_with_valid_prefix() {
     let fake_key = "rk_00000000000000000000000000000000";
     assert_eq!(fake_key.len(), 35);
     let verified = store.verify_key(fake_key, KeyType::Gate).await.unwrap();
-    assert!(verified.is_none(), "A never-created key should verify as None");
+    assert!(
+        verified.is_none(),
+        "A never-created key should verify as None"
+    );
 }
 
 // ------ Key module: concurrent revoke same key ------
@@ -969,7 +1276,10 @@ async fn test_verify_nonexistent_key_with_valid_prefix() {
 async fn test_concurrent_revoke_same_key() {
     // Multiple threads revoking the same key concurrently: no panic, no error.
     let store = Arc::new(new_store());
-    let result = store.create_key(KeyType::Gate, "concurrent-revoke").await.unwrap();
+    let result = store
+        .create_key(KeyType::Gate, "concurrent-revoke")
+        .await
+        .unwrap();
     let key_id = result.api_key.id;
 
     let mut handles = vec![];
@@ -985,8 +1295,14 @@ async fn test_concurrent_revoke_same_key() {
     }
 
     // Key should be revoked
-    let verified = store.verify_key(&result.raw_key, KeyType::Gate).await.unwrap();
-    assert!(verified.is_none(), "Key should be revoked after concurrent revoke");
+    let verified = store
+        .verify_key(&result.raw_key, KeyType::Gate)
+        .await
+        .unwrap();
+    assert!(
+        verified.is_none(),
+        "Key should be revoked after concurrent revoke"
+    );
 }
 
 // ------ Key module: create 100 keys then list all ------
@@ -995,7 +1311,10 @@ async fn test_concurrent_revoke_same_key() {
 async fn test_create_100_keys_then_list_all() {
     let store = new_store();
     for i in 0..100 {
-        store.create_key(KeyType::Gate, &format!("key-{}", i)).await.unwrap();
+        store
+            .create_key(KeyType::Gate, &format!("key-{}", i))
+            .await
+            .unwrap();
     }
 
     let keys = store.list_keys().await.unwrap();
@@ -1020,8 +1339,16 @@ async fn test_key_hash_uniqueness() {
     );
 
     // Each key should only verify as itself
-    let v1 = store.verify_key(&r1.raw_key, KeyType::Gate).await.unwrap().unwrap();
-    let v2 = store.verify_key(&r2.raw_key, KeyType::Gate).await.unwrap().unwrap();
+    let v1 = store
+        .verify_key(&r1.raw_key, KeyType::Gate)
+        .await
+        .unwrap()
+        .unwrap();
+    let v2 = store
+        .verify_key(&r2.raw_key, KeyType::Gate)
+        .await
+        .unwrap()
+        .unwrap();
     assert_ne!(v1.id, v2.id);
 }
 
@@ -1039,15 +1366,24 @@ async fn test_task_status_transition_matrix_legal() {
 
     // pending -> running
     store.insert_task("tr-pr", "rune_a", None).await.unwrap();
-    store.update_task_status("tr-pr", TaskStatus::Running, None, None).await.unwrap();
+    store
+        .update_task_status("tr-pr", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
     let t = store.get_task("tr-pr").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Running);
     assert!(t.started_at.is_some());
 
     // running -> completed
     store.insert_task("tr-rc", "rune_a", None).await.unwrap();
-    store.update_task_status("tr-rc", TaskStatus::Running, None, None).await.unwrap();
-    store.update_task_status("tr-rc", TaskStatus::Completed, Some("ok"), None).await.unwrap();
+    store
+        .update_task_status("tr-rc", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("tr-rc", TaskStatus::Completed, Some("ok"), None)
+        .await
+        .unwrap();
     let t = store.get_task("tr-rc").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Completed);
     assert!(t.completed_at.is_some());
@@ -1055,8 +1391,14 @@ async fn test_task_status_transition_matrix_legal() {
 
     // running -> failed
     store.insert_task("tr-rf", "rune_a", None).await.unwrap();
-    store.update_task_status("tr-rf", TaskStatus::Running, None, None).await.unwrap();
-    store.update_task_status("tr-rf", TaskStatus::Failed, None, Some("boom")).await.unwrap();
+    store
+        .update_task_status("tr-rf", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("tr-rf", TaskStatus::Failed, None, Some("boom"))
+        .await
+        .unwrap();
     let t = store.get_task("tr-rf").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Failed);
     assert!(t.completed_at.is_some());
@@ -1064,15 +1406,24 @@ async fn test_task_status_transition_matrix_legal() {
 
     // running -> cancelled
     store.insert_task("tr-rx", "rune_a", None).await.unwrap();
-    store.update_task_status("tr-rx", TaskStatus::Running, None, None).await.unwrap();
-    store.update_task_status("tr-rx", TaskStatus::Cancelled, None, None).await.unwrap();
+    store
+        .update_task_status("tr-rx", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("tr-rx", TaskStatus::Cancelled, None, None)
+        .await
+        .unwrap();
     let t = store.get_task("tr-rx").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Cancelled);
     assert!(t.completed_at.is_some());
 
     // pending -> cancelled (skip running)
     store.insert_task("tr-pc", "rune_a", None).await.unwrap();
-    store.update_task_status("tr-pc", TaskStatus::Cancelled, None, None).await.unwrap();
+    store
+        .update_task_status("tr-pc", TaskStatus::Cancelled, None, None)
+        .await
+        .unwrap();
     let t = store.get_task("tr-pc").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Cancelled);
     assert!(t.completed_at.is_some());
@@ -1089,30 +1440,60 @@ async fn test_task_illegal_transitions_documented() {
 
     // failed -> running (illegal)
     store.insert_task("ill-fr", "rune_a", None).await.unwrap();
-    store.update_task_status("ill-fr", TaskStatus::Running, None, None).await.unwrap();
-    store.update_task_status("ill-fr", TaskStatus::Failed, None, Some("err")).await.unwrap();
-    let result = store.update_task_status("ill-fr", TaskStatus::Running, None, None).await;
+    store
+        .update_task_status("ill-fr", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("ill-fr", TaskStatus::Failed, None, Some("err"))
+        .await
+        .unwrap();
+    let result = store
+        .update_task_status("ill-fr", TaskStatus::Running, None, None)
+        .await;
     // KNOWN: Should return an error, but current impl has no state machine guard.
-    assert!(result.is_ok(), "Current impl allows failed->running (no state machine guard)");
+    assert!(
+        result.is_ok(),
+        "Current impl allows failed->running (no state machine guard)"
+    );
     let t = store.get_task("ill-fr").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Running);
 
     // cancelled -> completed (illegal)
     store.insert_task("ill-cc", "rune_a", None).await.unwrap();
-    store.update_task_status("ill-cc", TaskStatus::Cancelled, None, None).await.unwrap();
-    let result = store.update_task_status("ill-cc", TaskStatus::Completed, Some("late"), None).await;
+    store
+        .update_task_status("ill-cc", TaskStatus::Cancelled, None, None)
+        .await
+        .unwrap();
+    let result = store
+        .update_task_status("ill-cc", TaskStatus::Completed, Some("late"), None)
+        .await;
     // KNOWN: Should return an error, but current impl has no state machine guard.
-    assert!(result.is_ok(), "Current impl allows cancelled->completed (no state machine guard)");
+    assert!(
+        result.is_ok(),
+        "Current impl allows cancelled->completed (no state machine guard)"
+    );
     let t = store.get_task("ill-cc").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Completed);
 
     // completed -> pending (illegal)
     store.insert_task("ill-cp", "rune_a", None).await.unwrap();
-    store.update_task_status("ill-cp", TaskStatus::Running, None, None).await.unwrap();
-    store.update_task_status("ill-cp", TaskStatus::Completed, Some("done"), None).await.unwrap();
-    let result = store.update_task_status("ill-cp", TaskStatus::Pending, None, None).await;
+    store
+        .update_task_status("ill-cp", TaskStatus::Running, None, None)
+        .await
+        .unwrap();
+    store
+        .update_task_status("ill-cp", TaskStatus::Completed, Some("done"), None)
+        .await
+        .unwrap();
+    let result = store
+        .update_task_status("ill-cp", TaskStatus::Pending, None, None)
+        .await;
     // KNOWN: Should return an error, but current impl has no state machine guard.
-    assert!(result.is_ok(), "Current impl allows completed->pending (no state machine guard)");
+    assert!(
+        result.is_ok(),
+        "Current impl allows completed->pending (no state machine guard)"
+    );
     let t = store.get_task("ill-cp").await.unwrap().unwrap();
     assert_eq!(t.status, TaskStatus::Pending);
 }
@@ -1123,7 +1504,10 @@ async fn test_task_illegal_transitions_documented() {
 async fn test_task_input_with_unicode() {
     let store = new_store();
     let unicode_input = r#"{"msg": "你好世界 🚀 Ñoño"}"#;
-    let task = store.insert_task("uni-1", "rune_a", Some(unicode_input)).await.unwrap();
+    let task = store
+        .insert_task("uni-1", "rune_a", Some(unicode_input))
+        .await
+        .unwrap();
     assert_eq!(task.input.as_deref(), Some(unicode_input));
 
     let fetched = store.get_task("uni-1").await.unwrap().unwrap();
@@ -1140,7 +1524,10 @@ async fn test_task_output_with_100kb_json() {
     let big_json = format!(r#"{{"data": "{}"}}"#, big_data);
     assert!(big_json.len() > 100_000);
 
-    store.update_task_status("big-json", TaskStatus::Completed, Some(&big_json), None).await.unwrap();
+    store
+        .update_task_status("big-json", TaskStatus::Completed, Some(&big_json), None)
+        .await
+        .unwrap();
     let t = store.get_task("big-json").await.unwrap().unwrap();
     assert_eq!(t.output.as_deref(), Some(big_json.as_str()));
 }
@@ -1155,7 +1542,10 @@ async fn test_task_input_deeply_nested_json() {
         json = format!(r#"{{"a":{}}}"#, json);
     }
 
-    let task = store.insert_task("nested-100", "rune_a", Some(&json)).await.unwrap();
+    let task = store
+        .insert_task("nested-100", "rune_a", Some(&json))
+        .await
+        .unwrap();
     assert_eq!(task.input.as_deref(), Some(json.as_str()));
 
     let fetched = store.get_task("nested-100").await.unwrap().unwrap();
@@ -1187,8 +1577,10 @@ async fn test_task_list_ordered_by_created_at_desc() {
     assert_eq!(tasks.len(), 3);
 
     // Verify created_at values are actually distinct
-    assert_ne!(tasks[0].created_at, tasks[2].created_at,
-        "Tasks must have distinct timestamps for this test to be meaningful");
+    assert_ne!(
+        tasks[0].created_at, tasks[2].created_at,
+        "Tasks must have distinct timestamps for this test to be meaningful"
+    );
 
     // ORDER BY created_at DESC => newest first
     assert_eq!(tasks[0].task_id, "order-3");
@@ -1217,13 +1609,25 @@ async fn test_cleanup_exact_boundary_timestamp() {
     let store = new_store();
     let boundary = "2025-06-01T00:00:00Z";
 
-    store.insert_log(&make_log("rune_a", "before", "2025-05-31T23:59:59Z")).await.unwrap();
-    store.insert_log(&make_log("rune_a", "exact", boundary)).await.unwrap();
-    store.insert_log(&make_log("rune_a", "after", "2025-06-01T00:00:01Z")).await.unwrap();
+    store
+        .insert_log(&make_log("rune_a", "before", "2025-05-31T23:59:59Z"))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log("rune_a", "exact", boundary))
+        .await
+        .unwrap();
+    store
+        .insert_log(&make_log("rune_a", "after", "2025-06-01T00:00:01Z"))
+        .await
+        .unwrap();
 
     let deleted = store.cleanup_logs_before(boundary).await.unwrap();
     // Only "before" should be deleted (strict <)
-    assert_eq!(deleted, 1, "Only logs strictly before the boundary should be deleted");
+    assert_eq!(
+        deleted, 1,
+        "Only logs strictly before the boundary should be deleted"
+    );
 
     let remaining = store.query_logs(None, 100).await.unwrap();
     assert_eq!(remaining.len(), 2);
@@ -1238,11 +1642,19 @@ async fn test_cleanup_exact_boundary_timestamp() {
 async fn test_query_1000_logs_with_limit_10() {
     let store = new_store();
     for i in 0..1000 {
-        store.insert_log(&make_log(
-            "rune_a",
-            &format!("req-{}", i),
-            &format!("2026-01-01T{:02}:{:02}:{:02}Z", i / 3600, (i % 3600) / 60, i % 60),
-        )).await.unwrap();
+        store
+            .insert_log(&make_log(
+                "rune_a",
+                &format!("req-{}", i),
+                &format!(
+                    "2026-01-01T{:02}:{:02}:{:02}Z",
+                    i / 3600,
+                    (i % 3600) / 60,
+                    i % 60
+                ),
+            ))
+            .await
+            .unwrap();
     }
 
     let logs = store.query_logs(None, 10).await.unwrap();
@@ -1310,7 +1722,11 @@ async fn test_log_status_codes() {
     let codes = [200, 400, 401, 404, 409, 500];
 
     for (i, &code) in codes.iter().enumerate() {
-        let mut log = make_log("rune_a", &format!("sc-{}", i), &format!("2026-01-01T00:00:{:02}Z", i));
+        let mut log = make_log(
+            "rune_a",
+            &format!("sc-{}", i),
+            &format!("2026-01-01T00:00:{:02}Z", i),
+        );
         log.status_code = code;
         store.insert_log(&log).await.unwrap();
     }
@@ -1319,7 +1735,11 @@ async fn test_log_status_codes() {
     assert_eq!(logs.len(), codes.len());
     let stored_codes: Vec<i32> = logs.iter().map(|l| l.status_code).collect();
     for &code in &codes {
-        assert!(stored_codes.contains(&code), "Status code {} should be present", code);
+        assert!(
+            stored_codes.contains(&code),
+            "Status code {} should be present",
+            code
+        );
     }
 }
 
@@ -1329,7 +1749,10 @@ async fn test_log_status_codes() {
 async fn test_50_snapshots_list_all() {
     let store = new_store();
     for i in 0..50 {
-        store.upsert_snapshot(&make_snapshot(&format!("rune-{:03}", i))).await.unwrap();
+        store
+            .upsert_snapshot(&make_snapshot(&format!("rune-{:03}", i)))
+            .await
+            .unwrap();
     }
 
     let list = store.list_snapshots().await.unwrap();
@@ -1373,12 +1796,7 @@ async fn test_snapshot_with_empty_string_fields() {
 #[tokio::test]
 async fn test_snapshot_rune_name_special_chars() {
     let store = new_store();
-    let names = [
-        "my/rune",
-        "my-rune",
-        "my_rune",
-        "中文rune",
-    ];
+    let names = ["my/rune", "my-rune", "my_rune", "中文rune"];
 
     for name in &names {
         store.upsert_snapshot(&make_snapshot(name)).await.unwrap();
@@ -1428,10 +1846,26 @@ async fn test_store_reopen_data_persists() {
     {
         let store = RuneStore::open(&db_path).unwrap();
 
-        store.create_key(KeyType::Gate, "persist-key").await.unwrap();
-        store.insert_task("persist-task", "persist-rune", Some(r#"{"x":1}"#)).await.unwrap();
-        store.insert_log(&make_log("persist-rune", "persist-req", "2026-01-01T00:00:00Z")).await.unwrap();
-        store.upsert_snapshot(&make_snapshot("persist-snap")).await.unwrap();
+        store
+            .create_key(KeyType::Gate, "persist-key")
+            .await
+            .unwrap();
+        store
+            .insert_task("persist-task", "persist-rune", Some(r#"{"x":1}"#))
+            .await
+            .unwrap();
+        store
+            .insert_log(&make_log(
+                "persist-rune",
+                "persist-req",
+                "2026-01-01T00:00:00Z",
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert_snapshot(&make_snapshot("persist-snap"))
+            .await
+            .unwrap();
     }
     // store is dropped (closed)
 
@@ -1468,7 +1902,10 @@ async fn test_empty_database_all_queries() {
     assert!(keys.is_empty());
 
     // Verify non-existent key
-    let v = store.verify_key("rk_aaaabbbbccccddddaaaabbbbccccdddd", KeyType::Gate).await.unwrap();
+    let v = store
+        .verify_key("rk_aaaabbbbccccddddaaaabbbbccccdddd", KeyType::Gate)
+        .await
+        .unwrap();
     assert!(v.is_none());
 
     // Revoke non-existent key
@@ -1478,16 +1915,24 @@ async fn test_empty_database_all_queries() {
     let tasks = store.list_tasks(None, None, 100, 0).await.unwrap();
     assert!(tasks.is_empty());
 
-    let tasks_by_status = store.list_tasks(Some(TaskStatus::Pending), None, 100, 0).await.unwrap();
+    let tasks_by_status = store
+        .list_tasks(Some(TaskStatus::Pending), None, 100, 0)
+        .await
+        .unwrap();
     assert!(tasks_by_status.is_empty());
 
-    let tasks_by_rune = store.list_tasks(None, Some("anything"), 100, 0).await.unwrap();
+    let tasks_by_rune = store
+        .list_tasks(None, Some("anything"), 100, 0)
+        .await
+        .unwrap();
     assert!(tasks_by_rune.is_empty());
 
     let task = store.get_task("nonexistent").await.unwrap();
     assert!(task.is_none());
 
-    let update_result = store.update_task_status("ghost", TaskStatus::Running, None, None).await;
+    let update_result = store
+        .update_task_status("ghost", TaskStatus::Running, None, None)
+        .await;
     assert!(update_result.is_ok());
 
     // Logs
@@ -1497,7 +1942,10 @@ async fn test_empty_database_all_queries() {
     let logs_filtered = store.query_logs(Some("anything"), 100).await.unwrap();
     assert!(logs_filtered.is_empty());
 
-    let deleted = store.cleanup_logs_before("2099-12-31T23:59:59Z").await.unwrap();
+    let deleted = store
+        .cleanup_logs_before("2099-12-31T23:59:59Z")
+        .await
+        .unwrap();
     assert_eq!(deleted, 0);
 
     let (total, by_rune) = store.call_stats().await.unwrap();
@@ -1519,7 +1967,10 @@ async fn test_store_operations_dont_block_async_runtime() {
 
     let store_clone = Arc::clone(&store);
     let store_handle = tokio::spawn(async move {
-        store_clone.insert_task("blocking-test", "echo", Some("data")).await.unwrap();
+        store_clone
+            .insert_task("blocking-test", "echo", Some("data"))
+            .await
+            .unwrap();
         store_clone.get_task("blocking-test").await.unwrap()
     });
 

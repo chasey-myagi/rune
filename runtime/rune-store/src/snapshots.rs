@@ -3,7 +3,8 @@ use crate::models::RuneSnapshot;
 use crate::store::{RuneStore, StoreResult};
 impl RuneStore {
     pub async fn upsert_snapshot(&self, snapshot: &RuneSnapshot) -> StoreResult<()> {
-        let conn = self.conn.clone(); let snapshot = snapshot.clone();
+        let conn = self.conn.clone();
+        let snapshot = snapshot.clone();
         tokio::task::spawn_blocking(move || { let now = timestamp_now(); let conn = conn.lock().unwrap(); conn.execute("INSERT INTO rune_snapshots (rune_name, version, description, supports_stream, gate_path, gate_method, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(rune_name) DO UPDATE SET version = excluded.version, description = excluded.description, supports_stream = excluded.supports_stream, gate_path = excluded.gate_path, gate_method = excluded.gate_method, last_seen = excluded.last_seen", rusqlite::params![snapshot.rune_name, snapshot.version, snapshot.description, snapshot.supports_stream as i32, snapshot.gate_path, snapshot.gate_method, now])?; Ok(()) }).await?
     }
     pub async fn list_snapshots(&self) -> StoreResult<Vec<RuneSnapshot>> {
