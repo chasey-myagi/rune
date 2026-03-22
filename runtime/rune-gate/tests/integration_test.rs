@@ -551,3 +551,417 @@ async fn test_multiple_keys_independent() {
         .unwrap();
     assert_eq!(response.status(), 200, "key_c should still work after revoking key_b");
 }
+
+// ===========================================================================
+// #14  Concurrent authenticated requests — auth and call log correctness
+// ===========================================================================
+
+#[tokio::test]
+async fn test_concurrent_authenticated_requests() {
+    let state = make_state(true);
+    let key = state
+        .store
+        .create_key(KeyType::Gate, "concurrent")
+        .unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..10 {
+        let st = state.clone();
+        let raw_key = key.raw_key.clone();
+        handles.push(tokio::spawn(async move {
+            let app = gate::build_router(st, None);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("authorization", format!("Bearer {}", raw_key))
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"idx":{}}}"#, i)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            response.status()
+        }));
+    }
+
+    for (idx, handle) in handles.into_iter().enumerate() {
+        let status = handle.await.unwrap();
+        assert_eq!(
+            status, 200,
+            "concurrent request {} should succeed",
+            idx
+        );
+    }
+
+    // Verify all 10 calls were logged
+    let logs = state.store.query_logs(Some("echo"), 100).unwrap();
+    assert_eq!(logs.len(), 10, "all 10 calls should be recorded");
+    for log in &logs {
+        assert_eq!(log.rune_name, "echo");
+        assert_eq!(log.mode, "sync");
+        assert_eq!(log.status_code, 200);
+    }
+}
+
+// ===========================================================================
+// #15  Full async chain: create key → auth async call → query task → call log
+// ===========================================================================
+
+#[tokio::test]
+async fn test_full_async_chain_with_auth() {
+    let state = make_state(true);
+    let key = state
+        .store
+        .create_key(KeyType::Gate, "async-chain")
+        .unwrap();
+
+    // Step 1: Authenticated async call
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo?async=true")
+                .header("authorization", format!("Bearer {}", key.raw_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"async_chain":"data"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 202);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let task_id = json["task_id"].as_str().unwrap().to_string();
+
+    // Step 2: Wait for background task
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Step 3: Query task via HTTP (with auth)
+    let app2 = gate::build_router(state.clone(), None);
+    let response = app2
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/tasks/{}", task_id))
+                .header("authorization", format!("Bearer {}", key.raw_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "completed");
+    assert!(json["output"].is_string());
+
+    // Step 4: Verify call log
+    let logs = state.store.query_logs(Some("echo"), 10).unwrap();
+    assert!(!logs.is_empty(), "async call should be logged");
+    let async_log = logs.iter().find(|l| l.mode == "async");
+    assert!(async_log.is_some(), "should have an async mode log entry");
+}
+
+// ===========================================================================
+// #16  Revoked key rejects subsequent requests
+// ===========================================================================
+
+#[tokio::test]
+async fn test_revoked_key_rejects_pending_request() {
+    let state = make_state(true);
+    let key = state
+        .store
+        .create_key(KeyType::Gate, "to-revoke")
+        .unwrap();
+
+    // First request succeeds
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key.raw_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"first":"ok"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "first call should succeed");
+
+    // Revoke the key
+    state.store.revoke_key(key.api_key.id).unwrap();
+
+    // Next request with same key should fail
+    let app2 = gate::build_router(state.clone(), None);
+    let response = app2
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key.raw_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"second":"should fail"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 401, "revoked key should be rejected");
+}
+
+// ===========================================================================
+// #17  Mixed sync and stream rune calls
+// ===========================================================================
+
+#[tokio::test]
+async fn test_mixed_sync_and_stream_runes() {
+    let relay = Arc::new(Relay::new());
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let store = Arc::new(RuneStore::open_in_memory().unwrap());
+
+    // Register a sync-only rune
+    let sync_handler = make_handler(|_ctx, input| async move { Ok(input) });
+    relay
+        .register(
+            RuneConfig {
+                name: "sync_rune".into(),
+                version: "1.0.0".into(),
+                description: "sync only".into(),
+                supports_stream: false,
+                gate: Some(GateConfig {
+                    path: "/sync".into(),
+                    method: "POST".into(),
+                }),
+            },
+            Arc::new(LocalInvoker::new(sync_handler)),
+            None,
+        )
+        .unwrap();
+
+    // Register a stream-capable rune
+    let stream_handler = make_handler(|_ctx, input| async move { Ok(input) });
+    relay
+        .register(
+            RuneConfig {
+                name: "stream_rune".into(),
+                version: "1.0.0".into(),
+                description: "stream capable".into(),
+                supports_stream: true,
+                gate: Some(GateConfig {
+                    path: "/stream".into(),
+                    method: "POST".into(),
+                }),
+            },
+            Arc::new(LocalInvoker::new(stream_handler)),
+            None,
+        )
+        .unwrap();
+
+    let state = GateState {
+        relay,
+        resolver,
+        store,
+        key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
+        session_mgr: Arc::new(SessionManager::new(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(35),
+        )),
+        auth_enabled: false,
+        exempt_routes: vec!["/health".to_string()],
+        cors_origins: vec![],
+        dev_mode: true,
+        started_at: std::time::Instant::now(),
+    };
+
+    // Sync rune: normal call works
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"mode":"sync"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "sync rune should work");
+
+    // Sync rune: stream request should fail
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/sync?stream=true")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"mode":"stream"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400, "stream on sync-only rune should fail");
+
+    // Stream rune: normal sync call also works (fallback)
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/stream")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"mode":"sync_on_stream"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "sync call on stream rune should work");
+
+    // Stream rune: stream request should succeed (returns SSE)
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/stream?stream=true")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"mode":"actual_stream"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "stream on stream rune should succeed");
+    // Verify it's SSE content type
+    let ct = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        ct.contains("text/event-stream"),
+        "stream response should be SSE, got: {}",
+        ct
+    );
+}
+
+// ===========================================================================
+// #18  Stats accumulate correctly across multiple runes
+// ===========================================================================
+
+#[tokio::test]
+async fn test_stats_accumulate_across_runes() {
+    let relay = Arc::new(Relay::new());
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let store = Arc::new(RuneStore::open_in_memory().unwrap());
+
+    // Register two runes
+    for (name, path) in [("rune_a", "/ra"), ("rune_b", "/rb")] {
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        relay
+            .register(
+                RuneConfig {
+                    name: name.into(),
+                    version: "1.0.0".into(),
+                    description: "test".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: path.into(),
+                        method: "POST".into(),
+                    }),
+                },
+                Arc::new(LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
+    }
+
+    let state = GateState {
+        relay,
+        resolver,
+        store,
+        key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
+        session_mgr: Arc::new(SessionManager::new(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(35),
+        )),
+        auth_enabled: false,
+        exempt_routes: vec!["/health".to_string()],
+        cors_origins: vec![],
+        dev_mode: true,
+        started_at: std::time::Instant::now(),
+    };
+
+    // Call rune_a 4 times
+    for _ in 0..4 {
+        let app = gate::build_router(state.clone(), None);
+        let _ = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ra")
+                    .body(Body::from(r#"{"a":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Call rune_b 2 times
+    for _ in 0..2 {
+        let app = gate::build_router(state.clone(), None);
+        let _ = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rb")
+                    .body(Body::from(r#"{"b":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Query stats
+    let app = gate::build_router(state, None);
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["total_calls"], 6, "total should be 4+2=6");
+
+    let by_rune = json["by_rune"].as_array().unwrap();
+    let a_stat = by_rune
+        .iter()
+        .find(|s| s["rune_name"] == "rune_a")
+        .expect("should have rune_a stats");
+    assert_eq!(a_stat["count"], 4);
+
+    let b_stat = by_rune
+        .iter()
+        .find(|s| s["rune_name"] == "rune_b")
+        .expect("should have rune_b stats");
+    assert_eq!(b_stat["count"], 2);
+}

@@ -1499,4 +1499,741 @@ mod tests {
             "https://allowed.example.com"
         );
     }
+
+    // =======================================================================
+    // #1  Empty body POST — echo rune returns empty response
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_empty_body_post_echo() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Echo rune returns whatever it receives; empty input → empty output
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert!(body.is_empty(), "echo of empty body should be empty, got {} bytes", body.len());
+    }
+
+    // =======================================================================
+    // #2  Large body POST — 10 MB body
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_large_body_post() {
+        // dynamic_rune_handler caps body at 1MB (1024 * 1024).
+        // Sending > 1MB via gate_path should fail with BAD_REQUEST.
+        let app = test_router();
+        let big = vec![b'A'; 2 * 1024 * 1024]; // 2 MB
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .body(Body::from(big))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The dynamic_rune_handler uses to_bytes(..., 1024*1024) — body > 1MB
+        // triggers "failed to read body" error.
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "BAD_REQUEST");
+    }
+
+    // =======================================================================
+    // #3  HTTP method mismatch — GET on POST-only gate_path (dynamic fallback)
+    //     The dynamic_rune_handler does not enforce method; it simply matches
+    //     path. This test documents actual behavior.
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_get_on_post_gate_path_via_fallback() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/echo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The dynamic fallback matches any method if the path matches.
+        // Echo with empty body → 200 OK with empty body.
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // =======================================================================
+    // #4  Multiple runes with different gate_paths route correctly
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_multiple_rune_gate_paths() {
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let key_verifier: Arc<dyn KeyVerifier> = Arc::new(NoopVerifier);
+
+        // Register 3 runes with different paths returning distinct payloads
+        for (name, path, output) in [
+            ("alpha", "/alpha", r#"{"rune":"alpha"}"#),
+            ("beta", "/beta", r#"{"rune":"beta"}"#),
+            ("gamma", "/gamma", r#"{"rune":"gamma"}"#),
+        ] {
+            let payload = Bytes::from(output);
+            let handler = make_handler(move |_ctx, _input| {
+                let p = payload.clone();
+                async move { Ok(p) }
+            });
+            relay
+                .register(
+                    RuneConfig {
+                        name: name.into(),
+                        version: "1.0.0".into(),
+                        description: format!("{} rune", name),
+                        supports_stream: false,
+                        gate: Some(GateConfig {
+                            path: path.into(),
+                            method: "POST".into(),
+                        }),
+                    },
+                    Arc::new(LocalInvoker::new(handler)),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let state = GateState {
+            relay,
+            resolver,
+            store,
+            key_verifier,
+            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            auth_enabled: false,
+            exempt_routes: vec!["/health".to_string()],
+            cors_origins: vec![],
+            dev_mode: true,
+            started_at: Instant::now(),
+        };
+
+        for (path, expected_name) in [("/alpha", "alpha"), ("/beta", "beta"), ("/gamma", "gamma")] {
+            let app = build_router(state.clone(), None);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK, "path {} should route correctly", path);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                json["rune"], expected_name,
+                "path {} should return rune={}", path, expected_name
+            );
+        }
+    }
+
+    // =======================================================================
+    // #5  Async task: GET returns complete result after task finishes
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_async_task_get_returns_completed_output() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+
+        // Submit async task
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo?async=true")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"result":"expected"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let task_id = json["task_id"].as_str().unwrap().to_string();
+
+        // Wait for background completion
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // GET the task via HTTP
+        let app2 = build_router(state.clone(), None);
+        let response = app2
+            .oneshot(
+                Request::get(format!("/api/v1/tasks/{}", task_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "completed");
+        assert!(json["output"].is_string(), "completed task should have output field");
+        // The output should contain the original input (echo)
+        let output_str = json["output"].as_str().unwrap();
+        assert!(
+            output_str.contains("expected"),
+            "output should contain the echoed input, got: {}",
+            output_str
+        );
+    }
+
+    // =======================================================================
+    // #6  Async task failure: GET returns error info
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_async_task_get_returns_error_on_failure() {
+        let state = test_state();
+
+        // Manually insert a failed task
+        state
+            .store
+            .insert_task("fail-async", "echo", Some("input"))
+            .unwrap();
+        state
+            .store
+            .update_task_status(
+                "fail-async",
+                TaskStatus::Failed,
+                None,
+                Some("handler crashed"),
+            )
+            .unwrap();
+
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/tasks/fail-async")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "failed");
+        assert!(json["error"].is_string(), "failed task should have error field");
+        assert!(
+            json["error"].as_str().unwrap().contains("handler crashed"),
+            "error should contain the failure message"
+        );
+    }
+
+    // =======================================================================
+    // #7  Cancel a running async task → status becomes cancelled
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_cancel_running_async_task() {
+        let state = test_state();
+
+        // Insert a task in running state
+        state
+            .store
+            .insert_task("cancel-run", "echo", Some("data"))
+            .unwrap();
+        state
+            .store
+            .update_task_status("cancel-run", TaskStatus::Running, None, None)
+            .unwrap();
+
+        let app = build_router(state.clone(), None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/tasks/cancel-run")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "cancelled");
+        assert_eq!(json["task_id"], "cancel-run");
+
+        // Verify store state
+        let task = state.store.get_task("cancel-run").unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Cancelled);
+    }
+
+    // =======================================================================
+    // #8  Cancel an already-cancelled task (idempotent) → 200
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_cancel_already_cancelled_task_idempotent() {
+        let state = test_state();
+
+        // Insert and cancel
+        state
+            .store
+            .insert_task("idempotent-cancel", "echo", Some("data"))
+            .unwrap();
+        state
+            .store
+            .update_task_status("idempotent-cancel", TaskStatus::Cancelled, None, Some("first cancel"))
+            .unwrap();
+
+        // First DELETE on already-cancelled
+        let app = build_router(state.clone(), None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/tasks/idempotent-cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "cancelled");
+
+        // Second DELETE — still idempotent 200
+        let app2 = build_router(state.clone(), None);
+        let response2 = app2
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/tasks/idempotent-cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response2.status(), StatusCode::OK);
+    }
+
+    // =======================================================================
+    // #9  Multiple concurrent async tasks — independent states
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_multiple_concurrent_async_tasks() {
+        let state = test_state();
+
+        let mut task_ids = Vec::new();
+        for i in 0..3 {
+            let app = build_router(state.clone(), None);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo?async=true")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"task":{}}}"#, i)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            task_ids.push(json["task_id"].as_str().unwrap().to_string());
+        }
+
+        // All task IDs should be unique
+        let unique: std::collections::HashSet<&String> = task_ids.iter().collect();
+        assert_eq!(unique.len(), 3, "all task IDs should be unique");
+
+        // Wait for completion
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Query each independently
+        for tid in &task_ids {
+            let task = state.store.get_task(tid).unwrap();
+            assert!(task.is_some(), "task {} should exist", tid);
+            let task = task.unwrap();
+            assert_eq!(
+                task.status,
+                TaskStatus::Completed,
+                "task {} should be completed",
+                tid
+            );
+        }
+    }
+
+    // =======================================================================
+    // #10 list_runes returns correct info for multiple runes
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_list_runes_multiple_details() {
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let key_verifier: Arc<dyn KeyVerifier> = Arc::new(NoopVerifier);
+
+        // Register 5 runes
+        for i in 0..5 {
+            let name = format!("rune_{}", i);
+            let path = format!("/path_{}", i);
+            let handler = make_handler(|_ctx, input| async move { Ok(input) });
+            relay
+                .register(
+                    RuneConfig {
+                        name: name.clone(),
+                        version: "1.0.0".into(),
+                        description: format!("rune {}", i),
+                        supports_stream: false,
+                        gate: Some(GateConfig {
+                            path: path.clone(),
+                            method: "POST".into(),
+                        }),
+                    },
+                    Arc::new(LocalInvoker::new(handler)),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let state = GateState {
+            relay,
+            resolver,
+            store,
+            key_verifier,
+            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            auth_enabled: false,
+            exempt_routes: vec!["/health".to_string()],
+            cors_origins: vec![],
+            dev_mode: true,
+            started_at: Instant::now(),
+        };
+
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/runes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let runes = json["runes"].as_array().unwrap();
+        assert_eq!(runes.len(), 5, "should list all 5 runes");
+
+        // Verify each rune has name and gate_path fields
+        for rune in runes {
+            assert!(rune["name"].is_string(), "each rune should have a name");
+            assert!(rune["gate_path"].is_string(), "each rune should have a gate_path");
+        }
+
+        // Verify specific names are present
+        let names: Vec<&str> = runes.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        for i in 0..5 {
+            let expected = format!("rune_{}", i);
+            assert!(names.contains(&expected.as_str()), "should contain {}", expected);
+        }
+    }
+
+    // =======================================================================
+    // #11 Management /api/v1/casters endpoint
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_mgmt_casters_endpoint() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/casters")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // No casters registered in test state, so list should be empty
+        assert!(json["casters"].is_array(), "response should have 'casters' array");
+        assert_eq!(json["casters"].as_array().unwrap().len(), 0);
+    }
+
+    // =======================================================================
+    // #12 Management /api/v1/status — all fields present with correct types
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_mgmt_status_all_fields() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Verify all expected fields exist with correct types
+        assert!(json["uptime_secs"].is_u64(), "uptime_secs should be a number");
+        assert!(json["rune_count"].is_u64(), "rune_count should be a number");
+        assert!(json["caster_count"].is_u64(), "caster_count should be a number");
+        assert!(json["dev_mode"].is_boolean(), "dev_mode should be a boolean");
+
+        // test_state sets dev_mode=true and registers 2 runes
+        assert_eq!(json["dev_mode"], true);
+        assert_eq!(json["rune_count"], 2); // echo + internal
+        assert_eq!(json["caster_count"], 0);
+    }
+
+    // =======================================================================
+    // #13 Management /api/v1/stats — shows data after rune calls
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_mgmt_stats_after_calls() {
+        let state = test_state();
+
+        // Make 3 sync calls to echo
+        for _ in 0..3 {
+            let app = build_router(state.clone(), None);
+            let _response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"x":1}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        // Also call internal via debug route
+        for _ in 0..2 {
+            let app = build_router(state.clone(), None);
+            let _response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/runes/internal/run")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"x":2}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        // Query stats
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["total_calls"], 5, "total should be 5 (3 echo + 2 internal)");
+
+        let by_rune = json["by_rune"].as_array().unwrap();
+        assert_eq!(by_rune.len(), 2, "should have stats for 2 runes");
+
+        // Find echo stats
+        let echo_stat = by_rune
+            .iter()
+            .find(|s| s["rune_name"] == "echo")
+            .expect("should have echo stats");
+        assert_eq!(echo_stat["count"], 3);
+        assert!(echo_stat["avg_latency_ms"].is_number());
+
+        // Find internal stats
+        let internal_stat = by_rune
+            .iter()
+            .find(|s| s["rune_name"] == "internal")
+            .expect("should have internal stats");
+        assert_eq!(internal_stat["count"], 2);
+    }
+
+    // =======================================================================
+    // Cancel a pending task (not running) — also works
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_cancel_pending_task() {
+        let state = test_state();
+
+        // Insert a task in pending state (insert_task default is pending)
+        state
+            .store
+            .insert_task("pending-cancel", "echo", Some("data"))
+            .unwrap();
+
+        let app = build_router(state.clone(), None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/tasks/pending-cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "cancelled");
+
+        let task = state.store.get_task("pending-cancel").unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Cancelled);
+    }
+
+    // =======================================================================
+    // Debug route for nonexistent rune → 404
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_debug_route_nonexistent_rune_404() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/nonexistent/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"x":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+    }
+
+    // =======================================================================
+    // Async via debug route returns 202 and correct task_id
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_async_via_debug_route() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/echo/run?async=true")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"via":"debug"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["task_id"].is_string());
+        assert_eq!(json["status"], "running");
+
+        // Wait and verify task completed
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let task_id = json["task_id"].as_str().unwrap();
+        let task = state.store.get_task(task_id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Completed);
+    }
 }
