@@ -917,3 +917,593 @@ fn test_query_logs_empty_store_returns_empty() {
     let result = store.query_logs(None, 100).unwrap();
     assert!(result.is_empty());
 }
+
+// ============================================================
+// B6: Extended boundary, error, and state-combination tests
+// ============================================================
+
+// ------ Key module: double revoke ------
+
+#[test]
+fn test_double_revoke_is_idempotent() {
+    // Revoking an already-revoked key should be a no-op: no error, revoked_at unchanged.
+    let store = new_store();
+    let result = store.create_key(KeyType::Gate, "double-revoke").unwrap();
+    let key_id = result.api_key.id;
+
+    store.revoke_key(key_id).unwrap();
+    let keys_after_first = store.list_keys().unwrap();
+    let revoked_at_first = keys_after_first[0].revoked_at.clone().unwrap();
+
+    // Small delay to ensure timestamp would differ if re-written
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    // Second revoke — should succeed without error
+    store.revoke_key(key_id).unwrap();
+    let keys_after_second = store.list_keys().unwrap();
+    let revoked_at_second = keys_after_second[0].revoked_at.clone().unwrap();
+
+    // revoked_at must remain the same (idempotent)
+    assert_eq!(
+        revoked_at_first, revoked_at_second,
+        "Double revoke must not update revoked_at"
+    );
+}
+
+// ------ Key module: verify a never-existing key with valid prefix ------
+
+#[test]
+fn test_verify_nonexistent_key_with_valid_prefix() {
+    // A well-formed key that was never created should return None, not error.
+    let store = new_store();
+    let fake_key = "rk_00000000000000000000000000000000";
+    assert_eq!(fake_key.len(), 35);
+    let verified = store.verify_key(fake_key, KeyType::Gate).unwrap();
+    assert!(verified.is_none(), "A never-created key should verify as None");
+}
+
+// ------ Key module: concurrent revoke same key ------
+
+#[test]
+fn test_concurrent_revoke_same_key() {
+    // Multiple threads revoking the same key concurrently: no panic, no error.
+    let store = Arc::new(new_store());
+    let result = store.create_key(KeyType::Gate, "concurrent-revoke").unwrap();
+    let key_id = result.api_key.id;
+
+    let mut handles = vec![];
+    for _ in 0..10 {
+        let store = Arc::clone(&store);
+        let handle = thread::spawn(move || {
+            store.revoke_key(key_id).unwrap();
+        });
+        handles.push(handle);
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Key should be revoked
+    let verified = store.verify_key(&result.raw_key, KeyType::Gate).unwrap();
+    assert!(verified.is_none(), "Key should be revoked after concurrent revoke");
+}
+
+// ------ Key module: create 100 keys then list all ------
+
+#[test]
+fn test_create_100_keys_then_list_all() {
+    let store = new_store();
+    for i in 0..100 {
+        store.create_key(KeyType::Gate, &format!("key-{}", i)).unwrap();
+    }
+
+    let keys = store.list_keys().unwrap();
+    assert_eq!(keys.len(), 100, "All 100 keys should appear in list");
+}
+
+// ------ Key module: key_hash uniqueness ------
+
+#[test]
+fn test_key_hash_uniqueness() {
+    // Two independently created keys must have different underlying hashes.
+    // We verify this indirectly: both raw keys are different and both verify independently.
+    let store = new_store();
+    let r1 = store.create_key(KeyType::Gate, "unique-1").unwrap();
+    let r2 = store.create_key(KeyType::Gate, "unique-2").unwrap();
+
+    assert_ne!(r1.raw_key, r2.raw_key, "Raw keys must differ");
+    // key_hash from CreateKeyResult is available
+    assert_ne!(
+        r1.api_key.key_hash, r2.api_key.key_hash,
+        "Key hashes must differ"
+    );
+
+    // Each key should only verify as itself
+    let v1 = store.verify_key(&r1.raw_key, KeyType::Gate).unwrap().unwrap();
+    let v2 = store.verify_key(&r2.raw_key, KeyType::Gate).unwrap().unwrap();
+    assert_ne!(v1.id, v2.id);
+}
+
+// ------ Task module: status transition matrix ------
+
+#[test]
+fn test_task_status_transition_matrix_legal() {
+    // Test all legal transitions:
+    //   pending -> running
+    //   running -> completed
+    //   running -> failed
+    //   running -> cancelled
+    //   pending -> cancelled
+    let store = new_store();
+
+    // pending -> running
+    store.insert_task("tr-pr", "rune_a", None).unwrap();
+    store.update_task_status("tr-pr", TaskStatus::Running, None, None).unwrap();
+    let t = store.get_task("tr-pr").unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Running);
+    assert!(t.started_at.is_some());
+
+    // running -> completed
+    store.insert_task("tr-rc", "rune_a", None).unwrap();
+    store.update_task_status("tr-rc", TaskStatus::Running, None, None).unwrap();
+    store.update_task_status("tr-rc", TaskStatus::Completed, Some("ok"), None).unwrap();
+    let t = store.get_task("tr-rc").unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Completed);
+    assert!(t.completed_at.is_some());
+    assert_eq!(t.output.as_deref(), Some("ok"));
+
+    // running -> failed
+    store.insert_task("tr-rf", "rune_a", None).unwrap();
+    store.update_task_status("tr-rf", TaskStatus::Running, None, None).unwrap();
+    store.update_task_status("tr-rf", TaskStatus::Failed, None, Some("boom")).unwrap();
+    let t = store.get_task("tr-rf").unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Failed);
+    assert!(t.completed_at.is_some());
+    assert_eq!(t.error.as_deref(), Some("boom"));
+
+    // running -> cancelled
+    store.insert_task("tr-rx", "rune_a", None).unwrap();
+    store.update_task_status("tr-rx", TaskStatus::Running, None, None).unwrap();
+    store.update_task_status("tr-rx", TaskStatus::Cancelled, None, None).unwrap();
+    let t = store.get_task("tr-rx").unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Cancelled);
+    assert!(t.completed_at.is_some());
+
+    // pending -> cancelled (skip running)
+    store.insert_task("tr-pc", "rune_a", None).unwrap();
+    store.update_task_status("tr-pc", TaskStatus::Cancelled, None, None).unwrap();
+    let t = store.get_task("tr-pc").unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Cancelled);
+    assert!(t.completed_at.is_some());
+}
+
+// ------ Task module: illegal transitions ------
+
+#[test]
+fn test_task_illegal_transitions_documented() {
+    // TODO: The current implementation does NOT enforce a state machine.
+    // All transitions below should ideally be rejected but currently succeed.
+    // This test documents the current permissive behavior.
+    let store = new_store();
+
+    // failed -> running (illegal)
+    store.insert_task("ill-fr", "rune_a", None).unwrap();
+    store.update_task_status("ill-fr", TaskStatus::Running, None, None).unwrap();
+    store.update_task_status("ill-fr", TaskStatus::Failed, None, Some("err")).unwrap();
+    let result = store.update_task_status("ill-fr", TaskStatus::Running, None, None);
+    // TODO: This should ideally return an error, but currently succeeds.
+    assert!(result.is_ok(), "Current impl allows failed->running (no state machine guard)");
+    let t = store.get_task("ill-fr").unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Running);
+
+    // cancelled -> completed (illegal)
+    store.insert_task("ill-cc", "rune_a", None).unwrap();
+    store.update_task_status("ill-cc", TaskStatus::Cancelled, None, None).unwrap();
+    let result = store.update_task_status("ill-cc", TaskStatus::Completed, Some("late"), None);
+    // TODO: This should ideally return an error, but currently succeeds.
+    assert!(result.is_ok(), "Current impl allows cancelled->completed (no state machine guard)");
+    let t = store.get_task("ill-cc").unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Completed);
+
+    // completed -> pending (illegal)
+    store.insert_task("ill-cp", "rune_a", None).unwrap();
+    store.update_task_status("ill-cp", TaskStatus::Running, None, None).unwrap();
+    store.update_task_status("ill-cp", TaskStatus::Completed, Some("done"), None).unwrap();
+    let result = store.update_task_status("ill-cp", TaskStatus::Pending, None, None);
+    // TODO: This should ideally return an error, but currently succeeds.
+    assert!(result.is_ok(), "Current impl allows completed->pending (no state machine guard)");
+    let t = store.get_task("ill-cp").unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Pending);
+}
+
+// ------ Task module: input/output with special content ------
+
+#[test]
+fn test_task_input_with_unicode() {
+    let store = new_store();
+    let unicode_input = r#"{"msg": "你好世界 🚀 Ñoño"}"#;
+    let task = store.insert_task("uni-1", "rune_a", Some(unicode_input)).unwrap();
+    assert_eq!(task.input.as_deref(), Some(unicode_input));
+
+    let fetched = store.get_task("uni-1").unwrap().unwrap();
+    assert_eq!(fetched.input.as_deref(), Some(unicode_input));
+}
+
+#[test]
+fn test_task_output_with_100kb_json() {
+    let store = new_store();
+    store.insert_task("big-json", "rune_a", None).unwrap();
+
+    // Build a ~100KB JSON string
+    let big_data = "x".repeat(100_000);
+    let big_json = format!(r#"{{"data": "{}"}}"#, big_data);
+    assert!(big_json.len() > 100_000);
+
+    store.update_task_status("big-json", TaskStatus::Completed, Some(&big_json), None).unwrap();
+    let t = store.get_task("big-json").unwrap().unwrap();
+    assert_eq!(t.output.as_deref(), Some(big_json.as_str()));
+}
+
+#[test]
+fn test_task_input_deeply_nested_json() {
+    let store = new_store();
+
+    // Build a 100-level nested JSON object: {"a":{"a":{..."a":1}...}}
+    let mut json = String::from("1");
+    for _ in 0..100 {
+        json = format!(r#"{{"a":{}}}"#, json);
+    }
+
+    let task = store.insert_task("nested-100", "rune_a", Some(&json)).unwrap();
+    assert_eq!(task.input.as_deref(), Some(json.as_str()));
+
+    let fetched = store.get_task("nested-100").unwrap().unwrap();
+    // Verify it round-trips correctly
+    let parsed: serde_json::Value = serde_json::from_str(fetched.input.as_ref().unwrap()).unwrap();
+    // Traverse 100 levels of "a" to reach the inner value
+    let mut val = &parsed;
+    for _ in 0..100 {
+        val = &val["a"];
+    }
+    assert_eq!(val, &serde_json::json!(1));
+}
+
+// ------ Task module: list ordering ------
+
+#[test]
+fn test_task_list_ordered_by_created_at_desc() {
+    // Timestamp resolution is 1 second, so we need >1s delay between inserts
+    // to guarantee different created_at values.
+    let store = new_store();
+
+    store.insert_task("order-1", "rune_a", None).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    store.insert_task("order-2", "rune_a", None).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    store.insert_task("order-3", "rune_a", None).unwrap();
+
+    let tasks = store.list_tasks(None, None, 100, 0).unwrap();
+    assert_eq!(tasks.len(), 3);
+
+    // Verify created_at values are actually distinct
+    assert_ne!(tasks[0].created_at, tasks[2].created_at,
+        "Tasks must have distinct timestamps for this test to be meaningful");
+
+    // ORDER BY created_at DESC => newest first
+    assert_eq!(tasks[0].task_id, "order-3");
+    assert_eq!(tasks[1].task_id, "order-2");
+    assert_eq!(tasks[2].task_id, "order-1");
+}
+
+// ------ Task module: offset beyond range ------
+
+#[test]
+fn test_task_list_offset_beyond_total() {
+    let store = new_store();
+    store.insert_task("off-1", "rune_a", None).unwrap();
+    store.insert_task("off-2", "rune_a", None).unwrap();
+
+    let result = store.list_tasks(None, None, 100, 999).unwrap();
+    assert!(result.is_empty(), "Offset beyond total should return empty");
+}
+
+// ------ Log module: exact boundary cleanup ------
+
+#[test]
+fn test_cleanup_exact_boundary_timestamp() {
+    // cleanup_logs_before uses strict "<", so a log with the exact boundary timestamp
+    // should NOT be deleted.
+    let store = new_store();
+    let boundary = "2025-06-01T00:00:00Z";
+
+    store.insert_log(&make_log("rune_a", "before", "2025-05-31T23:59:59Z")).unwrap();
+    store.insert_log(&make_log("rune_a", "exact", boundary)).unwrap();
+    store.insert_log(&make_log("rune_a", "after", "2025-06-01T00:00:01Z")).unwrap();
+
+    let deleted = store.cleanup_logs_before(boundary).unwrap();
+    // Only "before" should be deleted (strict <)
+    assert_eq!(deleted, 1, "Only logs strictly before the boundary should be deleted");
+
+    let remaining = store.query_logs(None, 100).unwrap();
+    assert_eq!(remaining.len(), 2);
+    let ids: Vec<&str> = remaining.iter().map(|l| l.request_id.as_str()).collect();
+    assert!(ids.contains(&"exact"), "Exact boundary log should remain");
+    assert!(ids.contains(&"after"), "After boundary log should remain");
+}
+
+// ------ Log module: large query with limit ------
+
+#[test]
+fn test_query_1000_logs_with_limit_10() {
+    let store = new_store();
+    for i in 0..1000 {
+        store.insert_log(&make_log(
+            "rune_a",
+            &format!("req-{}", i),
+            &format!("2026-01-01T{:02}:{:02}:{:02}Z", i / 3600, (i % 3600) / 60, i % 60),
+        )).unwrap();
+    }
+
+    let logs = store.query_logs(None, 10).unwrap();
+    assert_eq!(logs.len(), 10, "Limit should cap results at 10");
+}
+
+// ------ Log module: all three modes ------
+
+#[test]
+fn test_log_mode_all_variants() {
+    // The call_logs table has CHECK(mode IN ('sync', 'stream', 'async'))
+    let store = new_store();
+
+    for mode in &["sync", "stream", "async"] {
+        let log = CallLog {
+            id: 0,
+            request_id: format!("req-{}", mode),
+            rune_name: "rune_a".to_string(),
+            mode: mode.to_string(),
+            caster_id: None,
+            latency_ms: 10,
+            status_code: 200,
+            input_size: 50,
+            output_size: 100,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        };
+        store.insert_log(&log).unwrap();
+    }
+
+    let logs = store.query_logs(None, 100).unwrap();
+    assert_eq!(logs.len(), 3);
+    let modes: Vec<&str> = logs.iter().map(|l| l.mode.as_str()).collect();
+    assert!(modes.contains(&"sync"));
+    assert!(modes.contains(&"stream"));
+    assert!(modes.contains(&"async"));
+}
+
+// ------ Log module: latency boundary values ------
+
+#[test]
+fn test_log_latency_zero() {
+    let store = new_store();
+    let log = make_log_with_latency("rune_a", "lat-0", "2026-01-01T00:00:00Z", 0);
+    store.insert_log(&log).unwrap();
+
+    let logs = store.query_logs(None, 10).unwrap();
+    assert_eq!(logs[0].latency_ms, 0);
+}
+
+#[test]
+fn test_log_latency_i64_max() {
+    let store = new_store();
+    let log = make_log_with_latency("rune_a", "lat-max", "2026-01-01T00:00:00Z", i64::MAX);
+    store.insert_log(&log).unwrap();
+
+    let logs = store.query_logs(None, 10).unwrap();
+    assert_eq!(logs[0].latency_ms, i64::MAX);
+}
+
+// ------ Log module: various status_code values ------
+
+#[test]
+fn test_log_status_codes() {
+    let store = new_store();
+    let codes = [200, 400, 401, 404, 409, 500];
+
+    for (i, &code) in codes.iter().enumerate() {
+        let mut log = make_log("rune_a", &format!("sc-{}", i), &format!("2026-01-01T00:00:{:02}Z", i));
+        log.status_code = code;
+        store.insert_log(&log).unwrap();
+    }
+
+    let logs = store.query_logs(None, 100).unwrap();
+    assert_eq!(logs.len(), codes.len());
+    let stored_codes: Vec<i32> = logs.iter().map(|l| l.status_code).collect();
+    for &code in &codes {
+        assert!(stored_codes.contains(&code), "Status code {} should be present", code);
+    }
+}
+
+// ------ Snapshot module: 50 different snapshots ------
+
+#[test]
+fn test_50_snapshots_list_all() {
+    let store = new_store();
+    for i in 0..50 {
+        store.upsert_snapshot(&make_snapshot(&format!("rune-{:03}", i))).unwrap();
+    }
+
+    let list = store.list_snapshots().unwrap();
+    assert_eq!(list.len(), 50, "All 50 snapshots should appear in list");
+    // Verify alphabetical ordering
+    for i in 1..list.len() {
+        assert!(
+            list[i].rune_name >= list[i - 1].rune_name,
+            "Snapshots should be ordered by rune_name"
+        );
+    }
+}
+
+// ------ Snapshot module: empty optional fields ------
+
+#[test]
+fn test_snapshot_with_empty_string_fields() {
+    // gate_path and gate_method are NOT NULL in schema, but can be empty strings.
+    // This tests the boundary of "no meaningful value" without NULL.
+    let store = new_store();
+    let snap = RuneSnapshot {
+        rune_name: "minimal".to_string(),
+        version: "0.0.1".to_string(),
+        description: "".to_string(),
+        supports_stream: false,
+        gate_path: "".to_string(),
+        gate_method: "".to_string(),
+        last_seen: String::new(),
+    };
+    store.upsert_snapshot(&snap).unwrap();
+
+    let list = store.list_snapshots().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].gate_path, "");
+    assert_eq!(list[0].gate_method, "");
+    assert_eq!(list[0].description, "");
+}
+
+// ------ Snapshot module: rune_name with special characters ------
+
+#[test]
+fn test_snapshot_rune_name_special_chars() {
+    let store = new_store();
+    let names = [
+        "my/rune",
+        "my-rune",
+        "my_rune",
+        "中文rune",
+    ];
+
+    for name in &names {
+        store.upsert_snapshot(&make_snapshot(name)).unwrap();
+    }
+
+    let list = store.list_snapshots().unwrap();
+    assert_eq!(list.len(), names.len());
+    let stored_names: Vec<&str> = list.iter().map(|s| s.rune_name.as_str()).collect();
+    for name in &names {
+        assert!(
+            stored_names.contains(name),
+            "Rune name '{}' should be present in snapshot list",
+            name
+        );
+    }
+}
+
+// ------ Snapshot module: rapid consecutive upsert ------
+
+#[test]
+fn test_snapshot_rapid_upsert_10_times() {
+    let store = new_store();
+
+    for i in 0..10 {
+        let mut snap = make_snapshot("rapid-rune");
+        snap.version = format!("0.{}.0", i);
+        snap.supports_stream = i % 2 == 0;
+        store.upsert_snapshot(&snap).unwrap();
+    }
+
+    let list = store.list_snapshots().unwrap();
+    assert_eq!(list.len(), 1, "Upsert should not create duplicates");
+    // The last upsert should win
+    assert_eq!(list[0].version, "0.9.0");
+    // i=9, 9%2 != 0, so supports_stream = false
+    assert!(!list[0].supports_stream);
+}
+
+// ------ Cross-module: store reopen persistence ------
+
+#[test]
+fn test_store_reopen_data_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("persist.db");
+
+    // Phase 1: write data
+    {
+        let store = RuneStore::open(&db_path).unwrap();
+
+        store.create_key(KeyType::Gate, "persist-key").unwrap();
+        store.insert_task("persist-task", "persist-rune", Some(r#"{"x":1}"#)).unwrap();
+        store.insert_log(&make_log("persist-rune", "persist-req", "2026-01-01T00:00:00Z")).unwrap();
+        store.upsert_snapshot(&make_snapshot("persist-snap")).unwrap();
+    }
+    // store is dropped (closed)
+
+    // Phase 2: reopen and verify all data
+    {
+        let store = RuneStore::open(&db_path).unwrap();
+
+        let keys = store.list_keys().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].label, "persist-key");
+
+        let task = store.get_task("persist-task").unwrap().unwrap();
+        assert_eq!(task.rune_name, "persist-rune");
+        assert_eq!(task.input.as_deref(), Some(r#"{"x":1}"#));
+
+        let logs = store.query_logs(None, 100).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].request_id, "persist-req");
+
+        let snaps = store.list_snapshots().unwrap();
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].rune_name, "persist-snap");
+    }
+}
+
+// ------ Cross-module: empty database all queries ------
+
+#[test]
+fn test_empty_database_all_queries() {
+    let store = new_store();
+
+    // Keys
+    let keys = store.list_keys().unwrap();
+    assert!(keys.is_empty());
+
+    // Verify non-existent key
+    let v = store.verify_key("rk_aaaabbbbccccddddaaaabbbbccccdddd", KeyType::Gate).unwrap();
+    assert!(v.is_none());
+
+    // Revoke non-existent key
+    assert!(store.revoke_key(1).is_ok());
+
+    // Tasks
+    let tasks = store.list_tasks(None, None, 100, 0).unwrap();
+    assert!(tasks.is_empty());
+
+    let tasks_by_status = store.list_tasks(Some(TaskStatus::Pending), None, 100, 0).unwrap();
+    assert!(tasks_by_status.is_empty());
+
+    let tasks_by_rune = store.list_tasks(None, Some("anything"), 100, 0).unwrap();
+    assert!(tasks_by_rune.is_empty());
+
+    let task = store.get_task("nonexistent").unwrap();
+    assert!(task.is_none());
+
+    let update_result = store.update_task_status("ghost", TaskStatus::Running, None, None);
+    assert!(update_result.is_ok());
+
+    // Logs
+    let logs = store.query_logs(None, 100).unwrap();
+    assert!(logs.is_empty());
+
+    let logs_filtered = store.query_logs(Some("anything"), 100).unwrap();
+    assert!(logs_filtered.is_empty());
+
+    let deleted = store.cleanup_logs_before("2099-12-31T23:59:59Z").unwrap();
+    assert_eq!(deleted, 0);
+
+    let (total, by_rune) = store.call_stats().unwrap();
+    assert_eq!(total, 0);
+    assert!(by_rune.is_empty());
+
+    // Snapshots
+    let snaps = store.list_snapshots().unwrap();
+    assert!(snaps.is_empty());
+}
