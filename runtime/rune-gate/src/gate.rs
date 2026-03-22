@@ -2749,4 +2749,1291 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["debug_no_ct"], true);
     }
+
+    // =========================================================================
+    // Module 3: File Transfer Tests
+    // =========================================================================
+    //
+    // These tests define the expected behavior for file upload/download via
+    // multipart/form-data, file broker API, size limits, metadata preservation,
+    // and edge cases. All marked #[ignore] because the functionality is not yet
+    // implemented.
+    //
+    // Future implementation will add to GateState:
+    //   - file_broker: Arc<FileBroker>
+    //   - max_upload_size_mb: u64
+    // And new routes:
+    //   - GET /api/v1/files/:id
+    //   - multipart handling in dynamic_rune_handler / run_rune
+    // =========================================================================
+
+    /// Helper: build a multipart body with the given boundary and parts.
+    /// Each part is (name, Option<filename>, content_type, data).
+    fn build_multipart_body(
+        boundary: &str,
+        parts: &[(&str, Option<&str>, &str, &[u8])],
+    ) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (name, filename, content_type, data) in parts {
+            body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+            match filename {
+                Some(fname) => {
+                    body.extend_from_slice(
+                        format!(
+                            "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+                            name, fname
+                        )
+                        .as_bytes(),
+                    );
+                }
+                None => {
+                    body.extend_from_slice(
+                        format!("Content-Disposition: form-data; name=\"{}\"\r\n", name)
+                            .as_bytes(),
+                    );
+                }
+            }
+            body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", content_type).as_bytes());
+            body.extend_from_slice(data);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+        body
+    }
+
+    // ---- Multipart Upload Tests ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_multipart_upload_single_file_via_gate_path() {
+        // POST multipart/form-data with a single file to a rune's gate_path
+        // should succeed and pass the file as an attachment to the handler.
+        let app = test_router();
+        let boundary = "----TestBoundaryUpload1";
+        let body = build_multipart_body(
+            boundary,
+            &[(
+                "file",
+                Some("test.txt"),
+                "text/plain",
+                b"hello world",
+            )],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_multipart_upload_json_and_file_together() {
+        // multipart containing both a JSON "input" field and a file attachment.
+        // Both should be correctly parsed: JSON as the rune input, file as attachment.
+        let app = test_router();
+        let boundary = "----TestBoundaryJsonFile";
+        let json_part = br#"{"key": "value"}"#;
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("input", None, "application/json", json_part),
+                ("file", Some("data.csv"), "text/csv", b"a,b,c\n1,2,3"),
+            ],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_multipart_upload_multiple_files() {
+        // Multiple files uploaded simultaneously — all should be passed as attachments.
+        let app = test_router();
+        let boundary = "----TestBoundaryMulti";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file1", Some("a.txt"), "text/plain", b"file a content"),
+                ("file2", Some("b.txt"), "text/plain", b"file b content"),
+                ("file3", Some("c.bin"), "application/octet-stream", b"\x00\x01\x02"),
+            ],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_multipart_no_file_only_json() {
+        // multipart/form-data with only a JSON "input" field and no file —
+        // should work normally, processing just the JSON part.
+        let app = test_router();
+        let boundary = "----TestBoundaryNoFile";
+        let body = build_multipart_body(
+            boundary,
+            &[("input", None, "application/json", br#"{"only":"json"}"#)],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let resp_body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert_eq!(json["only"], "json");
+    }
+
+    // ---- Size Limit Tests ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_file_under_max_upload_size_succeeds() {
+        // File smaller than max_upload_size_mb should upload successfully (200).
+        // Assuming default max_upload_size_mb = 10, a 1MB file is well under.
+        let state = test_state();
+        // state.max_upload_size_mb will default to 10 once the field is added
+        let app = build_router(state, None);
+        let boundary = "----TestBoundarySizeOk";
+        let small_data = vec![0x41u8; 1024 * 1024]; // 1MB
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("small.bin"), "application/octet-stream", &small_data)],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_file_equal_to_max_upload_size_succeeds() {
+        // File exactly at the limit should still succeed.
+        // When max_upload_size_mb = 1, a 1MB file should pass.
+        let state = test_state();
+        // state.max_upload_size_mb = 1; // will be set once field is added
+        let app = build_router(state, None);
+        let boundary = "----TestBoundarySizeEq";
+        let exact_data = vec![0x42u8; 1 * 1024 * 1024]; // exactly 1MB
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("exact.bin"), "application/octet-stream", &exact_data)],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // With max_upload_size_mb=1, a 1MB file is at the boundary — should succeed
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_file_exceeds_max_upload_size_returns_413() {
+        // File larger than max_upload_size_mb should be rejected with 413.
+        let state = test_state();
+        // state.max_upload_size_mb = 1; // 1MB limit, will be set once field is added
+        let app = build_router(state, None);
+        let boundary = "----TestBoundarySizeOver";
+        let big_data = vec![0x43u8; 2 * 1024 * 1024]; // 2MB, over 1MB limit
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("big.bin"), "application/octet-stream", &big_data)],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_multiple_files_total_size_exceeds_limit_returns_413() {
+        // Multiple files whose total size exceeds max_upload_size_mb → 413.
+        let state = test_state();
+        // state.max_upload_size_mb = 1; // 1MB limit
+        let app = build_router(state, None);
+        let boundary = "----TestBoundaryMultiOver";
+        let chunk = vec![0x44u8; 600 * 1024]; // 600KB each, total 1.2MB > 1MB
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file1", Some("a.bin"), "application/octet-stream", &chunk),
+                ("file2", Some("b.bin"), "application/octet-stream", &chunk),
+            ],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    // ---- File Broker API Tests ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_download_file_by_id_returns_200() {
+        // After a file is stored in the broker, GET /api/v1/files/:id should
+        // return 200 with correct Content-Type and Content-Disposition.
+        let state = test_state();
+        // Pre-store a file in the broker:
+        // let file_id = state.file_broker.store(
+        //     "report.pdf".into(),
+        //     b"fake pdf data".to_vec(),
+        //     "application/pdf".into(),
+        // ).unwrap();
+        let app = build_router(state, None);
+
+        // This test relies on a file being pre-stored via the broker.
+        // The file_id would be used in the URI.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/files/placeholder-file-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Once implemented with a real file_id, should be 200
+        // with headers:
+        //   Content-Type: application/pdf
+        //   Content-Disposition: attachment; filename="report.pdf"
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_download_nonexistent_file_returns_404() {
+        // GET /api/v1/files/:nonexistent → 404
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/files/does-not-exist-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_file_cleaned_up_after_request_returns_404() {
+        // After a rune execution completes, temporary files should be cleaned up.
+        // A subsequent GET /api/v1/files/:id should return 404.
+        let state = test_state();
+        // Step 1: store a file and get file_id
+        // let file_id = state.file_broker.store(
+        //     "temp.dat".into(),
+        //     b"temp data".to_vec(),
+        //     "application/octet-stream".into(),
+        // ).unwrap();
+        //
+        // Step 2: simulate request completion → broker.remove(file_id)
+        // state.file_broker.remove(&file_id);
+        let app = build_router(state, None);
+
+        // Step 3: try to download the cleaned-up file
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/files/cleaned-up-file-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ---- File Metadata Tests ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_upload_preserves_original_filename_and_mime_type() {
+        // When a file is uploaded with a specific filename and MIME type,
+        // the attachment should preserve both values exactly.
+        let app = test_router();
+        let boundary = "----TestBoundaryMeta";
+        let body = build_multipart_body(
+            boundary,
+            &[(
+                "file",
+                Some("report-2024.pdf"),
+                "application/pdf",
+                b"pdf content here",
+            )],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // The echo rune (or a test-specific handler) should reflect the
+        // attachment metadata in its response so we can verify:
+        //   filename == "report-2024.pdf"
+        //   mime_type == "application/pdf"
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_upload_without_mime_type_defaults_to_octet_stream() {
+        // When no Content-Type is specified for a file part, the system
+        // should default to application/octet-stream.
+        let app = test_router();
+        let boundary = "----TestBoundaryNoMime";
+        // Build a part without specifying Content-Type (we'll use a raw body)
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"mystery.dat\"\r\n",
+        );
+        // No Content-Type header for this part
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(b"some unknown data");
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // Verify the attachment has mime_type == "application/octet-stream"
+    }
+
+    // ---- Boundary / Edge Case Tests ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_empty_file_zero_bytes() {
+        // An empty file (0 bytes) should be accepted and processed normally.
+        let app = test_router();
+        let boundary = "----TestBoundaryEmpty";
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("empty.txt"), "text/plain", b"")],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_filename_with_spaces() {
+        // Filename containing spaces should be preserved correctly.
+        let app = test_router();
+        let boundary = "----TestBoundarySpaces";
+        let body = build_multipart_body(
+            boundary,
+            &[(
+                "file",
+                Some("my file name.txt"),
+                "text/plain",
+                b"content",
+            )],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_filename_with_chinese_characters() {
+        // Filename with CJK characters should be preserved correctly.
+        let app = test_router();
+        let boundary = "----TestBoundaryCJK";
+        let body = build_multipart_body(
+            boundary,
+            &[(
+                "file",
+                Some("\u{62a5}\u{544a}\u{6587}\u{4ef6}.pdf"),
+                "application/pdf",
+                b"pdf content",
+            )],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_filename_with_path_separators_sanitized() {
+        // Filenames containing path separators (/, \) should be sanitized
+        // or preserved as-is (without directory traversal risk).
+        let app = test_router();
+        let boundary = "----TestBoundaryPathSep";
+        let body = build_multipart_body(
+            boundary,
+            &[(
+                "file",
+                Some("../../etc/passwd"),
+                "text/plain",
+                b"not really",
+            )],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should succeed but the filename stored should be sanitized
+        // (e.g., just "passwd" or the full string without traversal effect)
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_very_long_filename_handled() {
+        // Filename exceeding 255 characters should be handled gracefully —
+        // either truncated or rejected with a clear error.
+        let app = test_router();
+        let boundary = "----TestBoundaryLongName";
+        let long_name = "x".repeat(300) + ".txt";
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some(&long_name), "text/plain", b"data")],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Either 200 (with truncated name) or 400 (rejected) — both acceptable.
+        // Should NOT panic or return 500.
+        let status = response.status().as_u16();
+        assert!(
+            status == 200 || status == 400,
+            "expected 200 or 400 for very long filename, got {}",
+            status,
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_binary_file_transfer() {
+        // Binary file (non-text) should be transmitted without corruption.
+        let app = test_router();
+        let boundary = "----TestBoundaryBinary";
+        let binary_data: Vec<u8> = (0..=255).collect();
+        let body = build_multipart_body(
+            boundary,
+            &[(
+                "file",
+                Some("binary.bin"),
+                "application/octet-stream",
+                &binary_data,
+            )],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ---- Debug Route Multipart Tests ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_multipart_upload_via_debug_route() {
+        // The debug route /api/v1/runes/:name/run should also support
+        // multipart/form-data file uploads.
+        let app = test_router();
+        let boundary = "----TestBoundaryDebugMulti";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("input", None, "application/json", br#"{"debug":true}"#),
+                ("file", Some("debug.txt"), "text/plain", b"debug file data"),
+            ],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/echo/run")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ---- Async Mode with Multipart Tests ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_multipart_with_async_mode_returns_task_id() {
+        // multipart + ?async=true → should return 202 Accepted with task_id.
+        // Files should remain available during async execution.
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryAsync";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("input", None, "application/json", br#"{"async_test":1}"#),
+                ("file", Some("async.txt"), "text/plain", b"async file data"),
+            ],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo?async=true")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let resp_body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert!(json["task_id"].is_string());
+        assert_eq!(json["status"], "running");
+    }
+
+    // ---- File Broker Content Verification Tests ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_download_file_correct_content_type_header() {
+        // Verify that GET /api/v1/files/:id sets the Content-Type header
+        // to the MIME type of the stored file.
+        let state = test_state();
+        // Pre-store a file:
+        // let file_id = state.file_broker.store(
+        //     "image.png".into(),
+        //     vec![0x89, 0x50, 0x4E, 0x47], // PNG magic bytes
+        //     "image/png".into(),
+        // ).unwrap();
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/files/placeholder-png-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Once implemented with real file_id:
+        // assert_eq!(response.status(), StatusCode::OK);
+        // let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+        // assert_eq!(ct, "image/png");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_download_file_content_disposition_header() {
+        // Verify that GET /api/v1/files/:id sets Content-Disposition
+        // with the original filename.
+        let state = test_state();
+        // Pre-store:
+        // let file_id = state.file_broker.store(
+        //     "report.csv".into(),
+        //     b"a,b\n1,2".to_vec(),
+        //     "text/csv".into(),
+        // ).unwrap();
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/files/placeholder-csv-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Once implemented with real file_id:
+        // assert_eq!(response.status(), StatusCode::OK);
+        // let cd = response.headers().get("content-disposition").unwrap().to_str().unwrap();
+        // assert!(cd.contains("report.csv"));
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ---- Small vs Large File Threshold Tests ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_small_file_under_4mb_sent_inline() {
+        // Files ≤ 4MB should be sent inline via gRPC attachments field
+        // (FileAttachment with data populated directly).
+        let app = test_router();
+        let boundary = "----TestBoundarySmallInline";
+        let small_data = vec![0x50u8; 3 * 1024 * 1024]; // 3MB, under 4MB threshold
+        let body = build_multipart_body(
+            boundary,
+            &[(
+                "file",
+                Some("small_inline.bin"),
+                "application/octet-stream",
+                &small_data,
+            )],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // Ideally: verify the handler received FileAttachment with data populated
+        // (not a file_id reference)
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_large_file_over_4mb_uses_broker() {
+        // Files > 4MB should be stored in the file broker and referenced
+        // by file_id instead of inline data.
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryLargeBroker";
+        let large_data = vec![0x51u8; 5 * 1024 * 1024]; // 5MB, over 4MB threshold
+        let body = build_multipart_body(
+            boundary,
+            &[(
+                "file",
+                Some("large_broker.bin"),
+                "application/octet-stream",
+                &large_data,
+            )],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // Ideally: verify the file was stored in the broker and the handler
+        // received a file_id reference
+    }
+
+    // ---- Multipart via gate_path vs debug route parity ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_multipart_debug_route_nonexistent_rune_404() {
+        // Multipart upload to a debug route for a nonexistent rune → 404.
+        let app = test_router();
+        let boundary = "----TestBoundaryDebug404";
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("x.txt"), "text/plain", b"data")],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/nonexistent/run")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ---- Async + Multipart via debug route ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_multipart_async_via_debug_route() {
+        // multipart + ?async=true via /api/v1/runes/:name/run
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryAsyncDebug";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("input", None, "application/json", br#"{"v":1}"#),
+                ("file", Some("ad.txt"), "text/plain", b"async debug file"),
+            ],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/echo/run?async=true")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let resp_body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert!(json["task_id"].is_string());
+    }
+
+    // =======================================================================
+    // Module 4: Schema validation integration tests
+    // 等 schema 校验集成后取消 ignore
+    // =======================================================================
+
+    /// Helper: build a GateState with runes that have input_schema / output_schema
+    fn test_state_with_schema() -> GateState {
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let key_verifier: Arc<dyn KeyVerifier> = Arc::new(NoopVerifier);
+
+        let input_schema = r#"{
+            "type": "object",
+            "required": ["name", "age"],
+            "properties": {
+                "name": { "type": "string" },
+                "age": { "type": "integer" }
+            }
+        }"#;
+
+        let output_schema = r#"{
+            "type": "object",
+            "required": ["result"],
+            "properties": {
+                "result": { "type": "string" }
+            }
+        }"#;
+
+        // Rune with schema: returns valid output
+        let echo_with_schema = make_handler(|_ctx, _input| async move {
+            Ok(Bytes::from(r#"{"result": "ok"}"#))
+        });
+        relay
+            .register(
+                RuneConfig {
+                    name: "validated".into(),
+                    version: "1.0.0".into(),
+                    description: "rune with schema".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/validated".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: Some(input_schema.to_string()),
+                    output_schema: Some(output_schema.to_string()),
+                    priority: 0,
+                },
+                Arc::new(LocalInvoker::new(echo_with_schema)),
+                None,
+            )
+            .unwrap();
+
+        // Rune without schema (backward compat)
+        let no_schema_handler = make_handler(|_ctx, input| async move { Ok(input) });
+        relay
+            .register(
+                RuneConfig {
+                    name: "no_schema".into(),
+                    version: "1.0.0".into(),
+                    description: "no schema rune".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/no-schema".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                },
+                Arc::new(LocalInvoker::new(no_schema_handler)),
+                None,
+            )
+            .unwrap();
+
+        // Rune that returns output NOT matching output_schema
+        let bad_output_handler = make_handler(|_ctx, _input| async move {
+            // Returns {"result": 42} but schema expects "result" to be string
+            Ok(Bytes::from(r#"{"result": 42}"#))
+        });
+        relay
+            .register(
+                RuneConfig {
+                    name: "bad_output".into(),
+                    version: "1.0.0".into(),
+                    description: "rune with bad output".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/bad-output".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: Some(input_schema.to_string()),
+                    output_schema: Some(output_schema.to_string()),
+                    priority: 0,
+                },
+                Arc::new(LocalInvoker::new(bad_output_handler)),
+                None,
+            )
+            .unwrap();
+
+        GateState {
+            relay,
+            resolver,
+            store,
+            key_verifier,
+            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            auth_enabled: false,
+            exempt_routes: vec!["/health".to_string()],
+            cors_origins: vec![],
+            dev_mode: true,
+            started_at: Instant::now(),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore] // 等 schema 校验集成后取消 ignore
+    async fn test_schema_valid_input_returns_200() {
+        let state = test_state_with_schema();
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/validated")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": "Alice", "age": 30}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore] // 等 schema 校验集成后取消 ignore
+    async fn test_schema_invalid_input_returns_422() {
+        let state = test_state_with_schema();
+        let app = build_router(state, None);
+
+        // Missing "age" field, which is required
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/validated")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": "Alice"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Error should contain validation details
+        assert!(json["error"].is_object(), "should have error object");
+        let error_msg = json["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            error_msg.contains("age") || error_msg.contains("required") || error_msg.contains("validation"),
+            "error should mention the validation issue, got: {}",
+            error_msg
+        );
+    }
+
+    #[tokio::test]
+    #[ignore] // 等 schema 校验集成后取消 ignore
+    async fn test_no_schema_rune_skips_validation() {
+        let state = test_state_with_schema();
+        let app = build_router(state, None);
+
+        // Send anything to the rune without schema — should work fine
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/no-schema")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"anything": "goes"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore] // 等 schema 校验集成后取消 ignore
+    async fn test_openapi_endpoint_returns_valid_json() {
+        let state = test_state_with_schema();
+        let app = build_router(state, None);
+
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/openapi.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Verify OpenAPI 3.0 structure
+        assert_eq!(json["openapi"].as_str().unwrap(), "3.0.0");
+        assert!(json["info"].is_object());
+        assert!(json["paths"].is_object());
+
+        // Should include the validated rune path
+        assert!(json["paths"]["/validated"].is_object(),
+            "OpenAPI should include /validated path");
+    }
+
+    #[tokio::test]
+    #[ignore] // 等 schema 校验集成后取消 ignore
+    async fn test_output_schema_failure_returns_500() {
+        let state = test_state_with_schema();
+        let app = build_router(state, None);
+
+        // Send valid input to the rune that returns bad output
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/bad-output")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": "Alice", "age": 30}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Output schema violation is a server error
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    #[ignore] // 等 schema 校验集成后取消 ignore
+    async fn test_schema_validation_via_debug_route() {
+        let state = test_state_with_schema();
+        let app = build_router(state, None);
+
+        // Invalid input via debug route should also get 422
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/validated/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"wrong": "fields"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    #[ignore] // 等 schema 校验集成后取消 ignore
+    async fn test_schema_validation_in_async_mode() {
+        let state = test_state_with_schema();
+        let app = build_router(state, None);
+
+        // Async mode with invalid input should reject immediately (before spawning task)
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/validated?async=true")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": "Alice"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should get 422 immediately, not 202 Accepted
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
 }

@@ -1,0 +1,10 @@
+[package]
+name = "rune-schema"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+jsonschema = "0.28"
+serde_json.workspace = true
+thiserror.workspace = true
+serde.workspace = true
