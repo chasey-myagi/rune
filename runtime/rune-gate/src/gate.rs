@@ -90,8 +90,11 @@ impl FileBroker {
         self.files.remove(file_id).map(|(_, v)| v)
     }
 
-    /// Mark a request as completed, making its files unavailable for download.
+    /// Mark a request as completed and physically remove its files from memory.
     pub fn complete_request(&self, request_id: &str) {
+        // Physically delete all files belonging to this request (prevents OOM)
+        self.files.retain(|_, v| v.request_id != request_id);
+        // Also mark as completed for safety checks on stale references
         self.completed_requests.insert(request_id.to_string(), ());
     }
 }
@@ -428,8 +431,9 @@ async fn execute_rune(
         (body, None, Vec::new())
     };
 
-    // Input schema validation (skip for multipart — the JSON part may be absent)
-    if file_metadata.is_none() {
+    // Input schema validation — also validate multipart when JSON input is present
+    let should_validate = file_metadata.is_none() || !rune_input.is_empty();
+    if should_validate {
         if let Err(e) = validate_input(input_schema.as_deref(), &rune_input) {
             return error_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -5281,5 +5285,122 @@ mod tests {
 
         // Should get 422 immediately, not 202 Accepted
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // =======================================================================
+    // Issue Fix: multipart requests must validate JSON input against schema
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_fix_multipart_with_schema_validates_json_input() {
+        // multipart request with JSON input that violates schema should get 422
+        let state = test_state_with_schema();
+        let app = build_router(state, None);
+
+        let boundary = "----TestBoundary";
+        // JSON part is missing required "age" field
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("input", None, "application/json", br#"{"name": "Alice"}"#),
+                ("file", Some("photo.png"), "image/png", b"fake-png-data"),
+            ],
+        );
+
+        let response = send_multipart(app, "/validated", boundary, body).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "multipart with invalid JSON input should return 422, not bypass schema validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fix_multipart_with_schema_valid_input_passes() {
+        // multipart request with valid JSON input should pass schema validation
+        let state = test_state_with_schema();
+        let app = build_router(state, None);
+
+        let boundary = "----TestBoundary";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                (
+                    "input",
+                    None,
+                    "application/json",
+                    br#"{"name": "Alice", "age": 30}"#,
+                ),
+                ("file", Some("photo.png"), "image/png", b"fake-png-data"),
+            ],
+        );
+
+        let response = send_multipart(app, "/validated", boundary, body).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "multipart with valid JSON input should return 200"
+        );
+    }
+
+    // =======================================================================
+    // Issue Fix: FileBroker memory leak — complete_request must clean up files
+    // =======================================================================
+
+    #[test]
+    fn test_fix_file_broker_cleans_up_files_on_complete() {
+        // FileBroker should release file data after complete_request
+        let broker = FileBroker::new();
+        let file_id = broker.store(
+            "test.txt".into(),
+            "text/plain".into(),
+            Bytes::from("data"),
+            "req-1",
+        );
+
+        // File should exist
+        assert!(broker.get(&file_id).is_some());
+
+        // After completing the request, the file should be physically removed
+        broker.complete_request("req-1");
+
+        // Verify files DashMap no longer holds the file (memory released)
+        assert_eq!(
+            broker.files.len(),
+            0,
+            "files should be physically removed, not just logically hidden"
+        );
+    }
+
+    #[test]
+    fn test_fix_file_broker_complete_only_removes_own_files() {
+        // complete_request should only clean up files for that request
+        let broker = FileBroker::new();
+        let _id1 = broker.store(
+            "a.txt".into(),
+            "text/plain".into(),
+            Bytes::from("aaa"),
+            "req-1",
+        );
+        let id2 = broker.store(
+            "b.txt".into(),
+            "text/plain".into(),
+            Bytes::from("bbb"),
+            "req-2",
+        );
+
+        broker.complete_request("req-1");
+
+        // req-1's files should be cleaned up
+        assert_eq!(
+            broker.files.len(),
+            1,
+            "only req-1 files should be removed"
+        );
+        // req-2's files should still be accessible
+        assert!(
+            broker.get(&id2).is_some(),
+            "req-2 files should still be accessible"
+        );
     }
 }
