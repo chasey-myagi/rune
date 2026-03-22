@@ -1393,4 +1393,272 @@ mod tests {
         let labels = HashMap::new();
         assert!(relay.resolve_with_labels("nope", &labels, &resolver).is_none());
     }
+
+    // ====================================================================
+    // v0.6.0 TDD — Supplementary Labels Tests
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires resolve_with_labels implementation"]
+    #[test]
+    fn test_labels_key_with_special_chars() {
+        // Label keys containing special characters (=, comma, space) should
+        // be handled correctly — they are valid HashMap keys.
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, _input| async { Ok(Bytes::from("ok")) });
+
+        let mut labels = HashMap::new();
+        labels.insert("key=with=equals".to_string(), "val1".to_string());
+        labels.insert("key,with,commas".to_string(), "val2".to_string());
+        labels.insert("key with spaces".to_string(), "val3".to_string());
+
+        relay.register(
+            cfg_with_labels("special_labels", labels.clone()),
+            Arc::new(crate::invoker::LocalInvoker::new(handler)),
+            Some("c1".into()),
+        ).unwrap();
+
+        let resolver = RoundRobinResolver::new();
+
+        // Exact match on all special-char keys
+        assert!(
+            relay.resolve_with_labels("special_labels", &labels, &resolver).is_some(),
+            "should match labels with special characters in keys"
+        );
+
+        // Partial match with one special-char key
+        let mut partial = HashMap::new();
+        partial.insert("key=with=equals".to_string(), "val1".to_string());
+        assert!(
+            relay.resolve_with_labels("special_labels", &partial, &resolver).is_some(),
+            "partial match with special-char key should succeed"
+        );
+
+        // Wrong value for special-char key
+        let mut wrong = HashMap::new();
+        wrong.insert("key=with=equals".to_string(), "wrong".to_string());
+        assert!(
+            relay.resolve_with_labels("special_labels", &wrong, &resolver).is_none(),
+            "wrong value for special-char key should not match"
+        );
+    }
+
+    #[ignore = "v0.6.0: requires resolve_with_labels implementation"]
+    #[test]
+    fn test_labels_value_empty_string() {
+        // Label value can be an empty string — should still match exactly
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, _input| async { Ok(Bytes::from("ok")) });
+
+        let mut labels = HashMap::new();
+        labels.insert("tag".to_string(), "".to_string());
+
+        relay.register(
+            cfg_with_labels("empty_val", labels),
+            Arc::new(crate::invoker::LocalInvoker::new(handler)),
+            Some("c1".into()),
+        ).unwrap();
+
+        let resolver = RoundRobinResolver::new();
+
+        // Match with empty string value
+        let mut req = HashMap::new();
+        req.insert("tag".to_string(), "".to_string());
+        assert!(
+            relay.resolve_with_labels("empty_val", &req, &resolver).is_some(),
+            "empty string value should match exactly"
+        );
+
+        // Non-empty string should NOT match
+        let mut req_nonempty = HashMap::new();
+        req_nonempty.insert("tag".to_string(), "something".to_string());
+        assert!(
+            relay.resolve_with_labels("empty_val", &req_nonempty, &resolver).is_none(),
+            "non-empty value should not match empty label value"
+        );
+    }
+
+    #[ignore = "v0.6.0: requires resolve_with_labels + PriorityResolver implementation"]
+    #[tokio::test]
+    async fn test_labels_combined_with_priority() {
+        // Labels filter first, then priority picks among matches
+        let relay = Relay::new();
+        let h_low = make_handler(|_ctx, _input| async { Ok(Bytes::from("low")) });
+        let h_high = make_handler(|_ctx, _input| async { Ok(Bytes::from("high")) });
+        let h_other = make_handler(|_ctx, _input| async { Ok(Bytes::from("other")) });
+
+        let mut labels_prod = HashMap::new();
+        labels_prod.insert("env".to_string(), "prod".to_string());
+
+        let mut labels_staging = HashMap::new();
+        labels_staging.insert("env".to_string(), "staging".to_string());
+
+        // Low-priority prod
+        let mut cfg_low = cfg_with_labels("combo", labels_prod.clone());
+        cfg_low.priority = 1;
+        relay.register(cfg_low, Arc::new(crate::invoker::LocalInvoker::new(h_low)), Some("c_low".into())).unwrap();
+
+        // High-priority prod
+        let mut cfg_high = cfg_with_labels("combo", labels_prod.clone());
+        cfg_high.priority = 10;
+        relay.register(cfg_high, Arc::new(crate::invoker::LocalInvoker::new(h_high)), Some("c_high".into())).unwrap();
+
+        // High-priority staging (should be filtered out by labels)
+        let mut cfg_staging = cfg_with_labels("combo", labels_staging);
+        cfg_staging.priority = 100;
+        relay.register(cfg_staging, Arc::new(crate::invoker::LocalInvoker::new(h_other)), Some("c_staging".into())).unwrap();
+
+        // Use labels filter for env=prod, then priority should pick the high-priority one
+        let inner = Arc::new(RoundRobinResolver::new());
+        let prio_resolver = PriorityResolver::new(inner);
+
+        let invoker = relay.resolve_with_labels("combo", &labels_prod, &prio_resolver)
+            .expect("should find a prod caster");
+
+        let ctx = RuneContext {
+            rune_name: "combo".into(),
+            request_id: "r1".into(),
+            context: Default::default(),
+            timeout: Duration::from_secs(30),
+        };
+        let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
+        assert_eq!(result, Bytes::from("high"), "should pick high-priority prod, not staging");
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD — Supplementary Priority Tests
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires PriorityResolver implementation"]
+    #[tokio::test]
+    async fn test_priority_negative_value() {
+        // Negative priority should work — lower than 0 means lowest tier
+        let relay = Relay::new();
+        let h_neg = make_handler(|_ctx, _input| async { Ok(Bytes::from("neg")) });
+        let h_pos = make_handler(|_ctx, _input| async { Ok(Bytes::from("pos")) });
+
+        relay.register(
+            cfg_with_priority("neg_prio", -10),
+            Arc::new(crate::invoker::LocalInvoker::new(h_neg)),
+            Some("c_neg".into()),
+        ).unwrap();
+        relay.register(
+            cfg_with_priority("neg_prio", 5),
+            Arc::new(crate::invoker::LocalInvoker::new(h_pos)),
+            Some("c_pos".into()),
+        ).unwrap();
+
+        let inner = Arc::new(RoundRobinResolver::new());
+        let resolver = PriorityResolver::new(inner);
+
+        let ctx = RuneContext {
+            rune_name: "neg_prio".into(),
+            request_id: "r".into(),
+            context: Default::default(),
+            timeout: Duration::from_secs(30),
+        };
+
+        // Should pick the positive-priority candidate
+        let invoker = relay.resolve("neg_prio", &resolver).unwrap();
+        let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
+        assert_eq!(result, Bytes::from("pos"), "positive priority should be selected over negative");
+    }
+
+    #[ignore = "v0.6.0: requires PriorityResolver implementation"]
+    #[tokio::test]
+    async fn test_priority_three_tiers() {
+        // Three tiers: 10 (high), 5 (mid), 1 (low) — should always pick 10
+        let relay = Relay::new();
+        let h_low = make_handler(|_ctx, _input| async { Ok(Bytes::from("low")) });
+        let h_mid = make_handler(|_ctx, _input| async { Ok(Bytes::from("mid")) });
+        let h_high = make_handler(|_ctx, _input| async { Ok(Bytes::from("high")) });
+
+        relay.register(
+            cfg_with_priority("tri", 1),
+            Arc::new(crate::invoker::LocalInvoker::new(h_low)),
+            Some("c_low".into()),
+        ).unwrap();
+        relay.register(
+            cfg_with_priority("tri", 5),
+            Arc::new(crate::invoker::LocalInvoker::new(h_mid)),
+            Some("c_mid".into()),
+        ).unwrap();
+        relay.register(
+            cfg_with_priority("tri", 10),
+            Arc::new(crate::invoker::LocalInvoker::new(h_high)),
+            Some("c_high".into()),
+        ).unwrap();
+
+        let inner = Arc::new(RoundRobinResolver::new());
+        let resolver = PriorityResolver::new(inner);
+
+        let ctx = RuneContext {
+            rune_name: "tri".into(),
+            request_id: "r".into(),
+            context: Default::default(),
+            timeout: Duration::from_secs(30),
+        };
+
+        // Should always pick the highest priority (10)
+        let invoker = relay.resolve("tri", &resolver).unwrap();
+        let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
+        assert_eq!(result, Bytes::from("high"), "should pick highest of three tiers");
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD — Cross-module: Priority wrapping LeastLoad
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires PriorityResolver + LeastLoadResolver implementation"]
+    #[tokio::test]
+    async fn test_priority_with_least_load() {
+        // PriorityResolver wrapping LeastLoadResolver:
+        // 1) filters to highest priority tier
+        // 2) delegates to LeastLoad among that tier
+        let session_mgr = Arc::new(crate::session::SessionManager::new(
+            Duration::from_secs(10),
+            Duration::from_secs(35),
+        ));
+
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, _input| async { Ok(Bytes::from("a")) });
+        let h2 = make_handler(|_ctx, _input| async { Ok(Bytes::from("b")) });
+        let h_low = make_handler(|_ctx, _input| async { Ok(Bytes::from("low")) });
+
+        // Two high-priority candidates
+        relay.register(
+            cfg_with_priority("prio_ll", 10),
+            Arc::new(crate::invoker::LocalInvoker::new(h1)),
+            Some("c1".into()),
+        ).unwrap();
+        relay.register(
+            cfg_with_priority("prio_ll", 10),
+            Arc::new(crate::invoker::LocalInvoker::new(h2)),
+            Some("c2".into()),
+        ).unwrap();
+        // One low-priority candidate
+        relay.register(
+            cfg_with_priority("prio_ll", 1),
+            Arc::new(crate::invoker::LocalInvoker::new(h_low)),
+            Some("c_low".into()),
+        ).unwrap();
+
+        let inner = Arc::new(LeastLoadResolver::new(Arc::clone(&session_mgr)));
+        let resolver = PriorityResolver::new(inner);
+
+        let ctx = RuneContext {
+            rune_name: "prio_ll".into(),
+            request_id: "r".into(),
+            context: Default::default(),
+            timeout: Duration::from_secs(30),
+        };
+
+        // Should resolve to one of the high-priority candidates (a or b), never "low"
+        let invoker = relay.resolve("prio_ll", &resolver).unwrap();
+        let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
+        assert!(
+            result == Bytes::from("a") || result == Bytes::from("b"),
+            "should pick from high-priority tier, got {:?}",
+            result
+        );
+    }
 }

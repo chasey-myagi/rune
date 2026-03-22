@@ -7313,26 +7313,27 @@ mod tests {
     #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_allows_within_limit() {
-        // With requests_per_minute=5, first 5 requests should pass
+        // With requests_per_minute=5, all 5 requests should succeed (one per router)
         let (state, key) = rate_limit_state(5, false);
-        let app = build_router(state, None);
 
-        // Send 5 requests — all should succeed
-        // Note: oneshot consumes the router, so we need to build fresh for each
-        // Actually we need to test with a service, not oneshot. Let's use a single
-        // app and clone-based approach.
-        // For simplicity, test the first request succeeds
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":1}"#))
-                .unwrap(),
-        ).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
+        for i in 0..5 {
+            let app = build_router(state.clone(), None);
+            let response = app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                    .unwrap(),
+            ).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "request {} of 5 should succeed within rate limit",
+                i + 1
+            );
+        }
     }
 
     #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
@@ -7641,49 +7642,160 @@ mod tests {
     #[ignore = "v0.6.0: requires graceful shutdown implementation"]
     #[tokio::test]
     async fn test_shutdown_in_progress_requests_complete() {
-        // Requests that are already in progress when shutdown fires
-        // should complete normally, not be cut off
-        let state = test_state();
+        // Register a slow handler that sleeps 200ms to simulate in-flight work
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let key_verifier: Arc<dyn KeyVerifier> = Arc::new(NoopVerifier);
+
+        let slow_handler = make_handler(|_ctx, input| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            Ok(input)
+        });
+        relay.register(
+            RuneConfig {
+                name: "slow".into(),
+                version: "1.0.0".into(),
+                description: "slow handler".into(),
+                supports_stream: false,
+                gate: Some(GateConfig { path: "/slow".into(), method: "POST".into() }),
+                input_schema: None, output_schema: None,
+                priority: 0, labels: Default::default(),
+            },
+            Arc::new(LocalInvoker::new(slow_handler)),
+            None,
+        ).unwrap();
+
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+        ));
+
+        let state = GateState {
+            relay, resolver, store, key_verifier,
+            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            auth_enabled: false,
+            exempt_routes: vec!["/health".to_string()],
+            cors_origins: vec![], dev_mode: true,
+            started_at: Instant::now(),
+            file_broker: Arc::new(FileBroker::new()),
+            max_upload_size_mb: 10,
+            flow_engine,
+        };
+
         let app = build_router(state, None);
 
-        // Start a request
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"in_flight":true}"#))
-                .unwrap(),
-        ).await.unwrap();
+        // Spawn the in-flight request BEFORE shutdown signal
+        let handle = tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/slow")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"in_flight":true}"#))
+                    .unwrap(),
+            ).await.unwrap()
+        });
 
-        // Even after shutdown, in-flight should complete with 200
+        // Small delay so the request starts processing, then trigger shutdown
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // TODO: trigger draining state on the shutdown coordinator here
+
+        // The in-flight request should still complete successfully
+        let response = handle.await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["in_flight"], true);
     }
 
     #[ignore = "v0.6.0: requires graceful shutdown implementation"]
     #[tokio::test]
     async fn test_shutdown_drain_timeout_force_close() {
-        // After drain_timeout expires, server should force-close connections
-        // This test verifies the timeout mechanism exists
-        let state = test_state();
-        // The drain_timeout from config is 15s by default
-        // In tests, we'd set a short timeout to verify the mechanism
-        let _ = state;
-        // Test documents expected behavior: after drain_timeout,
-        // remaining connections are forcefully terminated
+        // After drain_timeout expires, server should force-close connections.
+        // Register a very slow handler (longer than drain timeout) to verify
+        // the force-close mechanism.
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let key_verifier: Arc<dyn KeyVerifier> = Arc::new(NoopVerifier);
+
+        let very_slow_handler = make_handler(|_ctx, input| async move {
+            // Simulate a handler that takes longer than drain_timeout
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok(input)
+        });
+        relay.register(
+            RuneConfig {
+                name: "very_slow".into(),
+                version: "1.0.0".into(),
+                description: "extremely slow handler".into(),
+                supports_stream: false,
+                gate: Some(GateConfig { path: "/very_slow".into(), method: "POST".into() }),
+                input_schema: None, output_schema: None,
+                priority: 0, labels: Default::default(),
+            },
+            Arc::new(LocalInvoker::new(very_slow_handler)),
+            None,
+        ).unwrap();
+
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+        ));
+
+        let state = GateState {
+            relay, resolver, store, key_verifier,
+            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            auth_enabled: false,
+            exempt_routes: vec!["/health".to_string()],
+            cors_origins: vec![], dev_mode: true,
+            started_at: Instant::now(),
+            file_broker: Arc::new(FileBroker::new()),
+            max_upload_size_mb: 10,
+            flow_engine,
+        };
+
+        let app = build_router(state, None);
+
+        // Start an extremely slow request
+        let handle = tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/very_slow")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"slow":true}"#))
+                    .unwrap(),
+            ).await
+        });
+
+        // Give the request time to start, then verify it's still pending
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!handle.is_finished(), "slow request should still be in progress");
+
+        // TODO: trigger shutdown + drain_timeout (short, e.g. 100ms)
+        // After drain_timeout, the handle should be forcefully terminated.
+        // For now, abort the handle to verify the test structure works.
+        handle.abort();
+        let result = handle.await;
+        assert!(result.is_err() || result.unwrap().is_err(),
+            "after force-close, the request should not succeed normally");
     }
 
     // ====================================================================
     // v0.6.0 TDD Wave A — Structured Logging
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires structured logging implementation"]
+    #[ignore = "v0.6.0: requires structured logging — cannot capture tracing output in unit tests without a custom subscriber layer integrated into the gate. Expected approach: install a JSON fmt subscriber with a Vec<u8> writer, make a request, then parse each line as JSON and verify it has 'level', 'timestamp', 'message' fields."]
     #[tokio::test]
     async fn test_structured_log_contains_json() {
-        // When log.format="json", tracing output should be valid JSON
-        // This test captures tracing subscriber output and validates format
-        // TODO: set up a custom tracing subscriber that captures to a buffer,
-        // make a request, and verify the output is valid JSON
+        // This test validates that structured JSON logging produces valid JSON lines.
+        // Implementation requires a custom tracing subscriber buffer layer.
         let state = test_state();
         let app = build_router(state, None);
 
@@ -7697,14 +7809,21 @@ mod tests {
         ).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        // TODO: verify captured tracing output is valid JSON with expected fields
+        // When tracing buffer capture is implemented:
+        // let log_lines = buffer.lock().lines();
+        // for line in log_lines {
+        //     let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        //     assert!(parsed.get("level").is_some());
+        //     assert!(parsed.get("timestamp").is_some());
+        //     assert!(parsed.get("message").is_some());
+        // }
     }
 
-    #[ignore = "v0.6.0: requires structured logging implementation"]
+    #[ignore = "v0.6.0: requires structured logging — cannot capture tracing output without a buffer subscriber. Expected approach: install a tracing Layer that writes to Arc<Mutex<Vec<String>>>, make a request to /echo, then find the invocation log line and assert it contains 'request_id' (non-empty UUID) and 'rune_name' == 'echo'."]
     #[tokio::test]
     async fn test_structured_log_contains_request_id_and_rune_name() {
-        // Structured log entries for rune invocations should include
-        // request_id and rune_name fields
+        // Validates that structured log entries for rune invocations include
+        // request_id and rune_name fields.
         let state = test_state();
         let app = build_router(state, None);
 
@@ -7718,9 +7837,14 @@ mod tests {
         ).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        // TODO: capture tracing output and verify:
-        // - "request_id" field is present and non-empty
-        // - "rune_name" field is present and equals "echo"
+        // When tracing buffer capture is implemented:
+        // let log_lines = buffer.lock();
+        // let invocation_line = log_lines.iter()
+        //     .find(|l| l.contains("rune_name"))
+        //     .expect("should have an invocation log line");
+        // let parsed: serde_json::Value = serde_json::from_str(invocation_line).unwrap();
+        // assert!(parsed["request_id"].as_str().map_or(false, |s| !s.is_empty()));
+        // assert_eq!(parsed["rune_name"], "echo");
     }
 
     // ====================================================================
@@ -7760,12 +7884,11 @@ mod tests {
 
         // Should have by_rune array with success_rate field
         let by_rune = json["by_rune"].as_array().unwrap();
-        if !by_rune.is_empty() {
-            let rune_stat = &by_rune[0];
-            assert!(rune_stat.get("success_rate").is_some(), "should have success_rate field");
-            let rate = rune_stat["success_rate"].as_f64().unwrap();
-            assert!(rate >= 0.0 && rate <= 1.0, "success_rate should be between 0 and 1");
-        }
+        assert!(!by_rune.is_empty(), "by_rune should not be empty after 3 calls");
+        let rune_stat = &by_rune[0];
+        assert!(rune_stat.get("success_rate").is_some(), "should have success_rate field");
+        let rate = rune_stat["success_rate"].as_f64().unwrap();
+        assert!(rate >= 0.0 && rate <= 1.0, "success_rate should be between 0 and 1");
     }
 
     #[ignore = "v0.6.0: requires enhanced stats implementation"]
@@ -7799,12 +7922,11 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         let by_rune = json["by_rune"].as_array().unwrap();
-        if !by_rune.is_empty() {
-            let rune_stat = &by_rune[0];
-            assert!(rune_stat.get("p95_latency_ms").is_some(), "should have p95_latency_ms field");
-            let p95 = rune_stat["p95_latency_ms"].as_f64().unwrap();
-            assert!(p95 >= 0.0, "p95_latency_ms should be non-negative");
-        }
+        assert!(!by_rune.is_empty(), "by_rune should not be empty after 5 calls");
+        let rune_stat = &by_rune[0];
+        assert!(rune_stat.get("p95_latency_ms").is_some(), "should have p95_latency_ms field");
+        let p95 = rune_stat["p95_latency_ms"].as_f64().unwrap();
+        assert!(p95 >= 0.0, "p95_latency_ms should be non-negative");
     }
 
     // ====================================================================
@@ -7901,5 +8023,511 @@ mod tests {
 
         // Without labels, default routing should work
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD — Supplementary Rate Limiting Tests
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_zero_allows_none() {
+        // limit=0 means no requests are allowed — immediate 429
+        let (state, key) = rate_limit_state(0, false);
+        let app = build_router(state, None);
+
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":1}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "limit=0 should reject the very first request with 429"
+        );
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_concurrent_requests_near_boundary() {
+        // With limit=3, spawn 5 concurrent requests — exactly 3 should succeed
+        let (state, key) = rate_limit_state(3, false);
+
+        let mut handles = Vec::new();
+        for i in 0..5 {
+            let s = state.clone();
+            let k = key.clone();
+            handles.push(tokio::spawn(async move {
+                let app = build_router(s, None);
+                let response = app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("authorization", format!("Bearer {}", k))
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                        .unwrap(),
+                ).await.unwrap();
+                response.status()
+            }));
+        }
+
+        let mut ok_count = 0;
+        let mut limited_count = 0;
+        for h in handles {
+            match h.await.unwrap() {
+                StatusCode::OK => ok_count += 1,
+                StatusCode::TOO_MANY_REQUESTS => limited_count += 1,
+                other => panic!("unexpected status: {}", other),
+            }
+        }
+        assert_eq!(ok_count, 3, "exactly 3 requests should succeed");
+        assert_eq!(limited_count, 2, "exactly 2 requests should be rate limited");
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_empty_bearer_key() {
+        // Bearer token with empty string should be handled gracefully
+        let (state, _key) = rate_limit_state(5, false);
+        let app = build_router(state, None);
+
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", "Bearer ")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":1}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        // Empty bearer should fail auth (401), not panic
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "empty bearer token should be rejected by auth"
+        );
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_window_reset_with_short_window() {
+        // Use a 1-second window, exhaust limit, sleep 1.1s, verify reset
+        let (state, key) = rate_limit_state(1, false);
+
+        // Exhaust rate limit
+        let app = build_router(state.clone(), None);
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":1}"#))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify it's now limited
+        let app = build_router(state.clone(), None);
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":2}"#))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Wait for window to reset (implementation should support short windows for testing)
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        // After reset, request should succeed again
+        let app = build_router(state.clone(), None);
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":3}"#))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "after window reset, request should succeed"
+        );
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD — Supplementary Graceful Shutdown Tests
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
+    #[tokio::test]
+    async fn test_shutdown_concurrent_requests_during_drain() {
+        // Multiple concurrent requests that start before shutdown should all complete
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let key_verifier: Arc<dyn KeyVerifier> = Arc::new(NoopVerifier);
+
+        let slow_handler = make_handler(|_ctx, input| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            Ok(input)
+        });
+        relay.register(
+            RuneConfig {
+                name: "slow".into(),
+                version: "1.0.0".into(),
+                description: "slow handler".into(),
+                supports_stream: false,
+                gate: Some(GateConfig { path: "/slow".into(), method: "POST".into() }),
+                input_schema: None, output_schema: None,
+                priority: 0, labels: Default::default(),
+            },
+            Arc::new(LocalInvoker::new(slow_handler)),
+            None,
+        ).unwrap();
+
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+        ));
+
+        let state = GateState {
+            relay, resolver, store, key_verifier,
+            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            auth_enabled: false,
+            exempt_routes: vec!["/health".to_string()],
+            cors_origins: vec![], dev_mode: true,
+            started_at: Instant::now(),
+            file_broker: Arc::new(FileBroker::new()),
+            max_upload_size_mb: 10,
+            flow_engine,
+        };
+
+        // Spawn 5 concurrent slow requests
+        let mut handles = Vec::new();
+        for i in 0..5 {
+            let s = state.clone();
+            handles.push(tokio::spawn(async move {
+                let app = build_router(s, None);
+                let response = app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/slow")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"id":{}}}"#, i)))
+                        .unwrap(),
+                ).await.unwrap();
+                response.status()
+            }));
+        }
+
+        // Give requests time to start, then trigger shutdown
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // TODO: trigger shutdown signal here
+
+        // All in-flight requests should complete successfully
+        for (i, h) in handles.into_iter().enumerate() {
+            let status = h.await.unwrap();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "in-flight request {} should complete during drain",
+                i
+            );
+        }
+    }
+
+    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
+    #[tokio::test]
+    async fn test_shutdown_double_signal_idempotent() {
+        // Sending shutdown signal twice should not panic or cause issues
+        let state = test_state();
+        let app = build_router(state, None);
+
+        // Verify the server is responsive before shutdown
+        let response = app.oneshot(
+            Request::get("/health").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // TODO: trigger shutdown signal twice in rapid succession
+        // Both calls should succeed without panic.
+        // The second signal should be a no-op.
+        // After shutdown, verify new requests get 503 (not a panic).
+    }
+
+    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
+    #[tokio::test]
+    async fn test_shutdown_health_returns_503_during_drain() {
+        // During drain phase, /health should return 503 to signal
+        // load balancers to stop routing traffic
+        let state = test_state();
+        // TODO: trigger draining state on the shutdown coordinator
+
+        let app = build_router(state, None);
+        let response = app.oneshot(
+            Request::get("/health").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+
+        // During draining, health should return 503 so LB stops routing
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "/health should return 503 during drain phase"
+        );
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD — Supplementary Structured Logging Tests
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires structured logging — cannot capture tracing output without a buffer subscriber. Expected: error requests (e.g. 404) should also produce a log line with the error status code and the requested path."]
+    #[tokio::test]
+    async fn test_structured_log_error_request_logged() {
+        // Even error responses (404, 500) should produce structured log entries
+        let state = test_state();
+        let app = build_router(state, None);
+
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/nonexistent_rune")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"msg":"error_test"}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // When tracing buffer is implemented:
+        // let log_lines = buffer.lock();
+        // let error_line = log_lines.iter()
+        //     .find(|l| l.contains("404") || l.contains("NOT_FOUND"))
+        //     .expect("error request should produce a log line");
+        // let parsed: serde_json::Value = serde_json::from_str(error_line).unwrap();
+        // assert!(parsed.get("status").is_some());
+    }
+
+    #[ignore = "v0.6.0: requires structured logging — cannot capture tracing output without a buffer subscriber. Expected: each log line should contain a 'latency_ms' or 'duration_ms' field showing request processing time."]
+    #[tokio::test]
+    async fn test_structured_log_includes_latency() {
+        // Structured log entries should include request latency
+        let state = test_state();
+        let app = build_router(state, None);
+
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"msg":"latency_test"}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // When tracing buffer is implemented:
+        // let log_lines = buffer.lock();
+        // let invocation_line = log_lines.iter()
+        //     .find(|l| l.contains("echo"))
+        //     .expect("should have an invocation log line");
+        // let parsed: serde_json::Value = serde_json::from_str(invocation_line).unwrap();
+        // let latency = parsed.get("latency_ms")
+        //     .or(parsed.get("duration_ms"))
+        //     .expect("log should contain latency field");
+        // assert!(latency.as_f64().unwrap() >= 0.0);
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD — Supplementary Stats Tests
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires enhanced stats implementation"]
+    #[tokio::test]
+    async fn test_stats_success_rate_accuracy() {
+        // Mix successful and failed requests, verify success_rate = successes / total
+        let state = test_state();
+
+        // 3 successful requests to /echo
+        for i in 0..3 {
+            let app = build_router(state.clone(), None);
+            let response = app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                    .unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        // 2 failed requests (bad rune via debug route)
+        for _ in 0..2 {
+            let app = build_router(state.clone(), None);
+            let _ = app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/nonexistent/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"fail":true}"#))
+                    .unwrap(),
+            ).await.unwrap();
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let app = build_router(state, None);
+        let response = app.oneshot(
+            Request::get("/api/v1/stats").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let by_rune = json["by_rune"].as_array().unwrap();
+        // Find the echo rune stats
+        let echo_stat = by_rune.iter()
+            .find(|r| r["rune_name"] == "echo")
+            .expect("should have stats for echo rune");
+        // success_rate for echo should be 1.0 (all 3 echo calls succeeded)
+        let rate = echo_stat["success_rate"].as_f64().unwrap();
+        assert!(
+            (rate - 1.0).abs() < 0.01,
+            "echo success_rate should be ~1.0, got {}",
+            rate
+        );
+    }
+
+    #[ignore = "v0.6.0: requires enhanced stats implementation"]
+    #[tokio::test]
+    async fn test_stats_zero_calls_no_divide_by_zero() {
+        // With 0 calls, stats API should not panic or produce NaN
+        let state = test_state();
+        let app = build_router(state, None);
+
+        let response = app.oneshot(
+            Request::get("/api/v1/stats").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["total_calls"], 0);
+        let by_rune = json["by_rune"].as_array().unwrap();
+        assert!(by_rune.is_empty(), "with 0 calls, by_rune should be empty");
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD — Cross-module Combination: Rate Limit + Labels Routing
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires rate_limit + X-Rune-Labels integration"]
+    #[tokio::test]
+    async fn test_rate_limit_with_labels_routing() {
+        // Rate limiting should apply per-key even when labels routing is used
+        let (state, key) = rate_limit_state(2, false);
+
+        // Exhaust rate limit with label header
+        for i in 0..2 {
+            let app = build_router(state.clone(), None);
+            let response = app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .header("x-rune-labels", "env=prod")
+                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                    .unwrap(),
+            ).await.unwrap();
+            // May be OK or 503 (no matching label), but should not panic
+            assert!(
+                response.status() == StatusCode::OK
+                    || response.status() == StatusCode::SERVICE_UNAVAILABLE,
+                "request {} should either succeed or get 503 (no label match), got {}",
+                i, response.status()
+            );
+        }
+
+        // 3rd request with same key should be rate limited regardless of labels
+        let app = build_router(state.clone(), None);
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .header("x-rune-labels", "env=staging")
+                .body(Body::from(r#"{"n":3}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate limit should apply regardless of label header"
+        );
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD — Cross-module: Shutdown + Rate Limit State
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires graceful shutdown + rate_limit integration"]
+    #[tokio::test]
+    async fn test_shutdown_with_rate_limit_state() {
+        // After shutdown, rate limit counters should not leak or cause issues
+        let (state, key) = rate_limit_state(5, false);
+
+        // Make a couple requests to populate rate limit state
+        for i in 0..2 {
+            let app = build_router(state.clone(), None);
+            let response = app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                    .unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        // TODO: trigger shutdown signal
+        // After shutdown, new requests should get 503 (not 429)
+        let app = build_router(state.clone(), None);
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":99}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "after shutdown, should return 503 not 429"
+        );
     }
 }
