@@ -31,6 +31,7 @@ pub(crate) enum PendingResponse {
 pub(crate) struct PendingRequest {
     pub(crate) tx: PendingResponse,
     pub(crate) created_at: Instant,
+    pub(crate) _permit: tokio::sync::OwnedSemaphorePermit,
     pub(crate) timeout: Duration,
 }
 
@@ -127,7 +128,6 @@ impl SessionManager {
 
         // Timeout scanner
         let timeout_pending = Arc::clone(&pending);
-        let timeout_sem = Arc::clone(&semaphore);
         let timeout_handle = tokio::spawn(async move {
             loop {
                 time::sleep(Duration::from_secs(1)).await;
@@ -139,7 +139,7 @@ impl SessionManager {
                 for req_id in expired {
                     if let Some((_, p)) = timeout_pending.remove(&req_id) {
                         tracing::warn!(request_id = %req_id, "request timed out");
-                        timeout_sem.add_permits(1);
+                        // permit auto-returned when PendingRequest is dropped
                         match p.tx {
                             PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
                             PendingResponse::Stream(tx) => { let _ = tx.send(Err(RuneError::Timeout)).await; }
@@ -223,9 +223,7 @@ impl SessionManager {
                 Some(session_message::Payload::Result(result)) => {
                     let req_id = result.request_id.clone();
                     if let Some((_, p)) = pending.remove(&req_id) {
-                        if let Some(session) = caster_id.as_ref().and_then(|id| self.sessions.get(id)) {
-                            session.semaphore.add_permits(1);
-                        }
+                        // permit auto-returned when PendingRequest is dropped
                         let outcome = match result.status() {
                             Status::Completed => Ok(Bytes::from(result.output)),
                             _ => Err(RuneError::ExecutionFailed {
@@ -252,9 +250,7 @@ impl SessionManager {
                 Some(session_message::Payload::StreamEnd(end)) => {
                     let req_id = end.request_id.clone();
                     if let Some((_, p)) = pending.remove(&req_id) {
-                        if let Some(session) = caster_id.as_ref().and_then(|id| self.sessions.get(id)) {
-                            session.semaphore.add_permits(1);
-                        }
+                        // permit auto-returned when PendingRequest is dropped
                         if let PendingResponse::Stream(tx) = p.tx {
                             if end.status() != Status::Completed {
                                 let _ = tx.send(Err(RuneError::ExecutionFailed {
@@ -304,12 +300,14 @@ impl SessionManager {
         context: HashMap<String, String>, timeout: Duration,
     ) -> Result<Bytes, RuneError> {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
-        let _permit = session.semaphore.try_acquire().map_err(|_| RuneError::Unavailable)?;
-        std::mem::forget(_permit);
+        let permit = Arc::clone(&session.semaphore)
+            .try_acquire_owned()
+            .map_err(|_| RuneError::Unavailable)?;
 
         let (tx, rx) = oneshot::channel();
         session.pending.insert(request_id.to_string(), PendingRequest {
             tx: PendingResponse::Once(tx), created_at: Instant::now(), timeout,
+            _permit: permit,
         });
 
         let msg = SessionMessage {
@@ -323,7 +321,7 @@ impl SessionManager {
 
         if session.outbound.send(msg).await.is_err() {
             session.pending.remove(request_id);
-            session.semaphore.add_permits(1);
+            // permit auto-returned when PendingRequest is dropped
             return Err(RuneError::Unavailable);
         }
         drop(session);
@@ -335,12 +333,14 @@ impl SessionManager {
         context: HashMap<String, String>, timeout: Duration,
     ) -> Result<mpsc::Receiver<Result<Bytes, RuneError>>, RuneError> {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
-        let _permit = session.semaphore.try_acquire().map_err(|_| RuneError::Unavailable)?;
-        std::mem::forget(_permit);
+        let permit = Arc::clone(&session.semaphore)
+            .try_acquire_owned()
+            .map_err(|_| RuneError::Unavailable)?;
 
         let (tx, rx) = mpsc::channel(32);
         session.pending.insert(request_id.to_string(), PendingRequest {
             tx: PendingResponse::Stream(tx), created_at: Instant::now(), timeout,
+            _permit: permit,
         });
 
         let msg = SessionMessage {
@@ -354,7 +354,7 @@ impl SessionManager {
 
         if session.outbound.send(msg).await.is_err() {
             session.pending.remove(request_id);
-            session.semaphore.add_permits(1);
+            // permit auto-returned when PendingRequest is dropped
             return Err(RuneError::Unavailable);
         }
         drop(session);
@@ -378,7 +378,7 @@ impl SessionManager {
     pub async fn cancel(&self, caster_id: &str, request_id: &str, reason: &str) -> Result<(), RuneError> {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
         if let Some((_, p)) = session.pending.remove(request_id) {
-            session.semaphore.add_permits(1);
+            // permit auto-returned when PendingRequest is dropped
             let err = Err(RuneError::ExecutionFailed { code: "CANCELLED".into(), message: reason.to_string() });
             match p.tx {
                 PendingResponse::Once(tx) => { let _ = tx.send(err); }
@@ -464,7 +464,6 @@ mod tests {
         assert_eq!(sem.available_permits(), 1);
 
         if let Some((_, p)) = pending.remove("r-1") {
-            sem.add_permits(1);
             match p.tx {
                 PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("world"))); }
                 _ => panic!("expected Once"),
@@ -492,7 +491,6 @@ mod tests {
         assert_eq!(sem.available_permits(), 1);
 
         if let Some((_, p)) = pending.remove("r-timeout") {
-            sem.add_permits(1);
             match p.tx {
                 PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
                 _ => panic!("expected Once"),
@@ -555,12 +553,15 @@ mod tests {
     async fn test_disconnect_clears_all_pending() {
         let (_mgr, _caster_id, _sem, pending, _rx) = setup_session(5);
 
+        let dummy_sem = Arc::new(Semaphore::new(10));
         for i in 0..3 {
             let (tx, _rx) = oneshot::channel();
+            let permit = Arc::clone(&dummy_sem).try_acquire_owned().unwrap();
             pending.insert(format!("r-{}", i), PendingRequest {
                 tx: PendingResponse::Once(tx),
                 created_at: Instant::now(),
                 timeout: DEFAULT_TIMEOUT,
+                _permit: permit,
             });
         }
 
@@ -617,9 +618,8 @@ mod tests {
         // One permit consumed by execute_stream
         assert_eq!(sem.available_permits(), 1);
 
-        // Simulate stream completion: remove pending and return permit
+        // Simulate stream completion: remove pending (permit auto-returned on drop)
         if let Some((_, p)) = pending.remove("rs-1") {
-            sem.add_permits(1);
             match p.tx {
                 PendingResponse::Stream(tx) => {
                     let _ = tx.send(Ok(Bytes::from("chunk1"))).await;
@@ -783,9 +783,8 @@ mod tests {
             "second request must be Unavailable when max_concurrent=1"
         );
 
-        // Complete first request
+        // Complete first request (permit auto-returned on PendingRequest drop)
         if let Some((_, p)) = pending.remove("serial-1") {
-            sem.add_permits(1);
             match p.tx {
                 PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done"))); }
                 _ => panic!("expected Once"),
@@ -808,9 +807,8 @@ mod tests {
         wait_for_pending(&pending, "serial-3").await;
         assert_eq!(sem.available_permits(), 0);
 
-        // Complete third request
+        // Complete third request (permit auto-returned on PendingRequest drop)
         if let Some((_, p)) = pending.remove("serial-3") {
-            sem.add_permits(1);
             match p.tx {
                 PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done3"))); }
                 _ => panic!("expected Once"),
@@ -840,9 +838,8 @@ mod tests {
         wait_for_pending(&pending, "timeout-req").await;
         assert_eq!(sem.available_permits(), 0, "permit should be consumed");
 
-        // Simulate timeout by removing pending and returning permit
+        // Simulate timeout by removing pending (permit auto-returned on drop)
         if let Some((_, p)) = pending.remove("timeout-req") {
-            sem.add_permits(1);
             match p.tx {
                 PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
                 _ => panic!("expected Once"),
@@ -867,9 +864,8 @@ mod tests {
         wait_for_pending(&pending, "after-timeout").await;
         assert_eq!(sem.available_permits(), 0);
 
-        // Complete it
+        // Complete it (permit auto-returned on PendingRequest drop)
         if let Some((_, p)) = pending.remove("after-timeout") {
-            sem.add_permits(1);
             match p.tx {
                 PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("ok"))); }
                 _ => panic!("expected Once"),
@@ -943,10 +939,9 @@ mod tests {
             assert_eq!(message, "cancelled by test");
         }
 
-        // Complete remaining requests
+        // Complete remaining requests (permit auto-returned on PendingRequest drop)
         for i in [0, 2] {
             if let Some((_, p)) = pending_maps[i].remove(&format!("req-{}", i)) {
-                sems[i].add_permits(1);
                 match p.tx {
                     PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done"))); }
                     _ => panic!("expected Once"),
@@ -1117,10 +1112,9 @@ mod tests {
         ).await;
         assert!(matches!(result, Err(RuneError::Unavailable)));
 
-        // Complete all requests
+        // Complete all requests (permit auto-returned on PendingRequest drop)
         for i in 0..3 {
             if let Some((_, p)) = pending.remove(&format!("concurrent-{}", i)) {
-                sem.add_permits(1);
                 match p.tx {
                     PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("ok"))); }
                     _ => panic!("expected Once"),
@@ -1159,7 +1153,6 @@ mod tests {
 
         // Simulate an ExecutionFailed response
         if let Some((_, p)) = pending.remove("err-req") {
-            sem.add_permits(1);
             match p.tx {
                 PendingResponse::Once(tx) => {
                     let _ = tx.send(Err(RuneError::ExecutionFailed {
@@ -1207,9 +1200,8 @@ mod tests {
             }
         }
 
-        // Complete the stream
+        // Complete the stream (permit auto-returned on PendingRequest drop)
         if let Some((_, _p)) = pending.remove("stream-multi") {
-            sem.add_permits(1);
             // Drop the sender by consuming it
         }
 
@@ -1252,9 +1244,8 @@ mod tests {
 
         wait_for_pending(&pending, "done-req").await;
 
-        // Complete the request first
+        // Complete the request first (permit auto-returned on PendingRequest drop)
         if let Some((_, p)) = pending.remove("done-req") {
-            sem.add_permits(1);
             match p.tx {
                 PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("completed"))); }
                 _ => panic!("expected Once"),
@@ -1405,9 +1396,8 @@ mod tests {
             other => panic!("expected Execute payload, got {:?}", other),
         }
 
-        // Complete the request
+        // Complete the request (permit auto-returned on PendingRequest drop)
         if let Some((_, p)) = pending.remove("ctx-req") {
-            sem.add_permits(1);
             match p.tx {
                 PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done"))); }
                 _ => panic!("expected Once"),
@@ -1482,11 +1472,10 @@ mod tests {
         assert!(received_ids.contains(&"ord-1".to_string()));
         assert!(received_ids.contains(&"ord-2".to_string()));
 
-        // Complete all
+        // Complete all (permit auto-returned on PendingRequest drop)
         for i in 0..3 {
             let key = format!("ord-{}", i);
             if let Some((_, p)) = pending.remove(&key) {
-                sem.add_permits(1);
                 match p.tx {
                     PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("ok"))); }
                     _ => panic!("expected Once"),
@@ -1521,7 +1510,6 @@ mod tests {
         }
 
         if let Some((_, p)) = pending.remove("timeout-val") {
-            sem.add_permits(1);
             match p.tx {
                 PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::new())); }
                 _ => panic!("expected Once"),
