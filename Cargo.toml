@@ -9,6 +9,7 @@ members = [
     "runtime/rune-store",
     "runtime/rune-schema",
     "runtime/rune-cli",
+    "sdks/rust",
 ]
 
 [workspace.dependencies]

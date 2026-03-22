@@ -1,0 +1,26 @@
+[package]
+name = "rune-sdk"
+version = "0.5.0"
+edition = "2021"
+
+[dependencies]
+rune-proto = { path = "../../runtime/rune-proto" }
+tonic = { version = "0.12", features = ["transport"] }
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-stream = "0.1"
+tokio-util = "0.7"
+http = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+rune-proto = { path = "../../runtime/rune-proto" }
+tonic = { version = "0.12", features = ["transport"] }
+tokio-stream = "0.1"
