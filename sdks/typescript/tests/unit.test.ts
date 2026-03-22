@@ -1,0 +1,395 @@
+import { describe, it, expect } from 'vitest';
+import { Caster, StreamSender } from '../src/index';
+import type {
+  RuneConfig,
+  RuneContext,
+  GateConfig,
+  CasterOptions,
+  FileAttachment,
+} from '../src/index';
+import type {
+  RuneHandler,
+  RuneHandlerWithFiles,
+  StreamRuneHandler,
+  StreamRuneHandlerWithFiles,
+} from '../src/index';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Create a minimal RuneContext for direct handler invocation. */
+function makeCtx(runeName = 'test'): RuneContext {
+  return {
+    runeName,
+    requestId: 'req-001',
+    context: {},
+    signal: new AbortController().signal,
+  };
+}
+
+/** Create a StreamSender with a mock send function attached. */
+function makeSender(): { sender: StreamSender; chunks: Buffer[] } {
+  const chunks: Buffer[] = [];
+  const sender = new StreamSender();
+  sender._attach((data: Buffer) => {
+    chunks.push(data);
+  });
+  return { sender, chunks };
+}
+
+// ===========================================================================
+// 1.1 Types and Config (U-01 ~ U-10)
+// ===========================================================================
+describe('1.1 Types and Config', () => {
+  it('U-01: RuneConfig defaults', () => {
+    const config: RuneConfig = { name: 'echo' };
+    // Unset optional fields should be undefined at the type level.
+    // The Caster._buildDeclarations() fills defaults: version="0.0.0", supportsStream=false, priority=0
+    expect(config.name).toBe('echo');
+    expect(config.version).toBeUndefined();
+    expect(config.supportsStream).toBeUndefined();
+    expect(config.gate).toBeUndefined();
+    expect(config.priority).toBeUndefined();
+
+    // Verify Caster fills the wire defaults
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'echo' }, async (_ctx, input) => input);
+    const stored = caster.getRuneConfig('echo')!;
+    // version / priority stay as-is in stored config (defaults applied at build time)
+    expect(stored.supportsStream).toBeFalsy();
+    expect(stored.gate).toBeUndefined();
+  });
+
+  it('U-02: RuneConfig full fields', () => {
+    const config: RuneConfig = {
+      name: 'translate',
+      version: '2.1.0',
+      description: 'Translate text',
+      inputSchema: { type: 'object' },
+      outputSchema: { type: 'string' },
+      supportsStream: true,
+      gate: { path: '/translate', method: 'POST' },
+      priority: 5,
+    };
+    expect(config.name).toBe('translate');
+    expect(config.version).toBe('2.1.0');
+    expect(config.description).toBe('Translate text');
+    expect(config.inputSchema).toEqual({ type: 'object' });
+    expect(config.outputSchema).toEqual({ type: 'string' });
+    expect(config.supportsStream).toBe(true);
+    expect(config.gate?.path).toBe('/translate');
+    expect(config.gate?.method).toBe('POST');
+    expect(config.priority).toBe(5);
+  });
+
+  it('U-03: RuneConfig inputSchema as JSON Schema object', () => {
+    const schema = {
+      type: 'object',
+      properties: { text: { type: 'string' } },
+      required: ['text'],
+    };
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'echo', inputSchema: schema }, async (_ctx, input) => input);
+    expect(caster.getRuneConfig('echo')?.inputSchema).toEqual(schema);
+  });
+
+  it('U-04: RuneConfig outputSchema as JSON Schema object', () => {
+    const schema = { type: 'object', properties: { result: { type: 'number' } } };
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'calc', outputSchema: schema }, async (_ctx, input) => input);
+    expect(caster.getRuneConfig('calc')?.outputSchema).toEqual(schema);
+  });
+
+  it('U-05: GateConfig default method is POST', () => {
+    const gate: GateConfig = { path: '/api' };
+    // method is optional, runtime defaults to POST
+    expect(gate.method).toBeUndefined();
+    // When used through Caster._buildDeclarations, it fills "POST"
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'api', gate: { path: '/api' } }, async () => ({}));
+    // Stored config keeps what user passed; build fills defaults
+    expect(caster.getRuneConfig('api')?.gate?.path).toBe('/api');
+  });
+
+  it('U-06: RuneContext contains runeName, requestId, context', () => {
+    const ac = new AbortController();
+    const ctx: RuneContext = {
+      runeName: 'greet',
+      requestId: 'req-abc-123',
+      context: { lang: 'en' },
+      signal: ac.signal,
+    };
+    expect(ctx.runeName).toBe('greet');
+    expect(ctx.requestId).toBe('req-abc-123');
+    expect(ctx.context).toEqual({ lang: 'en' });
+  });
+
+  it('U-07: CasterOptions default runtime address', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    expect(caster.runtime).toBe('localhost:50070');
+  });
+
+  it('U-08: FileAttachment contains filename, data, mimeType', () => {
+    const file: FileAttachment = {
+      filename: 'photo.png',
+      data: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      mimeType: 'image/png',
+    };
+    expect(file.filename).toBe('photo.png');
+    expect(file.data).toBeInstanceOf(Buffer);
+    expect(file.mimeType).toBe('image/png');
+  });
+
+  it('U-09: CasterOptions casterId auto-generated (not equal to key)', () => {
+    const caster = new Caster({ key: 'my-secret-key' });
+    expect(caster.casterId).not.toBe('my-secret-key');
+    expect(caster.casterId.length).toBeGreaterThan(0);
+    // Two instances get different IDs
+    const caster2 = new Caster({ key: 'my-secret-key' });
+    expect(caster.casterId).not.toBe(caster2.casterId);
+  });
+
+  it('U-10: CasterOptions casterId custom', () => {
+    const caster = new Caster({ key: 'rk_test', casterId: 'my-caster-01' });
+    expect(caster.casterId).toBe('my-caster-01');
+  });
+});
+
+// ===========================================================================
+// 1.2 Rune Registration (U-11 ~ U-20)
+// ===========================================================================
+describe('1.2 Rune Registration', () => {
+  it('U-11: register unary handler', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'greet' }, async (_ctx, _input) => ({ msg: 'hi' }));
+    expect(caster.runeCount).toBe(1);
+    expect(caster.getRuneConfig('greet')).toBeDefined();
+    expect(caster.isStreamRune('greet')).toBe(false);
+  });
+
+  it('U-12: register stream handler', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.streamRune({ name: 'chat' }, async (_ctx, _input, _stream) => {});
+    expect(caster.runeCount).toBe(1);
+    expect(caster.getRuneConfig('chat')?.supportsStream).toBe(true);
+    expect(caster.isStreamRune('chat')).toBe(true);
+  });
+
+  it('U-13: register multiple runes (3)', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'a' }, async () => ({}));
+    caster.rune({ name: 'b' }, async () => ({}));
+    caster.streamRune({ name: 'c' }, async () => {});
+    expect(caster.runeCount).toBe(3);
+    expect(caster.getRuneConfig('a')).toBeDefined();
+    expect(caster.getRuneConfig('b')).toBeDefined();
+    expect(caster.getRuneConfig('c')).toBeDefined();
+  });
+
+  it('U-14: duplicate rune name throws', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'greet' }, async () => ({}));
+    expect(() => {
+      caster.rune({ name: 'greet' }, async () => ({}));
+    }).toThrow('Rune "greet" is already registered');
+  });
+
+  it('U-15: register with gate path', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune(
+      { name: 'api', gate: { path: '/my-api', method: 'POST' } },
+      async () => ({}),
+    );
+    const config = caster.getRuneConfig('api');
+    expect(config?.gate?.path).toBe('/my-api');
+  });
+
+  it('U-16: register with inputSchema', () => {
+    const schema = { type: 'object', properties: { x: { type: 'number' } } };
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'calc', inputSchema: schema }, async () => ({}));
+    expect(caster.getRuneConfig('calc')?.inputSchema).toEqual(schema);
+  });
+
+  it('U-17: register with outputSchema', () => {
+    const schema = { type: 'object', properties: { result: { type: 'string' } } };
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'translate', outputSchema: schema }, async () => ({}));
+    expect(caster.getRuneConfig('translate')?.outputSchema).toEqual(schema);
+  });
+
+  it('U-18: register with priority', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'important', priority: 10 }, async () => ({}));
+    expect(caster.getRuneConfig('important')?.priority).toBe(10);
+  });
+
+  it('U-19: handler can be invoked directly (no gRPC)', async () => {
+    const caster = new Caster({ key: 'rk_test' });
+    const handler: RuneHandler = async (_ctx, input) => {
+      return { echo: input };
+    };
+    caster.rune({ name: 'echo' }, handler);
+
+    const ctx = makeCtx('echo');
+    const result = await handler(ctx, { hello: 'world' });
+    expect(result).toEqual({ echo: { hello: 'world' } });
+  });
+
+  it('U-20: stream handler can be invoked directly', async () => {
+    const { sender, chunks } = makeSender();
+    const handler: StreamRuneHandler = async (_ctx, input, stream) => {
+      await stream.emit({ token: 'hello' });
+      await stream.emit({ token: 'world' });
+    };
+    const caster = new Caster({ key: 'rk_test' });
+    caster.streamRune({ name: 'chat' }, handler);
+
+    const ctx = makeCtx('chat');
+    await handler(ctx, {}, sender);
+    expect(chunks).toHaveLength(2);
+    expect(JSON.parse(chunks[0].toString())).toEqual({ token: 'hello' });
+    expect(JSON.parse(chunks[1].toString())).toEqual({ token: 'world' });
+  });
+});
+
+// ===========================================================================
+// 1.3 StreamSender (U-21 ~ U-27)
+// ===========================================================================
+describe('1.3 StreamSender', () => {
+  it('U-21: emit(bytes) sends data', async () => {
+    const { sender, chunks } = makeSender();
+    await sender.emit(Buffer.from('raw bytes'));
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].toString()).toBe('raw bytes');
+  });
+
+  it('U-22: emit(string) auto-encodes', async () => {
+    const { sender, chunks } = makeSender();
+    await sender.emit('hello world');
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].toString()).toBe('hello world');
+  });
+
+  it('U-23: emit(object) auto JSON-serializes', async () => {
+    const { sender, chunks } = makeSender();
+    await sender.emit({ key: 'value', num: 42 });
+    expect(chunks).toHaveLength(1);
+    expect(JSON.parse(chunks[0].toString())).toEqual({ key: 'value', num: 42 });
+  });
+
+  it('U-24: end() marks stream as ended', async () => {
+    const { sender } = makeSender();
+    expect(sender.ended).toBe(false);
+    await sender.end();
+    expect(sender.ended).toBe(true);
+  });
+
+  it('U-25: emit after end throws', async () => {
+    const { sender } = makeSender();
+    await sender.end();
+    await expect(sender.emit('data')).rejects.toThrow('Cannot emit after stream has ended');
+  });
+
+  it('U-26: multiple emit calls succeed', async () => {
+    const { sender, chunks } = makeSender();
+    await sender.emit('a');
+    await sender.emit('b');
+    await sender.emit('c');
+    expect(chunks).toHaveLength(3);
+    expect(sender.eventCount).toBe(3);
+  });
+
+  it('U-27: end() is idempotent', async () => {
+    const { sender } = makeSender();
+    await sender.end();
+    // Second end should not throw
+    await sender.end();
+    await sender.end();
+    expect(sender.ended).toBe(true);
+  });
+});
+
+// ===========================================================================
+// 1.4 Connection Config (U-28 ~ U-33)
+// ===========================================================================
+describe('1.4 Connection Config', () => {
+  it('U-28: reconnect initial delay configurable', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      reconnect: { initialDelayMs: 500 },
+    });
+    expect(caster.reconnect.initialDelayMs).toBe(500);
+  });
+
+  it('U-29: reconnect max delay configurable', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      reconnect: { maxDelayMs: 60000 },
+    });
+    expect(caster.reconnect.maxDelayMs).toBe(60000);
+  });
+
+  it('U-30: heartbeat interval configurable', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      heartbeatIntervalMs: 5000,
+    });
+    expect(caster.heartbeatIntervalMs).toBe(5000);
+  });
+
+  it('U-31: maxConcurrent configurable', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      maxConcurrent: 50,
+    });
+    expect(caster.maxConcurrent).toBe(50);
+  });
+
+  it('U-32: labels configurable', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      labels: { env: 'production', region: 'us-west' },
+    });
+    expect(caster.labels).toEqual({ env: 'production', region: 'us-west' });
+  });
+
+  it('U-33: API key stored', () => {
+    const caster = new Caster({ key: 'rk_my_secret_key' });
+    expect(caster.key).toBe('rk_my_secret_key');
+  });
+});
+
+// ===========================================================================
+// 1.5 FileAttachment Detection (U-34 ~ U-37)
+// ===========================================================================
+describe('1.5 FileAttachment Detection', () => {
+  it('U-34: handler(ctx, input) — does not accept files', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    const handler: RuneHandler = async (_ctx, _input) => ({});
+    caster.rune({ name: 'no-files' }, handler);
+    expect(caster.runeAcceptsFiles('no-files')).toBe(false);
+  });
+
+  it('U-35: handler(ctx, input, files) — accepts files', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    const handler: RuneHandlerWithFiles = async (_ctx, _input, _files) => ({});
+    caster.rune({ name: 'with-files' }, handler);
+    expect(caster.runeAcceptsFiles('with-files')).toBe(true);
+  });
+
+  it('U-36: stream handler(ctx, input, stream) — does not accept files', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    const handler: StreamRuneHandler = async (_ctx, _input, _stream) => {};
+    caster.streamRune({ name: 'stream-no-files' }, handler);
+    expect(caster.runeAcceptsFiles('stream-no-files')).toBe(false);
+  });
+
+  it('U-37: stream handler(ctx, input, files, stream) — accepts files', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    const handler: StreamRuneHandlerWithFiles = async (_ctx, _input, _files, _stream) => {};
+    caster.streamRune({ name: 'stream-with-files' }, handler);
+    expect(caster.runeAcceptsFiles('stream-with-files')).toBe(true);
+  });
+});

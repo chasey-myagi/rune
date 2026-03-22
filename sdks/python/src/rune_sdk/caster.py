@@ -26,17 +26,25 @@ class Caster:
 
     def __init__(
         self,
-        addr: str,
+        addr: str = "localhost:50070",
         caster_id: str = "python-caster",
         max_concurrent: int = 10,
+        reconnect_base_delay: float = 1.0,
+        reconnect_max_delay: float = 30.0,
+        heartbeat_interval: float = 10.0,
+        labels: dict[str, str] | None = None,
+        api_key: str | None = None,
     ) -> None:
         self._addr = addr
         self._caster_id = caster_id
         self._max_concurrent = max_concurrent
         self._runes: dict[str, RegisteredRune] = {}
         self._cancelled: set[str] = set()
-        self._reconnect_base_delay = 1.0  # seconds
-        self._reconnect_max_delay = 30.0
+        self._reconnect_base_delay = reconnect_base_delay
+        self._reconnect_max_delay = reconnect_max_delay
+        self._heartbeat_interval = heartbeat_interval
+        self._labels = labels or {}
+        self._api_key = api_key
 
     # ------------------------------------------------------------------
     # Decorator API
@@ -228,7 +236,7 @@ class Caster:
         """Send periodic heartbeat."""
         try:
             while True:
-                await asyncio.sleep(10)
+                await asyncio.sleep(self._heartbeat_interval)
                 msg = rune_pb2.SessionMessage(
                     heartbeat=rune_pb2.Heartbeat(
                         timestamp_ms=int(time.time() * 1000),

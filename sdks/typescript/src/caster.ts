@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import type { CasterOptions, RuneConfig, RuneContext, ReconnectOptions, FileAttachment } from './types.js';
-import type { RuneHandler, StreamRuneHandler } from './handler.js';
+import type { RuneHandler, RuneHandlerWithFiles, StreamRuneHandler, StreamRuneHandlerWithFiles } from './handler.js';
 import { StreamSender } from './stream.js';
 
 /** Default gRPC endpoint */
@@ -23,8 +23,9 @@ const DEFAULT_RECONNECT: Required<ReconnectOptions> = {
 
 interface RegisteredRune {
   config: RuneConfig;
-  handler: RuneHandler | StreamRuneHandler;
+  handler: RuneHandler | RuneHandlerWithFiles | StreamRuneHandler | StreamRuneHandlerWithFiles;
   isStream: boolean;
+  acceptsFiles: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,25 +108,30 @@ export class Caster {
    * Register a unary Rune handler.
    * @throws Error if a Rune with the same name is already registered
    */
-  rune(config: RuneConfig, handler: RuneHandler): void {
+  rune(config: RuneConfig, handler: RuneHandler | RuneHandlerWithFiles): void {
     if (this._runes.has(config.name)) {
       throw new Error(`Rune "${config.name}" is already registered`);
     }
-    this._runes.set(config.name, { config, handler, isStream: false });
+    // Unary: (ctx, input) = 2 params, (ctx, input, files) = 3 params
+    const acceptsFiles = handler.length >= 3;
+    this._runes.set(config.name, { config, handler, isStream: false, acceptsFiles });
   }
 
   /**
    * Register a streaming Rune handler.
    * @throws Error if a Rune with the same name is already registered
    */
-  streamRune(config: RuneConfig, handler: StreamRuneHandler): void {
+  streamRune(config: RuneConfig, handler: StreamRuneHandler | StreamRuneHandlerWithFiles): void {
     if (this._runes.has(config.name)) {
       throw new Error(`Rune "${config.name}" is already registered`);
     }
+    // Stream: (ctx, input, stream) = 3 params, (ctx, input, files, stream) = 4 params
+    const acceptsFiles = handler.length >= 4;
     this._runes.set(config.name, {
       config: { ...config, supportsStream: true },
       handler,
       isStream: true,
+      acceptsFiles,
     });
   }
 
@@ -148,6 +154,13 @@ export class Caster {
    */
   isStreamRune(name: string): boolean {
     return this._runes.get(name)?.isStream ?? false;
+  }
+
+  /**
+   * Check if a rune handler accepts file attachments.
+   */
+  runeAcceptsFiles(name: string): boolean {
+    return this._runes.get(name)?.acceptsFiles ?? false;
   }
 
   /**

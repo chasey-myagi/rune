@@ -68,16 +68,12 @@ export class StreamSender {
 
   /**
    * End the stream. No more data can be emitted after this.
-   * @throws Error if the stream has already ended
+   * Idempotent — calling end() multiple times is safe.
    */
   async end(): Promise<void> {
     if (this._ended) {
-      throw new Error('Stream already ended');
+      return; // idempotent
     }
     this._ended = true;
-
-    if (!this._sendFn) {
-      throw new Error('not implemented');
-    }
   }
 }

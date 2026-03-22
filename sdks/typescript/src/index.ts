@@ -9,7 +9,12 @@ export type {
 } from './types.js';
 
 // Handler types
-export type { RuneHandler, StreamRuneHandler } from './handler.js';
+export type {
+  RuneHandler,
+  RuneHandlerWithFiles,
+  StreamRuneHandler,
+  StreamRuneHandlerWithFiles,
+} from './handler.js';
 
 // Classes
 export { Caster } from './caster.js';
