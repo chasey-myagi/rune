@@ -22,7 +22,7 @@ fn rune_config(name: &str) -> RuneConfig {
         gate: None,
         input_schema: None,
         output_schema: None,
-        priority: 0,
+        priority: 0, labels: Default::default(),
     }
 }
 

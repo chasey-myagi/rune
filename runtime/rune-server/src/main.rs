@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0,
+            priority: 0, labels: Default::default(),
         },
         make_handler(|_ctx, _input| async {
             Ok(Bytes::from(r#"{"message":"hello from local rune!"}"#))
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0,
+            priority: 0, labels: Default::default(),
         },
         make_handler(|_ctx, input| async move {
             let mut v: serde_json::Value =

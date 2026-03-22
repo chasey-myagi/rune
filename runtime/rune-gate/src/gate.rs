@@ -1639,7 +1639,7 @@ mod tests {
                     }),
                     input_schema: None,
                     output_schema: None,
-                    priority: 0,
+                    priority: 0, labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(echo_handler)),
                 None,
@@ -1658,7 +1658,7 @@ mod tests {
                     gate: None,
                     input_schema: None,
                     output_schema: None,
-                    priority: 0,
+                    priority: 0, labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(internal_handler)),
                 None,
@@ -2571,7 +2571,7 @@ mod tests {
                         }),
                         input_schema: None,
                         output_schema: None,
-                        priority: 0,
+                        priority: 0, labels: Default::default(),
                     },
                     Arc::new(LocalInvoker::new(handler)),
                     None,
@@ -2909,7 +2909,7 @@ mod tests {
                         }),
                         input_schema: None,
                         output_schema: None,
-                        priority: 0,
+                        priority: 0, labels: Default::default(),
                     },
                     Arc::new(LocalInvoker::new(handler)),
                     None,
@@ -3442,7 +3442,7 @@ mod tests {
                     }),
                     input_schema: None,
                     output_schema: None,
-                    priority: 0,
+                    priority: 0, labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(handler)),
                 None,
@@ -3535,7 +3535,7 @@ mod tests {
                     }),
                     input_schema: None,
                     output_schema: None,
-                    priority: 0,
+                    priority: 0, labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(handler)),
                 None,
@@ -3615,7 +3615,7 @@ mod tests {
                     }),
                     input_schema: None,
                     output_schema: None,
-                    priority: 0,
+                    priority: 0, labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(handler)),
                 None,
@@ -5379,7 +5379,7 @@ mod tests {
                     }),
                     input_schema: Some(input_schema.to_string()),
                     output_schema: Some(output_schema.to_string()),
-                    priority: 0,
+                    priority: 0, labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(echo_with_schema)),
                 None,
@@ -5401,7 +5401,7 @@ mod tests {
                     }),
                     input_schema: None,
                     output_schema: None,
-                    priority: 0,
+                    priority: 0, labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(no_schema_handler)),
                 None,
@@ -5426,7 +5426,7 @@ mod tests {
                     }),
                     input_schema: Some(input_schema.to_string()),
                     output_schema: Some(output_schema.to_string()),
-                    priority: 0,
+                    priority: 0, labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(bad_output_handler)),
                 None,
@@ -6290,7 +6290,7 @@ mod tests {
                     gate: None,
                     input_schema: None,
                     output_schema: None,
-                    priority: 0,
+                    priority: 0, labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(fail_handler)),
                 None,
@@ -7239,5 +7239,667 @@ mod tests {
         // Empty body should either be rejected or treated as empty input
         // Axum's Json extractor rejects empty body as 422
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD Wave A — Rate Limiting
+    // ====================================================================
+
+    // Helper: build a test state with auth enabled and a known gate key.
+    // Returns (state, raw_key).
+    fn rate_limit_state(requests_per_minute: u32, dev_mode: bool) -> (GateState, String) {
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let key_verifier: Arc<dyn KeyVerifier> = if dev_mode {
+            Arc::new(NoopVerifier)
+        } else {
+            Arc::new(rune_store::StoreKeyVerifier::new(store.clone()))
+        };
+
+        let echo_handler = make_handler(|_ctx, input| async move { Ok(input) });
+        relay.register(
+            RuneConfig {
+                name: "echo".into(),
+                version: "1.0.0".into(),
+                description: "test echo".into(),
+                supports_stream: false,
+                gate: Some(GateConfig { path: "/echo".into(), method: "POST".into() }),
+                input_schema: None,
+                output_schema: None,
+                priority: 0, labels: Default::default(),
+            },
+            Arc::new(LocalInvoker::new(echo_handler)),
+            None,
+        ).unwrap();
+
+        // Create a gate key
+        let raw_key = if !dev_mode {
+            let key_result = store.create_key(rune_store::KeyType::Gate, "rate_test").unwrap();
+            key_result.raw_key
+        } else {
+            "dev-key".to_string()
+        };
+
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            rune_flow::engine::FlowEngine::new(
+                Arc::clone(&relay),
+                Arc::clone(&resolver) as Arc<dyn rune_core::resolver::Resolver>,
+            ),
+        ));
+
+        let state = GateState {
+            relay,
+            resolver,
+            store,
+            key_verifier,
+            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            auth_enabled: !dev_mode,
+            exempt_routes: vec!["/health".to_string()],
+            cors_origins: vec![],
+            dev_mode,
+            started_at: Instant::now(),
+            file_broker: Arc::new(FileBroker::new()),
+            max_upload_size_mb: 10,
+            flow_engine,
+        };
+
+        (state, raw_key)
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_allows_within_limit() {
+        // With requests_per_minute=5, first 5 requests should pass
+        let (state, key) = rate_limit_state(5, false);
+        let app = build_router(state, None);
+
+        // Send 5 requests — all should succeed
+        // Note: oneshot consumes the router, so we need to build fresh for each
+        // Actually we need to test with a service, not oneshot. Let's use a single
+        // app and clone-based approach.
+        // For simplicity, test the first request succeeds
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":1}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_blocks_over_limit() {
+        // With requests_per_minute=5, 6th request should return 429
+        let (state, key) = rate_limit_state(5, false);
+
+        for i in 0..6 {
+            let app = build_router(state.clone(), None);
+            let response = app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                    .unwrap(),
+            ).await.unwrap();
+
+            if i < 5 {
+                assert_eq!(response.status(), StatusCode::OK, "request {} should succeed", i);
+            } else {
+                assert_eq!(
+                    response.status(),
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "request {} should be rate limited",
+                    i
+                );
+            }
+        }
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_different_keys_independent() {
+        // Two different keys should have independent counters
+        let (state, _key1) = rate_limit_state(2, false);
+        let key2_result = state.store.create_key(rune_store::KeyType::Gate, "key2").unwrap();
+        let key1 = state.store.create_key(rune_store::KeyType::Gate, "key1b").unwrap().raw_key;
+        let key2 = key2_result.raw_key;
+
+        // Key1: 2 requests → both OK
+        for i in 0..2 {
+            let app = build_router(state.clone(), None);
+            let response = app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key1))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"k1":{}}}"#, i)))
+                    .unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        // Key2: should still be able to make requests (independent counter)
+        let app = build_router(state.clone(), None);
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key2))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"k2":1}"#))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_dev_mode_disabled() {
+        // In dev mode, rate limiting should be disabled — all requests pass
+        let (state, key) = rate_limit_state(2, true);
+
+        for i in 0..10 {
+            let app = build_router(state.clone(), None);
+            let response = app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"dev":{}}}"#, i)))
+                    .unwrap(),
+            ).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "dev mode should not rate limit (request {})", i
+            );
+        }
+
+        let _ = key; // suppress unused warning
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_429_has_retry_after_header() {
+        // When rate limited, response should include Retry-After header
+        let (state, key) = rate_limit_state(1, false);
+
+        // First request: OK
+        let app = build_router(state.clone(), None);
+        let _ = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":1}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        // Second request: should be 429
+        let app = build_router(state.clone(), None);
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":2}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = response.headers().get("retry-after");
+        assert!(retry_after.is_some(), "429 response should include Retry-After header");
+        let retry_secs: u64 = retry_after.unwrap().to_str().unwrap().parse().unwrap();
+        assert!(retry_secs > 0 && retry_secs <= 60, "Retry-After should be between 1-60 seconds");
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_429_response_body() {
+        // The 429 response body should be JSON with error info
+        let (state, key) = rate_limit_state(1, false);
+
+        // Exhaust limit
+        let app = build_router(state.clone(), None);
+        let _ = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":1}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        // Trigger 429
+        let app = build_router(state.clone(), None);
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":2}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "RATE_LIMITED");
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_window_reset() {
+        // After the window expires, counter should reset
+        // We use a very short window (simulate by waiting)
+        // This test verifies the concept; actual implementation may need
+        // time-controllable clock or short window for testing
+        let (state, key) = rate_limit_state(1, false);
+
+        // Exhaust limit
+        let app = build_router(state.clone(), None);
+        let _ = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":1}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        // Verify rate limited
+        let app = build_router(state.clone(), None);
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":2}"#))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Wait for window to expire (60 seconds is too long for tests,
+        // so this test requires the implementation to support configurable
+        // window duration or time mocking)
+        // For now we mark this as a placeholder that verifies the concept
+        // The implementation should provide a reset mechanism testable in < 1s
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_exempt_routes_not_limited() {
+        // Health check and other exempt routes should not be rate limited
+        let (state, _key) = rate_limit_state(1, false);
+
+        // Even with limit=1, health should always work
+        for _ in 0..5 {
+            let app = build_router(state.clone(), None);
+            let response = app.oneshot(
+                Request::get("/health").body(Body::empty()).unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_no_auth_header_still_handled() {
+        // Requests without auth header should not cause rate limiter to panic
+        // (auth middleware runs first and rejects, so rate limiter may not even fire)
+        let (state, _key) = rate_limit_state(1, false);
+
+        let app = build_router(state, None);
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":1}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        // Should be 401 (auth fails before rate limit)
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
+    #[tokio::test]
+    async fn test_rate_limit_management_routes_exempt() {
+        // Management API routes should not be rate limited
+        let (state, key) = rate_limit_state(1, false);
+
+        // Exhaust rate limit on /echo
+        let app = build_router(state.clone(), None);
+        let _ = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("authorization", format!("Bearer {}", key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"n":1}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        // Management routes should still work
+        let app = build_router(state.clone(), None);
+        let response = app.oneshot(
+            Request::get("/api/v1/status")
+                .header("authorization", format!("Bearer {}", key))
+                .body(Body::empty())
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD Wave A — Graceful Shutdown
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
+    #[tokio::test]
+    async fn test_shutdown_rejects_new_requests() {
+        // After shutdown signal, new requests should return 503
+        let state = test_state();
+        // TODO: trigger draining state on the shutdown coordinator
+        // Then verify new requests get 503
+
+        let app = build_router(state, None);
+        // Simulating: the shutdown coordinator should be in draining state
+        // For now, this test documents the expected behavior
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"msg":"after_shutdown"}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        // When draining, should return 503
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
+    #[tokio::test]
+    async fn test_shutdown_in_progress_requests_complete() {
+        // Requests that are already in progress when shutdown fires
+        // should complete normally, not be cut off
+        let state = test_state();
+        let app = build_router(state, None);
+
+        // Start a request
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"in_flight":true}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        // Even after shutdown, in-flight should complete with 200
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
+    #[tokio::test]
+    async fn test_shutdown_drain_timeout_force_close() {
+        // After drain_timeout expires, server should force-close connections
+        // This test verifies the timeout mechanism exists
+        let state = test_state();
+        // The drain_timeout from config is 15s by default
+        // In tests, we'd set a short timeout to verify the mechanism
+        let _ = state;
+        // Test documents expected behavior: after drain_timeout,
+        // remaining connections are forcefully terminated
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD Wave A — Structured Logging
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires structured logging implementation"]
+    #[tokio::test]
+    async fn test_structured_log_contains_json() {
+        // When log.format="json", tracing output should be valid JSON
+        // This test captures tracing subscriber output and validates format
+        // TODO: set up a custom tracing subscriber that captures to a buffer,
+        // make a request, and verify the output is valid JSON
+        let state = test_state();
+        let app = build_router(state, None);
+
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"msg":"log_test"}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // TODO: verify captured tracing output is valid JSON with expected fields
+    }
+
+    #[ignore = "v0.6.0: requires structured logging implementation"]
+    #[tokio::test]
+    async fn test_structured_log_contains_request_id_and_rune_name() {
+        // Structured log entries for rune invocations should include
+        // request_id and rune_name fields
+        let state = test_state();
+        let app = build_router(state, None);
+
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"msg":"log_fields"}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // TODO: capture tracing output and verify:
+        // - "request_id" field is present and non-empty
+        // - "rune_name" field is present and equals "echo"
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD Wave A — Stats API Enhancement
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires enhanced stats implementation"]
+    #[tokio::test]
+    async fn test_stats_api_contains_success_rate() {
+        // After some calls, GET /api/v1/stats should return success_rate per rune
+        let state = test_state();
+
+        // Make a few successful calls first
+        for i in 0..3 {
+            let app = build_router(state.clone(), None);
+            let _ = app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                    .unwrap(),
+            ).await.unwrap();
+        }
+
+        // Allow async logs to flush
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let app = build_router(state, None);
+        let response = app.oneshot(
+            Request::get("/api/v1/stats").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Should have by_rune array with success_rate field
+        let by_rune = json["by_rune"].as_array().unwrap();
+        if !by_rune.is_empty() {
+            let rune_stat = &by_rune[0];
+            assert!(rune_stat.get("success_rate").is_some(), "should have success_rate field");
+            let rate = rune_stat["success_rate"].as_f64().unwrap();
+            assert!(rate >= 0.0 && rate <= 1.0, "success_rate should be between 0 and 1");
+        }
+    }
+
+    #[ignore = "v0.6.0: requires enhanced stats implementation"]
+    #[tokio::test]
+    async fn test_stats_api_contains_p95_latency() {
+        // GET /api/v1/stats should return p95_latency_ms per rune
+        let state = test_state();
+
+        // Make some calls
+        for i in 0..5 {
+            let app = build_router(state.clone(), None);
+            let _ = app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                    .unwrap(),
+            ).await.unwrap();
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let app = build_router(state, None);
+        let response = app.oneshot(
+            Request::get("/api/v1/stats").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let by_rune = json["by_rune"].as_array().unwrap();
+        if !by_rune.is_empty() {
+            let rune_stat = &by_rune[0];
+            assert!(rune_stat.get("p95_latency_ms").is_some(), "should have p95_latency_ms field");
+            let p95 = rune_stat["p95_latency_ms"].as_f64().unwrap();
+            assert!(p95 >= 0.0, "p95_latency_ms should be non-negative");
+        }
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD Wave A — Caster Details API Enhancement
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires caster details API implementation"]
+    #[tokio::test]
+    async fn test_casters_api_returns_detailed_info() {
+        // GET /api/v1/casters should return per-caster details
+        let state = test_state();
+        let app = build_router(state, None);
+
+        let response = app.oneshot(
+            Request::get("/api/v1/casters").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Should have casters array (may be empty in test)
+        assert!(json["casters"].is_array());
+    }
+
+    #[ignore = "v0.6.0: requires caster details API implementation"]
+    #[tokio::test]
+    async fn test_casters_api_caster_has_runes_field() {
+        // When a caster is connected, its entry should have a runes array
+        // This is a schema test — in production the caster connects via gRPC
+        // For unit testing, we verify the response schema is correct
+        let state = test_state();
+        let app = build_router(state, None);
+
+        let response = app.oneshot(
+            Request::get("/api/v1/casters").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Verify response structure supports detailed caster info
+        // Each caster entry should have: caster_id, runes, current_load, connected_since
+        for caster in json["casters"].as_array().unwrap_or(&vec![]) {
+            assert!(caster.get("caster_id").is_some());
+            assert!(caster.get("runes").is_some());
+            assert!(caster.get("current_load").is_some());
+            assert!(caster.get("connected_since").is_some());
+        }
+    }
+
+    // ====================================================================
+    // v0.6.0 TDD Wave A — Labels routing via HTTP header
+    // ====================================================================
+
+    #[ignore = "v0.6.0: requires X-Rune-Labels header support"]
+    #[tokio::test]
+    async fn test_labels_header_routes_to_matching_caster() {
+        // X-Rune-Labels: env=prod should route to caster with env=prod label
+        let state = test_state();
+        // TODO: register casters with labels via the relay
+        let app = build_router(state, None);
+
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/runes/echo/run")
+                .header("content-type", "application/json")
+                .header("x-rune-labels", "env=prod")
+                .body(Body::from(r#"{"msg":"label_test"}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        // With no caster matching the label, should return 503
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[ignore = "v0.6.0: requires X-Rune-Labels header support"]
+    #[tokio::test]
+    async fn test_no_labels_header_uses_default_routing() {
+        // Without X-Rune-Labels, normal routing applies
+        let state = test_state();
+        let app = build_router(state, None);
+
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/runes/echo/run")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"msg":"no_label"}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        // Without labels, default routing should work
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

@@ -79,6 +79,14 @@ impl SessionManager {
         self.sessions.len()
     }
 
+    /// Return the number of available permits (free concurrency slots) for a caster.
+    /// Returns 0 if the caster is not connected.
+    pub fn available_permits(&self, caster_id: &str) -> usize {
+        self.sessions.get(caster_id)
+            .map(|s| s.semaphore.available_permits())
+            .unwrap_or(0)
+    }
+
     pub async fn handle_session(
         self: &Arc<Self>,
         relay: Arc<Relay>,
@@ -184,6 +192,7 @@ impl SessionManager {
                             input_schema: if decl.input_schema.is_empty() { None } else { Some(decl.input_schema.clone()) },
                             output_schema: if decl.output_schema.is_empty() { None } else { Some(decl.output_schema.clone()) },
                             priority: decl.priority,
+                            labels: Default::default(),
                         };
                         configs.push(config.clone());
                         let invoker = Arc::new(RemoteInvoker {

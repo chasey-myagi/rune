@@ -14,7 +14,7 @@ pub struct RuneContext {
 }
 
 /// Rune 注册配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RuneConfig {
     pub name: String,
     pub version: String,
@@ -24,6 +24,7 @@ pub struct RuneConfig {
     pub input_schema: Option<String>,   // JSON Schema string
     pub output_schema: Option<String>,  // JSON Schema string
     pub priority: i32,                  // Caster 优先级（高值优先）
+    pub labels: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
