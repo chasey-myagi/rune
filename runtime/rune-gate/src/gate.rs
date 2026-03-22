@@ -19,6 +19,8 @@ use rune_core::invoker::RuneInvoker;
 use rune_core::relay::Relay;
 use rune_core::resolver::Resolver;
 use rune_core::rune::{RuneContext, RuneError};
+use rune_schema::validator::{validate_input, validate_output};
+use rune_schema::openapi::{generate_openapi, RuneInfo};
 use rune_store::{CallLog, RuneStore, TaskStatus};
 
 /// Gate shared state
@@ -56,7 +58,8 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
         .route("/api/v1/stats", get(mgmt_stats))
         .route("/api/v1/logs", get(mgmt_logs))
         .route("/api/v1/keys", get(mgmt_list_keys).post(mgmt_create_key))
-        .route("/api/v1/keys/:id", delete(mgmt_revoke_key));
+        .route("/api/v1/keys/:id", delete(mgmt_revoke_key))
+        .route("/api/v1/openapi.json", get(openapi_handler));
 
     if let Some(extra) = extra_routes {
         router = router.merge(extra);
@@ -269,6 +272,17 @@ async fn execute_rune(
         }
     };
 
+    // Get RuneConfig for schema validation
+    let (input_schema, output_schema) = if let Some(entries) = state.relay.find(rune_name) {
+        if let Some(first) = entries.value().first() {
+            (first.config.input_schema.clone(), first.config.output_schema.clone())
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     // Check supports_stream
     if params.stream.unwrap_or(false) {
         if let Some(entries) = state.relay.find(rune_name) {
@@ -282,6 +296,15 @@ async fn execute_rune(
                 }
             }
         }
+    }
+
+    // Input schema validation
+    if let Err(e) = validate_input(input_schema.as_deref(), &body) {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "VALIDATION_FAILED",
+            &e.to_string(),
+        );
     }
 
     let request_id = unique_request_id();
@@ -317,7 +340,7 @@ async fn execute_rune(
     let rune_name_owned = rune_name.to_string();
     let req_id = request_id.clone();
 
-    let response = sync_execute(invoker, ctx, body).await;
+    let response = sync_execute(invoker, ctx, body, output_schema).await;
 
     // Record call log (best-effort)
     let latency_ms = start.elapsed().as_millis() as i64;
@@ -342,12 +365,23 @@ async fn sync_execute(
     invoker: Arc<dyn RuneInvoker>,
     ctx: RuneContext,
     body: Bytes,
+    output_schema: Option<String>,
 ) -> axum::response::Response {
     match invoker.invoke_once(ctx, body).await {
-        Ok(output) => match serde_json::from_slice::<serde_json::Value>(&output) {
-            Ok(json) => (StatusCode::OK, Json(json)).into_response(),
-            Err(_) => (StatusCode::OK, output).into_response(),
-        },
+        Ok(output) => {
+            // Output schema validation
+            if let Err(e) = validate_output(output_schema.as_deref(), &output) {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "OUTPUT_VALIDATION_FAILED",
+                    &e.to_string(),
+                );
+            }
+            match serde_json::from_slice::<serde_json::Value>(&output) {
+                Ok(json) => (StatusCode::OK, Json(json)).into_response(),
+                Err(_) => (StatusCode::OK, output).into_response(),
+            }
+        }
         Err(e) => map_error(e),
     }
 }
@@ -621,6 +655,38 @@ async fn mgmt_revoke_key(
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// OpenAPI
+// ---------------------------------------------------------------------------
+
+async fn openapi_handler(State(state): State<GateState>) -> impl IntoResponse {
+    let rune_infos: Vec<RuneInfo> = state
+        .relay
+        .list()
+        .into_iter()
+        .filter_map(|(name, _gate_path)| {
+            let entries = state.relay.find(&name)?;
+            let first = entries.value().first()?;
+            let config = &first.config;
+            Some(RuneInfo {
+                name: config.name.clone(),
+                gate_path: config.gate.as_ref().map(|g| g.path.clone()),
+                gate_method: config
+                    .gate
+                    .as_ref()
+                    .map(|g| g.method.clone())
+                    .unwrap_or_else(|| "POST".to_string()),
+                input_schema: config.input_schema.clone(),
+                output_schema: config.output_schema.clone(),
+                description: config.description.clone(),
+            })
+        })
+        .collect();
+
+    let openapi = generate_openapi(&rune_infos);
+    (StatusCode::OK, Json(openapi)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -4512,7 +4578,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 等 schema 校验集成后取消 ignore
     async fn test_schema_valid_input_returns_200() {
         let state = test_state_with_schema();
         let app = build_router(state, None);
@@ -4533,7 +4598,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 等 schema 校验集成后取消 ignore
     async fn test_schema_invalid_input_returns_422() {
         let state = test_state_with_schema();
         let app = build_router(state, None);
@@ -4567,7 +4631,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 等 schema 校验集成后取消 ignore
     async fn test_no_schema_rune_skips_validation() {
         let state = test_state_with_schema();
         let app = build_router(state, None);
@@ -4589,7 +4652,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 等 schema 校验集成后取消 ignore
     async fn test_openapi_endpoint_returns_valid_json() {
         let state = test_state_with_schema();
         let app = build_router(state, None);
@@ -4620,7 +4682,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 等 schema 校验集成后取消 ignore
     async fn test_output_schema_failure_returns_500() {
         let state = test_state_with_schema();
         let app = build_router(state, None);
@@ -4643,7 +4704,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 等 schema 校验集成后取消 ignore
     async fn test_schema_validation_via_debug_route() {
         let state = test_state_with_schema();
         let app = build_router(state, None);
@@ -4665,7 +4725,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // 等 schema 校验集成后取消 ignore
     async fn test_schema_validation_in_async_mode() {
         let state = test_state_with_schema();
         let app = build_router(state, None);

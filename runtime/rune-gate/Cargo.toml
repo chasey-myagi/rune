@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 rune-core = { path = "../rune-core" }
 rune-proto = { path = "../rune-proto" }
+rune-schema = { path = "../rune-schema" }
 rune-store = { path = "../rune-store" }
 serde_urlencoded = "0.7"
 tower-http = { version = "0.6", features = ["cors"] }

@@ -1587,6 +1587,7 @@ dependencies = [
  "hyper",
  "rune-core",
  "rune-proto",
+ "rune-schema",
  "rune-store",
  "serde",
  "serde_json",
