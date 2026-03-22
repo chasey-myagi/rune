@@ -11,15 +11,7 @@ use rune_core::rune::{RuneConfig, RuneError, GateConfig, make_handler};
 use rune_flow::dag::{FlowDefinition, StepDefinition};
 use rune_flow::engine::FlowEngine;
 use rune_gate::gate;
-use rune_store::{RuneSnapshot, RuneStore, StoreKeyVerifier, TaskStatus};
-use axum::{
-    Extension,
-    extract::{Path, State, Query},
-    Json, Router,
-    routing::{get, post},
-    http::StatusCode,
-    response::IntoResponse,
-};
+use rune_store::{RuneSnapshot, RuneStore, StoreKeyVerifier};
 use bytes::Bytes;
 
 #[derive(Parser)]
@@ -32,119 +24,6 @@ struct Cli {
     /// Enable development mode (localhost binding, auth disabled)
     #[arg(long)]
     dev: bool,
-}
-
-// ── Flow handlers (hosted in rune-server) ──
-
-async fn list_flows(Extension(engine): Extension<Arc<FlowEngine>>) -> impl IntoResponse {
-    let flows: Vec<&str> = engine.list();
-    Json(serde_json::json!({"flows": flows}))
-}
-
-async fn run_flow(
-    State(state): State<gate::GateState>,
-    Extension(engine): Extension<Arc<FlowEngine>>,
-    Path(name): Path<String>,
-    Query(params): Query<gate::RunParams>,
-    body: Bytes,
-) -> axum::response::Response {
-    // async mode
-    if params.async_mode.unwrap_or(false) {
-        let task_id = format!(
-            "f-{:x}-{:x}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
-            0u64,
-        );
-
-        let input_str = String::from_utf8_lossy(&body).to_string();
-        if let Err(e) = state.store.insert_task(&task_id, &format!("flow:{}", name), Some(&input_str)) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": {"code": "INTERNAL", "message": e.to_string()}})),
-            )
-                .into_response();
-        }
-        let _ = state.store.update_task_status(&task_id, TaskStatus::Running, None, None);
-
-        let engine = Arc::clone(&engine);
-        let store = Arc::clone(&state.store);
-        let flow_name = name.clone();
-        let body_clone = body.clone();
-        let tid = task_id.clone();
-        tokio::spawn(async move {
-            match engine.execute(&flow_name, body_clone).await {
-                Ok(result) => {
-                    let output_str = String::from_utf8_lossy(&result.output).to_string();
-                    let val = serde_json::from_str::<serde_json::Value>(&output_str)
-                        .unwrap_or(serde_json::Value::Null);
-                    let combined = serde_json::json!({
-                        "output": val,
-                        "steps_executed": result.steps_executed,
-                    });
-                    let _ = store.update_task_status(
-                        &tid,
-                        TaskStatus::Completed,
-                        Some(&combined.to_string()),
-                        None,
-                    );
-                }
-                Err(e) => {
-                    let _ = store.update_task_status(
-                        &tid,
-                        TaskStatus::Failed,
-                        None,
-                        Some(&e.to_string()),
-                    );
-                }
-            }
-        });
-
-        return (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({
-                "task_id": task_id,
-                "status": "running",
-            })),
-        )
-            .into_response();
-    }
-
-    // sync mode
-    match engine.execute(&name, body).await {
-        Ok(result) => match serde_json::from_slice::<serde_json::Value>(&result.output) {
-            Ok(json) => (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "output": json,
-                    "steps_executed": result.steps_executed,
-                })),
-            )
-                .into_response(),
-            Err(_) => (StatusCode::OK, result.output).into_response(),
-        },
-        Err(e) => {
-            let status = match &e {
-                rune_flow::engine::FlowError::FlowNotFound(_) => StatusCode::NOT_FOUND,
-                rune_flow::engine::FlowError::StepFailed { .. } => {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                }
-                rune_flow::engine::FlowError::DagError(_) => StatusCode::BAD_REQUEST,
-                rune_flow::engine::FlowError::NoTerminalStep => {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                }
-            };
-            (
-                status,
-                Json(serde_json::json!({
-                    "error": {"code": "FLOW_ERROR", "message": e.to_string()}
-                })),
-            )
-                .into_response()
-        }
-    }
 }
 
 #[tokio::main]
@@ -275,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("registered flows: pipeline, single, empty");
 
     // ── HTTP Gate ──
+    let flow_engine = Arc::new(tokio::sync::RwLock::new(flow_engine));
     let gate_state = gate::GateState {
         relay: Arc::clone(&running.relay),
         resolver: Arc::clone(&running.resolver),
@@ -288,15 +168,10 @@ async fn main() -> anyhow::Result<()> {
         started_at: Instant::now(),
         file_broker: Arc::new(gate::FileBroker::new()),
         max_upload_size_mb: 100,
+        flow_engine: Arc::clone(&flow_engine),
     };
 
-    let flow_engine = Arc::new(flow_engine);
-    let flow_routes: Router<gate::GateState> = Router::new()
-        .route("/api/v1/flows", get(list_flows))
-        .route("/api/v1/flows/{name}/run", post(run_flow))
-        .layer(Extension(Arc::clone(&flow_engine)));
-
-    let http_router = gate::build_router(gate_state, Some(flow_routes));
+    let http_router = gate::build_router(gate_state, None);
 
     let http_listener = tokio::net::TcpListener::bind(running.config.http_addr()).await?;
     tracing::info!("gate listening on {}", running.config.http_addr());

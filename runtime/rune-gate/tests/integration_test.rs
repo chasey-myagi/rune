@@ -8,9 +8,10 @@ use tower::ServiceExt;
 use rune_core::auth::{KeyVerifier, NoopVerifier};
 use rune_core::invoker::LocalInvoker;
 use rune_core::relay::Relay;
-use rune_core::resolver::RoundRobinResolver;
+use rune_core::resolver::{Resolver, RoundRobinResolver};
 use rune_core::rune::{GateConfig, RuneConfig, make_handler};
 use rune_core::session::SessionManager;
+use rune_flow::engine::FlowEngine;
 use rune_gate::gate::{self, GateState};
 use rune_store::{KeyType, RuneStore, StoreKeyVerifier, TaskStatus};
 
@@ -47,6 +48,9 @@ fn make_state(auth_enabled: bool) -> GateState {
         Arc::new(NoopVerifier)
     };
 
+    let flow_engine = Arc::new(tokio::sync::RwLock::new(
+        FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+    ));
     GateState {
         relay,
         resolver,
@@ -63,6 +67,7 @@ fn make_state(auth_enabled: bool) -> GateState {
         started_at: Instant::now(),
         file_broker: Arc::new(gate::FileBroker::new()),
         max_upload_size_mb: 10,
+        flow_engine,
     }
 }
 
@@ -778,6 +783,9 @@ async fn test_mixed_sync_and_stream_runes() {
         )
         .unwrap();
 
+    let flow_engine = Arc::new(tokio::sync::RwLock::new(
+        FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+    ));
     let state = GateState {
         relay,
         resolver,
@@ -794,6 +802,7 @@ async fn test_mixed_sync_and_stream_runes() {
         started_at: std::time::Instant::now(),
         file_broker: Arc::new(gate::FileBroker::new()),
         max_upload_size_mb: 10,
+        flow_engine,
     };
 
     // Sync rune: normal call works
@@ -903,6 +912,9 @@ async fn test_stats_accumulate_across_runes() {
             .unwrap();
     }
 
+    let flow_engine = Arc::new(tokio::sync::RwLock::new(
+        FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+    ));
     let state = GateState {
         relay,
         resolver,
@@ -919,6 +931,7 @@ async fn test_stats_accumulate_across_runes() {
         started_at: std::time::Instant::now(),
         file_broker: Arc::new(gate::FileBroker::new()),
         max_upload_size_mb: 10,
+        flow_engine,
     };
 
     // Call rune_a 4 times

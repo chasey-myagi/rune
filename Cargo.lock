@@ -1587,6 +1587,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "rune-core",
+ "rune-flow",
  "rune-proto",
  "rune-schema",
  "rune-store",

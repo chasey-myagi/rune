@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 rune-core = { path = "../rune-core" }
+rune-flow = { path = "../rune-flow" }
 rune-proto = { path = "../rune-proto" }
 rune-schema = { path = "../rune-schema" }
 rune-store = { path = "../rune-store" }

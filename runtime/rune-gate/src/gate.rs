@@ -20,6 +20,8 @@ use rune_core::invoker::RuneInvoker;
 use rune_core::relay::Relay;
 use rune_core::resolver::Resolver;
 use rune_core::rune::{RuneContext, RuneError};
+use rune_flow::dag::FlowDefinition;
+use rune_flow::engine::{FlowEngine, FlowError};
 use rune_schema::validator::{validate_input, validate_output};
 use rune_schema::openapi::{generate_openapi, RuneInfo};
 use rune_store::{CallLog, RuneStore, TaskStatus};
@@ -114,6 +116,7 @@ pub struct GateState {
     pub started_at: Instant,
     pub file_broker: Arc<FileBroker>,
     pub max_upload_size_mb: u64,
+    pub flow_engine: Arc<tokio::sync::RwLock<FlowEngine>>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -138,7 +141,11 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
         .route("/api/v1/keys", get(mgmt_list_keys).post(mgmt_create_key))
         .route("/api/v1/keys/:id", delete(mgmt_revoke_key))
         .route("/api/v1/openapi.json", get(openapi_handler))
-        .route("/api/v1/files/:id", get(download_file));
+        .route("/api/v1/files/:id", get(download_file))
+        // Flow API
+        .route("/api/v1/flows", post(create_flow).get(list_flows))
+        .route("/api/v1/flows/:name", get(get_flow).delete(delete_flow))
+        .route("/api/v1/flows/:name/run", post(run_flow));
 
     if let Some(extra) = extra_routes {
         router = router.merge(extra);
@@ -888,6 +895,308 @@ async fn openapi_handler(State(state): State<GateState>) -> impl IntoResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Flow API handlers
+// ---------------------------------------------------------------------------
+
+fn flow_error_response(status: StatusCode, msg: &str) -> axum::response::Response {
+    (
+        status,
+        Json(serde_json::json!({"error": msg})),
+    )
+        .into_response()
+}
+
+async fn create_flow(
+    State(state): State<GateState>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    let body = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return flow_error_response(StatusCode::BAD_REQUEST, "failed to read body"),
+    };
+
+    if body.is_empty() {
+        return flow_error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "empty body: expected JSON",
+        );
+    }
+
+    let flow: FlowDefinition = match serde_json::from_slice(&body) {
+        Ok(f) => f,
+        Err(e) => {
+            return flow_error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("invalid JSON: {}", e),
+            );
+        }
+    };
+
+    // Validate: name must not be empty
+    if flow.name.is_empty() {
+        return flow_error_response(StatusCode::BAD_REQUEST, "flow name must not be empty");
+    }
+
+    // Validate: steps must not be empty
+    if flow.steps.is_empty() {
+        return flow_error_response(StatusCode::BAD_REQUEST, "flow must have at least one step");
+    }
+
+    let mut engine = state.flow_engine.write().await;
+
+    // Check for duplicate name
+    if engine.get(&flow.name).is_some() {
+        return flow_error_response(
+            StatusCode::CONFLICT,
+            &format!("flow '{}' already exists", flow.name),
+        );
+    }
+
+    // Register (validates DAG)
+    if let Err(e) = engine.register(flow.clone()) {
+        return flow_error_response(StatusCode::BAD_REQUEST, &e.to_string());
+    }
+
+    (StatusCode::CREATED, Json(serde_json::json!(flow))).into_response()
+}
+
+async fn list_flows(
+    State(state): State<GateState>,
+) -> impl IntoResponse {
+    let engine = state.flow_engine.read().await;
+    let entries: Vec<serde_json::Value> = engine
+        .list()
+        .iter()
+        .filter_map(|name| {
+            engine.get(name).map(|flow| {
+                serde_json::json!({
+                    "name": flow.name,
+                    "steps_count": flow.steps.len(),
+                    "gate_path": flow.gate_path,
+                })
+            })
+        })
+        .collect();
+    Json(serde_json::Value::Array(entries))
+}
+
+async fn get_flow(
+    State(state): State<GateState>,
+    Path(name): Path<String>,
+) -> axum::response::Response {
+    let engine = state.flow_engine.read().await;
+    match engine.get(&name) {
+        Some(flow) => (StatusCode::OK, Json(serde_json::json!(flow))).into_response(),
+        None => flow_error_response(
+            StatusCode::NOT_FOUND,
+            &format!("flow '{}' not found", name),
+        ),
+    }
+}
+
+async fn delete_flow(
+    State(state): State<GateState>,
+    Path(name): Path<String>,
+) -> axum::response::Response {
+    let mut engine = state.flow_engine.write().await;
+    if engine.remove(&name) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        flow_error_response(
+            StatusCode::NOT_FOUND,
+            &format!("flow '{}' not found", name),
+        )
+    }
+}
+
+async fn run_flow(
+    State(state): State<GateState>,
+    Path(name): Path<String>,
+    Query(params): Query<RunParams>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    let body = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return flow_error_response(StatusCode::BAD_REQUEST, "failed to read body"),
+    };
+
+    if body.is_empty() {
+        return flow_error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "empty body: expected JSON",
+        );
+    }
+
+    // Validate JSON
+    if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
+        return flow_error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid JSON",
+        );
+    }
+
+    // Check flow exists
+    {
+        let engine = state.flow_engine.read().await;
+        if engine.get(&name).is_none() {
+            return flow_error_response(
+                StatusCode::NOT_FOUND,
+                &format!("flow '{}' not found", name),
+            );
+        }
+    }
+
+    // Stream mode
+    if params.stream.unwrap_or(false) {
+        return run_flow_stream(&state, &name, body).await;
+    }
+
+    // Async mode
+    if params.async_mode.unwrap_or(false) {
+        return run_flow_async(&state, &name, body).await;
+    }
+
+    // Sync mode (default)
+    let engine = state.flow_engine.read().await;
+    match engine.execute(&name, body).await {
+        Ok(result) => {
+            let output_json = serde_json::from_slice::<serde_json::Value>(&result.output)
+                .unwrap_or(serde_json::Value::Null);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "output": output_json,
+                    "steps_executed": result.steps_executed,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => map_flow_error(e),
+    }
+}
+
+async fn run_flow_async(
+    state: &GateState,
+    flow_name: &str,
+    body: Bytes,
+) -> axum::response::Response {
+    let task_id = unique_request_id();
+    let input_str = String::from_utf8_lossy(&body).to_string();
+
+    if let Err(e) = state.store.insert_task(&task_id, &format!("flow:{}", flow_name), Some(&input_str)) {
+        return flow_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+        );
+    }
+    let _ = state.store.update_task_status(&task_id, TaskStatus::Running, None, None);
+
+    let engine = Arc::clone(&state.flow_engine);
+    let store = Arc::clone(&state.store);
+    let fname = flow_name.to_string();
+    let tid = task_id.clone();
+
+    tokio::spawn(async move {
+        let eng = engine.read().await;
+        match eng.execute(&fname, body).await {
+            Ok(result) => {
+                let output_str = String::from_utf8_lossy(&result.output).to_string();
+                let val = serde_json::from_str::<serde_json::Value>(&output_str)
+                    .unwrap_or(serde_json::Value::Null);
+                let combined = serde_json::json!({
+                    "output": val,
+                    "steps_executed": result.steps_executed,
+                });
+                let _ = store.update_task_status(
+                    &tid,
+                    TaskStatus::Completed,
+                    Some(&combined.to_string()),
+                    None,
+                );
+            }
+            Err(e) => {
+                let _ = store.update_task_status(
+                    &tid,
+                    TaskStatus::Failed,
+                    None,
+                    Some(&e.to_string()),
+                );
+            }
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "task_id": task_id,
+            "flow": flow_name,
+            "status": "running",
+        })),
+    )
+        .into_response()
+}
+
+async fn run_flow_stream(
+    state: &GateState,
+    flow_name: &str,
+    body: Bytes,
+) -> axum::response::Response {
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
+
+    let engine = Arc::clone(&state.flow_engine);
+    let fname = flow_name.to_string();
+
+    tokio::spawn(async move {
+        let eng = engine.read().await;
+        match eng.execute(&fname, body).await {
+            Ok(result) => {
+                let output_json = serde_json::from_slice::<serde_json::Value>(&result.output)
+                    .unwrap_or(serde_json::Value::Null);
+                let msg = serde_json::json!({
+                    "output": output_json,
+                    "steps_executed": result.steps_executed,
+                });
+                let _ = tx
+                    .send(Ok(Event::default().event("result").data(msg.to_string())))
+                    .await;
+                let _ = tx
+                    .send(Ok(Event::default().event("done").data("[DONE]")))
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Ok(Event::default().event("error").data(e.to_string())))
+                    .await;
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    Sse::new(stream).into_response()
+}
+
+fn map_flow_error(e: FlowError) -> axum::response::Response {
+    match &e {
+        FlowError::FlowNotFound(_) => {
+            flow_error_response(StatusCode::NOT_FOUND, &e.to_string())
+        }
+        FlowError::StepFailed { source, .. } => {
+            let status = match source {
+                RuneError::NotFound(_) => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            flow_error_response(status, &e.to_string())
+        }
+        FlowError::DagError(_) => {
+            flow_error_response(StatusCode::BAD_REQUEST, &e.to_string())
+        }
+        FlowError::NoTerminalStep => {
+            flow_error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1356,6 +1665,10 @@ mod tests {
             )
             .unwrap();
 
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+        ));
+
         GateState {
             relay,
             resolver,
@@ -1372,6 +1685,7 @@ mod tests {
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
+            flow_engine,
         }
     }
 
@@ -2265,6 +2579,9 @@ mod tests {
                 .unwrap();
         }
 
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+        ));
         let state = GateState {
             relay,
             resolver,
@@ -2281,6 +2598,7 @@ mod tests {
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
+            flow_engine,
         };
 
         for (path, expected_name) in [("/alpha", "alpha"), ("/beta", "beta"), ("/gamma", "gamma")] {
@@ -2599,6 +2917,9 @@ mod tests {
                 .unwrap();
         }
 
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+        ));
         let state = GateState {
             relay,
             resolver,
@@ -2615,6 +2936,7 @@ mod tests {
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
+            flow_engine,
         };
 
         let app = build_router(state, None);
@@ -3127,6 +3449,9 @@ mod tests {
             )
             .unwrap();
 
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+        ));
         let state = GateState {
             relay,
             resolver,
@@ -3143,6 +3468,7 @@ mod tests {
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
+            flow_engine,
         };
 
         // Requesting the percent-encoded path — the dynamic_rune_handler
@@ -3216,6 +3542,9 @@ mod tests {
             )
             .unwrap();
 
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+        ));
         let state = GateState {
             relay,
             resolver,
@@ -3232,6 +3561,7 @@ mod tests {
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
+            flow_engine,
         };
 
         // Debug route with a rune name that doesn't exist (contains unicode)
@@ -3292,6 +3622,9 @@ mod tests {
             )
             .unwrap();
 
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+        ));
         let state = GateState {
             relay,
             resolver,
@@ -3308,6 +3641,7 @@ mod tests {
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
+            flow_engine,
         };
 
         // Percent-encoded request for "/符文"
@@ -5099,6 +5433,9 @@ mod tests {
             )
             .unwrap();
 
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
+        ));
         GateState {
             relay,
             resolver,
@@ -5115,6 +5452,7 @@ mod tests {
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
+            flow_engine,
         }
     }
 
@@ -5462,7 +5800,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_valid() {
         let app = test_router();
         let response = app
@@ -5488,7 +5825,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_invalid_json() {
         let app = test_router();
         let response = app
@@ -5512,7 +5848,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_dag_cycle() {
         let app = test_router();
         let body = serde_json::json!({
@@ -5543,7 +5878,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_duplicate_step_names() {
         let app = test_router();
         let body = serde_json::json!({
@@ -5574,7 +5908,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_multi_upstream_no_mapping() {
         let app = test_router();
         let body = serde_json::json!({
@@ -5606,7 +5939,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_duplicate_name_conflict() {
         let state = test_state();
 
@@ -5652,7 +5984,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_list_with_entries() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
@@ -5680,7 +6011,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_list_empty() {
         let app = test_router();
         let response = app
@@ -5705,7 +6035,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_get_existing() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
@@ -5733,7 +6062,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_get_nonexistent() {
         let app = test_router();
         let response = app
@@ -5758,7 +6086,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_delete_existing() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
@@ -5778,7 +6105,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_delete_nonexistent() {
         let app = test_router();
         let response = app
@@ -5805,7 +6131,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_then_list_contains_it() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
@@ -5834,7 +6159,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_delete_then_list_excludes_it() {
         let state = test_state();
 
@@ -5895,7 +6219,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_run_sync_simple() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
@@ -5922,7 +6245,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_run_nonexistent_flow() {
         let app = test_router();
         let response = app
@@ -5946,7 +6268,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_run_step_failure() {
         let state = test_state();
 
@@ -6023,7 +6344,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_run_async_returns_task_id() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
@@ -6050,7 +6370,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_async_task_query() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
@@ -6099,7 +6418,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_run_stream_returns_sse() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
@@ -6135,7 +6453,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_api_requires_auth() {
         let state = auth_state();
         let app = build_router(state, None);
@@ -6157,7 +6474,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_api_health_still_exempt() {
         let state = auth_state();
         let app = build_router(state, None);
@@ -6175,7 +6491,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_empty_body() {
         let app = test_router();
         let response = app
@@ -6195,7 +6510,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_large_50_steps() {
         let app = test_router();
 
@@ -6234,7 +6548,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_name_with_special_characters() {
         let state = test_state();
         let app = build_router(state.clone(), None);
@@ -6283,7 +6596,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_multi_upstream_with_mapping_valid() {
         let app = test_router();
         let response = app
@@ -6320,7 +6632,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_run_rune_unavailable_503() {
         let state = test_state();
 
@@ -6371,7 +6682,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_list_entry_structure() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
@@ -6400,7 +6710,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_list_requires_auth() {
         let state = auth_state();
         let app = build_router(state, None);
@@ -6418,7 +6727,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_run_requires_auth() {
         let state = auth_state();
         let app = build_router(state, None);
@@ -6443,7 +6751,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_self_referencing_step() {
         let app = test_router();
         let body = serde_json::json!({
@@ -6478,7 +6785,6 @@ mod tests {
 
     // P1-4: DELETE /flows/:name auth protection (no key → 401)
     #[tokio::test]
-    #[ignore]
     async fn test_flow_delete_requires_auth() {
         let state = auth_state();
         let app = build_router(state, None);
@@ -6499,7 +6805,6 @@ mod tests {
 
     // P1-4: GET /flows/:name auth protection (no key → 401)
     #[tokio::test]
-    #[ignore]
     async fn test_flow_get_requires_auth() {
         let state = auth_state();
         let app = build_router(state, None);
@@ -6518,7 +6823,6 @@ mod tests {
 
     // P1-5: valid token can access flow CRUD
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_with_valid_token() {
         let state = auth_state();
         let key_result = state
@@ -6550,7 +6854,6 @@ mod tests {
 
     // P1-6: create → delete → re-create same name
     #[tokio::test]
-    #[ignore]
     async fn test_flow_recreate_after_delete() {
         let state = test_state();
 
@@ -6601,7 +6904,6 @@ mod tests {
 
     // P1-7: multiple flows coexist — register 3 flows, list count == 3
     #[tokio::test]
-    #[ignore]
     async fn test_flow_multiple_coexist() {
         let state = test_state();
 
@@ -6652,7 +6954,6 @@ mod tests {
 
     // P1-8: SSE event content validation — body includes "event:" or "data:"
     #[tokio::test]
-    #[ignore]
     async fn test_flow_run_stream_event_content() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
@@ -6683,7 +6984,6 @@ mod tests {
 
     // P1-9: async complete lifecycle — submit → poll until done → verify final status
     #[tokio::test]
-    #[ignore]
     async fn test_flow_async_full_lifecycle() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
@@ -6740,7 +7040,6 @@ mod tests {
 
     // P1-10: full E2E — create → run → verify output → delete → confirm 404
     #[tokio::test]
-    #[ignore]
     async fn test_flow_full_e2e_lifecycle() {
         let state = test_state();
 
@@ -6813,7 +7112,6 @@ mod tests {
 
     // P2-11: empty steps array
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_empty_steps() {
         let app = test_router();
         let body = serde_json::json!({
@@ -6842,7 +7140,6 @@ mod tests {
 
     // P2-12: empty flow name
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_empty_name() {
         let app = test_router();
         let body = serde_json::json!({
@@ -6871,7 +7168,6 @@ mod tests {
 
     // P2-13: depends_on references non-existent step → 400
     #[tokio::test]
-    #[ignore]
     async fn test_flow_create_depends_on_nonexistent_step() {
         let app = test_router();
         let body = serde_json::json!({
@@ -6902,7 +7198,6 @@ mod tests {
 
     // P2-14: invalid token (not just missing) is rejected
     #[tokio::test]
-    #[ignore]
     async fn test_flow_api_invalid_token_rejected() {
         let state = auth_state();
         let app = build_router(state, None);
@@ -6925,7 +7220,6 @@ mod tests {
 
     // P2-15: run with empty body
     #[tokio::test]
-    #[ignore]
     async fn test_flow_run_empty_body() {
         let state = test_state();
         let app = create_flow_helper(state.clone()).await;
