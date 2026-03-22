@@ -8,6 +8,7 @@ members = [
     "runtime/rune-server",
     "runtime/rune-store",
     "runtime/rune-schema",
+    "runtime/rune-cli",
 ]
 
 [workspace.dependencies]

@@ -1,3 +1,4 @@
 target/
 __pycache__/
 *.pyc
+sdks/typescript/node_modules/
