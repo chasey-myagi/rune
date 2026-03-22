@@ -6,6 +6,7 @@ members = [
     "runtime/rune-gate",
     "runtime/rune-flow",
     "runtime/rune-server",
+    "runtime/rune-store",
 ]
 
 [workspace.dependencies]
