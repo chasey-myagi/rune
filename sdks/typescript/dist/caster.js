@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as crypto from 'crypto';
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import { StreamSender } from './stream.js';
@@ -19,11 +20,11 @@ const DEFAULT_RECONNECT = {
 // Proto loading helpers
 // ---------------------------------------------------------------------------
 const PROTO_PATH = path.resolve(
-// __dirname points to src/ (dev) or dist/ (built) — go up to package root
-// then navigate to the proto file relative to the repo root
-// The SDK lives at: sdks/typescript/
-// The proto lives at: proto/rune/wire/v1/rune.proto
-path.dirname(new URL(import.meta.url).pathname), '../../../../proto/rune/wire/v1/rune.proto');
+// import.meta.url points to src/caster.ts (dev) or dist/caster.js (built)
+// Go 3 levels up to reach the repo root (rune/):
+//   src/ or dist/ -> sdks/typescript/ -> sdks/ -> rune/
+// Then navigate to proto/rune/wire/v1/rune.proto
+path.dirname(new URL(import.meta.url).pathname), '../../../proto/rune/wire/v1/rune.proto');
 function loadProto() {
     const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
         keepCase: true,
@@ -59,6 +60,7 @@ function loadProto() {
 export class Caster {
     runtime;
     key;
+    casterId;
     heartbeatIntervalMs;
     maxConcurrent;
     labels;
@@ -66,9 +68,11 @@ export class Caster {
     _runes = new Map();
     _stopped = false;
     _abortControllers = new Map();
+    _activeStream = null;
     constructor(options) {
         this.runtime = options.runtime ?? DEFAULT_RUNTIME;
         this.key = options.key;
+        this.casterId = options.casterId ?? crypto.randomUUID();
         this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS;
         this.maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
         this.labels = options.labels ?? {};
@@ -85,7 +89,9 @@ export class Caster {
         if (this._runes.has(config.name)) {
             throw new Error(`Rune "${config.name}" is already registered`);
         }
-        this._runes.set(config.name, { config, handler, isStream: false });
+        // Unary: (ctx, input) = 2 params, (ctx, input, files) = 3 params
+        const acceptsFiles = handler.length >= 3;
+        this._runes.set(config.name, { config, handler, isStream: false, acceptsFiles });
     }
     /**
      * Register a streaming Rune handler.
@@ -95,10 +101,13 @@ export class Caster {
         if (this._runes.has(config.name)) {
             throw new Error(`Rune "${config.name}" is already registered`);
         }
+        // Stream: (ctx, input, stream) = 3 params, (ctx, input, files, stream) = 4 params
+        const acceptsFiles = handler.length >= 4;
         this._runes.set(config.name, {
             config: { ...config, supportsStream: true },
             handler,
             isStream: true,
+            acceptsFiles,
         });
     }
     /**
@@ -120,10 +129,25 @@ export class Caster {
         return this._runes.get(name)?.isStream ?? false;
     }
     /**
+     * Check if a rune handler accepts file attachments.
+     */
+    runeAcceptsFiles(name) {
+        return this._runes.get(name)?.acceptsFiles ?? false;
+    }
+    /**
      * Stop the Caster. Current session will end and no reconnection will happen.
      */
     stop() {
         this._stopped = true;
+        if (this._activeStream) {
+            try {
+                this._activeStream.end();
+            }
+            catch {
+                // ignore errors on close
+            }
+            this._activeStream = null;
+        }
     }
     // -----------------------------------------------------------------------
     // Run — public entry point
@@ -163,11 +187,12 @@ export class Caster {
         const client = new RuneServiceClient(this.runtime, credentials);
         // Open bidirectional stream
         const stream = client.Session();
+        this._activeStream = stream;
         // Build and send CasterAttach
         const declarations = this._buildDeclarations();
         stream.write({
             attach: {
-                caster_id: this.key,
+                caster_id: this.casterId,
                 runes: declarations,
                 labels: this.labels,
                 max_concurrent: this.maxConcurrent,
@@ -309,12 +334,14 @@ export class Caster {
             if (ctx.signal.aborted) {
                 return;
             }
-            // Serialize output
-            const outputBuf = output instanceof Buffer
-                ? output
-                : typeof output === 'string'
-                    ? Buffer.from(output)
-                    : Buffer.from(JSON.stringify(output));
+            // Serialize output (handle null/undefined as empty JSON)
+            const outputBuf = output == null
+                ? Buffer.from('null')
+                : output instanceof Buffer
+                    ? output
+                    : typeof output === 'string'
+                        ? Buffer.from(output)
+                        : Buffer.from(JSON.stringify(output));
             stream.write({
                 result: {
                     request_id: req.request_id,

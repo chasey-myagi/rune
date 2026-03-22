@@ -1174,3 +1174,319 @@ async def test_e63_two_casters_same_rune(runtime):
     finally:
         await _stop_task(h1)
         await _stop_task(h2)
+
+
+# ---------------------------------------------------------------------------
+# 2.8 High Concurrency  (E-70 ~ E-72)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_e70_20_concurrent_requests(runtime):
+    """E-70: 20 concurrent requests to the same rune — all 200."""
+    c = Caster(RUNTIME_GRPC, caster_id="e2e-e70", max_concurrent=30)
+
+    @c.rune("e70_conc20")
+    async def handler(ctx, input):
+        data = json.loads(input)
+        data["ok"] = True
+        return json.dumps(data).encode()
+
+    handle = await _start_caster(c)
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            tasks = []
+            for i in range(20):
+                payload = json.dumps({"idx": i}).encode()
+                tasks.append(
+                    client.post(
+                        f"{RUNTIME_HTTP}/api/v1/runes/e70_conc20/run",
+                        content=payload,
+                    )
+                )
+            responses = await asyncio.gather(*tasks)
+
+        for resp in responses:
+            assert resp.status_code == 200
+            assert resp.json()["ok"] is True
+    finally:
+        await _stop_task(handle)
+
+
+@pytest.mark.asyncio
+async def test_e71_five_casters_each_one_rune(runtime):
+    """E-71: 5 different Casters each register 1 rune — listing contains all 5."""
+    handles = []
+    rune_names = [f"e71_rune_{i}" for i in range(5)]
+    try:
+        for i, rname in enumerate(rune_names):
+            c = Caster(RUNTIME_GRPC, caster_id=f"e2e-e71-{i}")
+
+            @c.rune(rname)
+            async def handler(ctx, input, _n=rname):
+                return input
+
+            h = await _start_caster(c)
+            handles.append(h)
+
+        r = httpx.get(f"{RUNTIME_HTTP}/api/v1/runes", timeout=10)
+        assert r.status_code == 200
+        names = [ru["name"] for ru in r.json()["runes"]]
+        for rname in rune_names:
+            assert rname in names, f"{rname} not found in rune listing"
+    finally:
+        for h in handles:
+            await _stop_task(h)
+
+
+@pytest.mark.asyncio
+async def test_e72_concurrent_register_deregister(runtime):
+    """E-72: Concurrent register + deregister — rune list eventually consistent."""
+    # Register 3 casters, then immediately stop 2, verify only 1 remains
+    c1 = Caster(RUNTIME_GRPC, caster_id="e2e-e72-stay")
+    c2 = Caster(RUNTIME_GRPC, caster_id="e2e-e72-go-a")
+    c3 = Caster(RUNTIME_GRPC, caster_id="e2e-e72-go-b")
+
+    @c1.rune("e72_stay")
+    async def h1(ctx, input):
+        return input
+
+    @c2.rune("e72_go_a")
+    async def h2(ctx, input):
+        return input
+
+    @c3.rune("e72_go_b")
+    async def h3(ctx, input):
+        return input
+
+    h1_handle = await _start_caster(c1)
+    h2_handle = await _start_caster(c2)
+    h3_handle = await _start_caster(c3)
+
+    try:
+        # All 3 should be registered
+        r = httpx.get(f"{RUNTIME_HTTP}/api/v1/runes", timeout=10)
+        names = [ru["name"] for ru in r.json()["runes"]]
+        assert "e72_stay" in names
+        assert "e72_go_a" in names
+        assert "e72_go_b" in names
+
+        # Stop c2 and c3
+        await _stop_task(h2_handle)
+        await _stop_task(h3_handle)
+        await asyncio.sleep(3)  # wait for server to detect disconnect
+
+        # Only c1 should remain
+        r = httpx.get(f"{RUNTIME_HTTP}/api/v1/runes", timeout=10)
+        names = [ru["name"] for ru in r.json()["runes"]]
+        assert "e72_stay" in names
+        assert "e72_go_a" not in names
+        assert "e72_go_b" not in names
+    finally:
+        await _stop_task(h1_handle)
+
+
+# ---------------------------------------------------------------------------
+# 2.9 Large Data  (E-73 ~ E-74)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_e73_large_json_input(runtime):
+    """E-73: Large JSON input (~500KB) — correct roundtrip."""
+    c = Caster(RUNTIME_GRPC, caster_id="e2e-e73")
+
+    @c.rune("e73_large")
+    async def handler(ctx, input):
+        return input
+
+    handle = await _start_caster(c)
+    try:
+        large_data = {"data": "A" * 500_000}
+        payload = json.dumps(large_data).encode()
+        r = httpx.post(
+            f"{RUNTIME_HTTP}/api/v1/runes/e73_large/run",
+            content=payload,
+            timeout=30,
+        )
+        assert r.status_code == 200
+        assert r.json() == large_data
+    finally:
+        await _stop_task(handle)
+
+
+@pytest.mark.asyncio
+async def test_e74_handler_returns_100kb(runtime):
+    """E-74: Handler returns 100KB response — correct."""
+    c = Caster(RUNTIME_GRPC, caster_id="e2e-e74")
+
+    @c.rune("e74_bigout")
+    async def handler(ctx, input):
+        result = {"payload": "B" * 100_000}
+        return json.dumps(result).encode()
+
+    handle = await _start_caster(c)
+    try:
+        r = httpx.post(
+            f"{RUNTIME_HTTP}/api/v1/runes/e74_bigout/run",
+            content=b"{}",
+            timeout=30,
+        )
+        assert r.status_code == 200
+        assert len(r.json()["payload"]) == 100_000
+    finally:
+        await _stop_task(handle)
+
+
+# ---------------------------------------------------------------------------
+# 2.10 Error Recovery  (E-75 ~ E-76)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_e75_handler_intermittent_failure(runtime):
+    """E-75: Handler fails 50% — failed requests get 500, successful get 200."""
+    c = Caster(RUNTIME_GRPC, caster_id="e2e-e75", max_concurrent=20)
+    call_count = 0
+
+    @c.rune("e75_flaky")
+    async def handler(ctx, input):
+        nonlocal call_count
+        call_count += 1
+        if call_count % 2 == 0:
+            raise ValueError("intentional failure on even calls")
+        return json.dumps({"ok": True}).encode()
+
+    handle = await _start_caster(c)
+    try:
+        successes = 0
+        failures = 0
+        for i in range(10):
+            r = httpx.post(
+                f"{RUNTIME_HTTP}/api/v1/runes/e75_flaky/run",
+                content=b"{}",
+                timeout=10,
+            )
+            if r.status_code == 200:
+                successes += 1
+            elif r.status_code == 500:
+                failures += 1
+
+        # At least some should succeed, some should fail
+        assert successes > 0, f"Expected some successes, got {successes}"
+        assert failures > 0, f"Expected some failures, got {failures}"
+    finally:
+        await _stop_task(handle)
+
+
+@pytest.mark.asyncio
+async def test_e76_handler_timeout(runtime):
+    """E-76: Handler sleeps too long — server returns timeout or error."""
+    c = Caster(RUNTIME_GRPC, caster_id="e2e-e76")
+
+    @c.rune("e76_slow")
+    async def handler(ctx, input):
+        await asyncio.sleep(60)  # way too long
+        return b"should not reach"
+
+    handle = await _start_caster(c)
+    try:
+        # Use short client timeout to not wait forever
+        try:
+            r = httpx.post(
+                f"{RUNTIME_HTTP}/api/v1/runes/e76_slow/run",
+                content=b"{}",
+                timeout=5,
+            )
+            # If server has its own timeout, expect error status
+            assert r.status_code >= 400
+        except httpx.ReadTimeout:
+            # Client timed out — expected behavior
+            pass
+    finally:
+        await _stop_task(handle)
+
+
+# ---------------------------------------------------------------------------
+# 2.11 Boundary  (E-77 ~ E-79)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_e77_unicode_rune_name(runtime):
+    """E-77: Rune name with unicode (Chinese) — can register and call."""
+    c = Caster(RUNTIME_GRPC, caster_id="e2e-e77")
+
+    @c.rune("e77_你好世界")
+    async def handler(ctx, input):
+        return json.dumps({"greeting": "你好"}).encode()
+
+    handle = await _start_caster(c)
+    try:
+        # Check listing
+        r = httpx.get(f"{RUNTIME_HTTP}/api/v1/runes", timeout=10)
+        names = [ru["name"] for ru in r.json()["runes"]]
+        assert "e77_你好世界" in names
+
+        # Call it
+        r = httpx.post(
+            f"{RUNTIME_HTTP}/api/v1/runes/e77_你好世界/run",
+            content=b"{}",
+            timeout=10,
+        )
+        assert r.status_code == 200
+        assert r.json()["greeting"] == "你好"
+    finally:
+        await _stop_task(handle)
+
+
+@pytest.mark.asyncio
+async def test_e78_empty_json_object_input(runtime):
+    """E-78: Empty JSON object {} as input — handler receives and processes normally."""
+    c = Caster(RUNTIME_GRPC, caster_id="e2e-e78")
+
+    @c.rune("e78_empty")
+    async def handler(ctx, input):
+        data = json.loads(input) if input else {}
+        data["received"] = True
+        return json.dumps(data).encode()
+
+    handle = await _start_caster(c)
+    try:
+        r = httpx.post(
+            f"{RUNTIME_HTTP}/api/v1/runes/e78_empty/run",
+            content=b"{}",
+            timeout=10,
+        )
+        assert r.status_code == 200
+        assert r.json()["received"] is True
+    finally:
+        await _stop_task(handle)
+
+
+@pytest.mark.asyncio
+async def test_e79_rapid_100_sequential_calls(runtime):
+    """E-79: 100 rapid sequential calls — all return correct results."""
+    c = Caster(RUNTIME_GRPC, caster_id="e2e-e79", max_concurrent=20)
+
+    @c.rune("e79_rapid")
+    async def handler(ctx, input):
+        data = json.loads(input)
+        data["echoed"] = True
+        return json.dumps(data).encode()
+
+    handle = await _start_caster(c)
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            for i in range(100):
+                payload = json.dumps({"seq": i}).encode()
+                r = await client.post(
+                    f"{RUNTIME_HTTP}/api/v1/runes/e79_rapid/run",
+                    content=payload,
+                )
+                assert r.status_code == 200, f"Request {i} failed with {r.status_code}"
+                body = r.json()
+                assert body["seq"] == i
+                assert body["echoed"] is True
+    finally:
+        await _stop_task(handle)

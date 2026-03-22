@@ -1,5 +1,5 @@
 import type { CasterOptions, RuneConfig, ReconnectOptions } from './types.js';
-import type { RuneHandler, StreamRuneHandler } from './handler.js';
+import type { RuneHandler, RuneHandlerWithFiles, StreamRuneHandler, StreamRuneHandlerWithFiles } from './handler.js';
 /**
  * Caster connects to a Rune Runtime and registers Rune handlers.
  *
@@ -17,6 +17,7 @@ import type { RuneHandler, StreamRuneHandler } from './handler.js';
 export declare class Caster {
     readonly runtime: string;
     readonly key: string;
+    readonly casterId: string;
     readonly heartbeatIntervalMs: number;
     readonly maxConcurrent: number;
     readonly labels: Record<string, string>;
@@ -24,17 +25,18 @@ export declare class Caster {
     private _runes;
     private _stopped;
     private _abortControllers;
+    private _activeStream;
     constructor(options: CasterOptions);
     /**
      * Register a unary Rune handler.
      * @throws Error if a Rune with the same name is already registered
      */
-    rune(config: RuneConfig, handler: RuneHandler): void;
+    rune(config: RuneConfig, handler: RuneHandler | RuneHandlerWithFiles): void;
     /**
      * Register a streaming Rune handler.
      * @throws Error if a Rune with the same name is already registered
      */
-    streamRune(config: RuneConfig, handler: StreamRuneHandler): void;
+    streamRune(config: RuneConfig, handler: StreamRuneHandler | StreamRuneHandlerWithFiles): void;
     /**
      * Returns the number of registered Runes.
      */
@@ -47,6 +49,10 @@ export declare class Caster {
      * Check if a rune is registered as a stream handler.
      */
     isStreamRune(name: string): boolean;
+    /**
+     * Check if a rune handler accepts file attachments.
+     */
+    runeAcceptsFiles(name: string): boolean;
     /**
      * Stop the Caster. Current session will end and no reconnection will happen.
      */

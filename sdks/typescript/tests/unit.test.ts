@@ -393,3 +393,193 @@ describe('1.5 FileAttachment Detection', () => {
     expect(caster.runeAcceptsFiles('stream-with-files')).toBe(true);
   });
 });
+
+// ===========================================================================
+// 1.6 Error Handling & Edge Cases (U-40 ~ U-49)
+// ===========================================================================
+describe('1.6 Error Handling & Edge Cases', () => {
+  it('U-40: empty string key is accepted (no crash)', () => {
+    // An empty key may be invalid for auth, but construction should not throw
+    const caster = new Caster({ key: '' });
+    expect(caster.key).toBe('');
+  });
+
+  it('U-41: empty string rune name throws on duplicate but registers once', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    // Empty name is technically valid at the SDK level
+    caster.rune({ name: '' }, async () => ({}));
+    expect(caster.runeCount).toBe(1);
+    expect(() => caster.rune({ name: '' }, async () => ({}))).toThrow();
+  });
+
+  it('U-42: very long rune name (500 chars)', () => {
+    const longName = 'r'.repeat(500);
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: longName }, async (_ctx, input) => input);
+    expect(caster.getRuneConfig(longName)).toBeDefined();
+    expect(caster.getRuneConfig(longName)?.name).toBe(longName);
+  });
+
+  it('U-43: handler returns string', async () => {
+    const handler: RuneHandler = async (_ctx, _input) => 'hello world';
+    const ctx = makeCtx('str-handler');
+    const result = await handler(ctx, {});
+    expect(result).toBe('hello world');
+  });
+
+  it('U-44: handler returns Buffer', async () => {
+    const handler: RuneHandler = async (_ctx, _input) => Buffer.from('raw');
+    const ctx = makeCtx('buf-handler');
+    const result = await handler(ctx, {});
+    expect(Buffer.isBuffer(result)).toBe(true);
+    expect((result as Buffer).toString()).toBe('raw');
+  });
+
+  it('U-45: handler returns object', async () => {
+    const handler: RuneHandler = async (_ctx, _input) => ({ key: 'value', nested: { a: 1 } });
+    const ctx = makeCtx('obj-handler');
+    const result = await handler(ctx, {});
+    expect(result).toEqual({ key: 'value', nested: { a: 1 } });
+  });
+
+  it('U-46: handler returns null', async () => {
+    const handler: RuneHandler = async (_ctx, _input) => null;
+    const ctx = makeCtx('null-handler');
+    const result = await handler(ctx, {});
+    expect(result).toBeNull();
+  });
+
+  it('U-47: handler returns undefined', async () => {
+    const handler: RuneHandler = async (_ctx, _input) => undefined;
+    const ctx = makeCtx('undef-handler');
+    const result = await handler(ctx, {});
+    expect(result).toBeUndefined();
+  });
+
+  it('U-48: multiple stop() calls do not crash', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'a' }, async () => ({}));
+    // stop() before run() is fine
+    caster.stop();
+    caster.stop();
+    caster.stop();
+    // No error thrown
+    expect(true).toBe(true);
+  });
+
+  it('U-49: handler throws error', async () => {
+    const handler: RuneHandler = async () => {
+      throw new Error('intentional failure');
+    };
+    const ctx = makeCtx('error-handler');
+    await expect(handler(ctx, {})).rejects.toThrow('intentional failure');
+  });
+});
+
+// ===========================================================================
+// 1.7 Connection Parameter Combinations (U-50 ~ U-55)
+// ===========================================================================
+describe('1.7 Connection Parameter Combinations', () => {
+  it('U-50: all options set at once', () => {
+    const caster = new Caster({
+      key: 'rk_full',
+      runtime: 'myhost:9090',
+      casterId: 'custom-id',
+      heartbeatIntervalMs: 3000,
+      maxConcurrent: 100,
+      labels: { env: 'test', region: 'eu' },
+      reconnect: {
+        enabled: false,
+        initialDelayMs: 200,
+        maxDelayMs: 10000,
+        backoffMultiplier: 3,
+      },
+    });
+    expect(caster.runtime).toBe('myhost:9090');
+    expect(caster.casterId).toBe('custom-id');
+    expect(caster.heartbeatIntervalMs).toBe(3000);
+    expect(caster.maxConcurrent).toBe(100);
+    expect(caster.labels).toEqual({ env: 'test', region: 'eu' });
+    expect(caster.reconnect.enabled).toBe(false);
+    expect(caster.reconnect.initialDelayMs).toBe(200);
+    expect(caster.reconnect.maxDelayMs).toBe(10000);
+    expect(caster.reconnect.backoffMultiplier).toBe(3);
+  });
+
+  it('U-51: default reconnect values are filled', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    expect(caster.reconnect.enabled).toBe(true);
+    expect(caster.reconnect.initialDelayMs).toBe(1000);
+    expect(caster.reconnect.maxDelayMs).toBe(30000);
+    expect(caster.reconnect.backoffMultiplier).toBe(2);
+  });
+
+  it('U-52: partial reconnect override keeps defaults for rest', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      reconnect: { maxDelayMs: 5000 },
+    });
+    expect(caster.reconnect.enabled).toBe(true); // default
+    expect(caster.reconnect.initialDelayMs).toBe(1000); // default
+    expect(caster.reconnect.maxDelayMs).toBe(5000); // overridden
+    expect(caster.reconnect.backoffMultiplier).toBe(2); // default
+  });
+
+  it('U-53: empty labels object', () => {
+    const caster = new Caster({ key: 'rk_test', labels: {} });
+    expect(caster.labels).toEqual({});
+  });
+
+  it('U-54: getRuneConfig for non-existent rune returns undefined', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    expect(caster.getRuneConfig('nonexistent')).toBeUndefined();
+  });
+
+  it('U-55: isStreamRune for non-existent rune returns false', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    expect(caster.isStreamRune('nonexistent')).toBe(false);
+  });
+});
+
+// ===========================================================================
+// 1.8 StreamSender Edge Cases (U-56 ~ U-60)
+// ===========================================================================
+describe('1.8 StreamSender Edge Cases', () => {
+  it('U-56: emit empty string', async () => {
+    const { sender, chunks } = makeSender();
+    await sender.emit('');
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].toString()).toBe('');
+  });
+
+  it('U-57: emit empty object', async () => {
+    const { sender, chunks } = makeSender();
+    await sender.emit({});
+    expect(chunks).toHaveLength(1);
+    expect(JSON.parse(chunks[0].toString())).toEqual({});
+  });
+
+  it('U-58: emit large number of chunks (100)', async () => {
+    const { sender, chunks } = makeSender();
+    for (let i = 0; i < 100; i++) {
+      await sender.emit(`chunk-${i}`);
+    }
+    expect(chunks).toHaveLength(100);
+    expect(sender.eventCount).toBe(100);
+  });
+
+  it('U-59: emit array', async () => {
+    const { sender, chunks } = makeSender();
+    await sender.emit([1, 2, 3]);
+    expect(chunks).toHaveLength(1);
+    expect(JSON.parse(chunks[0].toString())).toEqual([1, 2, 3]);
+  });
+
+  it('U-60: emit nested object', async () => {
+    const { sender, chunks } = makeSender();
+    const nested = { a: { b: { c: { d: 'deep' } } } };
+    await sender.emit(nested);
+    expect(chunks).toHaveLength(1);
+    expect(JSON.parse(chunks[0].toString())).toEqual(nested);
+  });
+});

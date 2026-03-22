@@ -59,6 +59,8 @@ export interface CasterOptions {
     runtime?: string;
     /** API key for authentication */
     key: string;
+    /** Unique identifier for this Caster instance. Auto-generated if not provided. */
+    casterId?: string;
     /** Heartbeat interval in milliseconds. Default: 10000 */
     heartbeatIntervalMs?: number;
     /** Maximum concurrent request handling. Default: 10 */

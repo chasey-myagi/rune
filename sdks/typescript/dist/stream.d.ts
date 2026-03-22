@@ -37,7 +37,7 @@ export declare class StreamSender {
     emit(data: unknown): Promise<void>;
     /**
      * End the stream. No more data can be emitted after this.
-     * @throws Error if the stream has already ended
+     * Idempotent — calling end() multiple times is safe.
      */
     end(): Promise<void>;
 }

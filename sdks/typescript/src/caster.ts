@@ -33,12 +33,12 @@ interface RegisteredRune {
 // ---------------------------------------------------------------------------
 
 const PROTO_PATH = path.resolve(
-  // __dirname points to src/ (dev) or dist/ (built) — go up to package root
-  // then navigate to the proto file relative to the repo root
-  // The SDK lives at: sdks/typescript/
-  // The proto lives at: proto/rune/wire/v1/rune.proto
+  // import.meta.url points to src/caster.ts (dev) or dist/caster.js (built)
+  // Go 3 levels up to reach the repo root (rune/):
+  //   src/ or dist/ -> sdks/typescript/ -> sdks/ -> rune/
+  // Then navigate to proto/rune/wire/v1/rune.proto
   path.dirname(new URL(import.meta.url).pathname),
-  '../../../../proto/rune/wire/v1/rune.proto',
+  '../../../proto/rune/wire/v1/rune.proto',
 );
 
 function loadProto(): {
@@ -90,6 +90,7 @@ export class Caster {
   private _runes: Map<string, RegisteredRune> = new Map();
   private _stopped = false;
   private _abortControllers: Map<string, AbortController> = new Map();
+  private _activeStream: grpc.ClientDuplexStream<any, any> | null = null;
 
   constructor(options: CasterOptions) {
     this.runtime = options.runtime ?? DEFAULT_RUNTIME;
@@ -168,6 +169,14 @@ export class Caster {
    */
   stop(): void {
     this._stopped = true;
+    if (this._activeStream) {
+      try {
+        this._activeStream.end();
+      } catch {
+        // ignore errors on close
+      }
+      this._activeStream = null;
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -213,6 +222,7 @@ export class Caster {
 
     // Open bidirectional stream
     const stream = (client as any).Session() as grpc.ClientDuplexStream<any, any>;
+    this._activeStream = stream;
 
     // Build and send CasterAttach
     const declarations = this._buildDeclarations();
@@ -381,13 +391,15 @@ export class Caster {
         return;
       }
 
-      // Serialize output
+      // Serialize output (handle null/undefined as empty JSON)
       const outputBuf =
-        output instanceof Buffer
-          ? output
-          : typeof output === 'string'
-            ? Buffer.from(output)
-            : Buffer.from(JSON.stringify(output));
+        output == null
+          ? Buffer.from('null')
+          : output instanceof Buffer
+            ? output
+            : typeof output === 'string'
+              ? Buffer.from(output)
+              : Buffer.from(JSON.stringify(output));
 
       stream.write({
         result: {

@@ -455,3 +455,263 @@ def test_u37_stream_handler_with_files():
         pass
 
     assert c._runes["stream_with_files"].accepts_files is True
+
+
+# ============================================================
+# 1.6 Error & Edge Cases  (U-38 ~ U-55)
+# ============================================================
+
+
+def test_u38_caster_empty_string_addr():
+    """U-38: Caster with empty string addr — does not crash."""
+    c = Caster("")
+    assert c._addr == ""
+
+
+def test_u39_caster_none_caster_id():
+    """U-39: Caster with None-like parameters — handles gracefully."""
+    # caster_id defaults to "python-caster" when not provided
+    c = Caster("localhost:50070")
+    assert c._caster_id == "python-caster"
+
+
+def test_u40_rune_config_empty_name():
+    """U-40: RuneConfig with empty string name — does not crash."""
+    cfg = RuneConfig(name="")
+    assert cfg.name == ""
+    assert cfg.version == "0.0.0"
+
+
+def test_u41_rune_config_long_name():
+    """U-41: RuneConfig with super-long name (1000 chars) — stores correctly."""
+    long_name = "a" * 1000
+    cfg = RuneConfig(name=long_name)
+    assert cfg.name == long_name
+    assert len(cfg.name) == 1000
+
+
+def test_u42_rune_config_invalid_json_schema():
+    """U-42: RuneConfig with arbitrary dict as input_schema — no validation at SDK level."""
+    weird_schema = {"not": "a real schema", "random_key": [1, 2, 3]}
+    cfg = RuneConfig(name="x", input_schema=weird_schema)
+    assert cfg.input_schema == weird_schema
+
+
+@pytest.mark.asyncio
+async def test_u43_handler_returns_none():
+    """U-43: Handler returns None — handler call succeeds (SDK doesn't validate)."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("returns_none")
+    async def handler(ctx, input):
+        return None
+
+    ctx = RuneContext(rune_name="returns_none", request_id="r-1")
+    result = await c._runes["returns_none"].handler(ctx, b"hello")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_u44_handler_returns_string():
+    """U-44: Handler returns a string instead of bytes — SDK doesn't enforce type."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("returns_str")
+    async def handler(ctx, input):
+        return "a string, not bytes"
+
+    ctx = RuneContext(rune_name="returns_str", request_id="r-1")
+    result = await c._runes["returns_str"].handler(ctx, b"")
+    assert result == "a string, not bytes"
+
+
+@pytest.mark.asyncio
+async def test_u45_handler_returns_int():
+    """U-45: Handler returns int — SDK doesn't enforce return type."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("returns_int")
+    async def handler(ctx, input):
+        return 42
+
+    ctx = RuneContext(rune_name="returns_int", request_id="r-1")
+    result = await c._runes["returns_int"].handler(ctx, b"")
+    assert result == 42
+
+
+@pytest.mark.asyncio
+async def test_u46_handler_returns_dict():
+    """U-46: Handler returns dict — SDK doesn't enforce return type."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("returns_dict")
+    async def handler(ctx, input):
+        return {"key": "value"}
+
+    ctx = RuneContext(rune_name="returns_dict", request_id="r-1")
+    result = await c._runes["returns_dict"].handler(ctx, b"")
+    assert result == {"key": "value"}
+
+
+@pytest.mark.asyncio
+async def test_u47_stream_emit_empty_bytes():
+    """U-47: StreamSender emit empty bytes — succeeds."""
+    sent = []
+
+    async def mock_send(data: bytes) -> None:
+        sent.append(data)
+
+    s = StreamSender(mock_send)
+    await s.emit(b"")
+    assert sent == [b""]
+
+
+@pytest.mark.asyncio
+async def test_u48_stream_emit_large_data():
+    """U-48: StreamSender emit 1MB data — succeeds."""
+    sent = []
+
+    async def mock_send(data: bytes) -> None:
+        sent.append(data)
+
+    s = StreamSender(mock_send)
+    big = b"x" * (1024 * 1024)
+    await s.emit(big)
+    assert len(sent) == 1
+    assert len(sent[0]) == 1024 * 1024
+
+
+def test_u49_file_attachment_empty_data():
+    """U-49: FileAttachment with empty bytes data — no crash."""
+    att = FileAttachment(filename="empty.bin", data=b"", mime_type="application/octet-stream")
+    assert att.data == b""
+    assert len(att.data) == 0
+
+
+def test_u50_file_attachment_path_separator_in_filename():
+    """U-50: FileAttachment filename with path separator — stored as-is."""
+    att = FileAttachment(
+        filename="../../etc/passwd",
+        data=b"danger",
+        mime_type="text/plain",
+    )
+    assert att.filename == "../../etc/passwd"
+
+
+@pytest.mark.asyncio
+async def test_u51_registered_handler_direct_call():
+    """U-51: Access handler through _runes registry and call directly."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("direct")
+    async def handler(ctx, input):
+        return b"direct-" + input
+
+    reg = c._runes["direct"]
+    assert reg.config.name == "direct"
+    assert reg.is_stream is False
+
+    ctx = RuneContext(rune_name="direct", request_id="r-1")
+    result = await reg.handler(ctx, b"call")
+    assert result == b"direct-call"
+
+
+@pytest.mark.asyncio
+async def test_u52_stream_handler_no_emit():
+    """U-52: Stream handler that doesn't call emit — ends cleanly."""
+    c = Caster("localhost:50070", caster_id="test")
+    emitted = []
+
+    @c.stream_rune("no_emit")
+    async def handler(ctx, input, stream):
+        # Intentionally not calling emit or end
+        pass
+
+    async def mock_send(data: bytes) -> None:
+        emitted.append(data)
+
+    ctx = RuneContext(rune_name="no_emit", request_id="r-1")
+    sender = StreamSender(mock_send)
+    await c._runes["no_emit"].handler(ctx, b"", sender)
+
+    assert emitted == []
+
+
+# ============================================================
+# 1.7 Handler Signature Backward Compatibility  (U-53 ~ U-56)
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_u53_old_unary_signature_ctx_input():
+    """U-53: Old unary handler (ctx, input) still works and accepts_files=False."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("old_unary")
+    async def handler(ctx, input):
+        return input.upper() if isinstance(input, bytes) else input
+
+    assert c._runes["old_unary"].accepts_files is False
+    ctx = RuneContext(rune_name="old_unary", request_id="r-1")
+    result = await c._runes["old_unary"].handler(ctx, b"abc")
+    assert result == b"ABC"
+
+
+@pytest.mark.asyncio
+async def test_u54_old_stream_signature_ctx_input_stream():
+    """U-54: Old stream handler (ctx, input, stream) still works and accepts_files=False."""
+    c = Caster("localhost:50070", caster_id="test")
+    emitted = []
+
+    @c.stream_rune("old_stream")
+    async def handler(ctx, input, stream):
+        await stream.emit(b"ok")
+
+    assert c._runes["old_stream"].accepts_files is False
+
+    async def mock_send(data: bytes) -> None:
+        emitted.append(data)
+
+    ctx = RuneContext(rune_name="old_stream", request_id="r-1")
+    sender = StreamSender(mock_send)
+    await c._runes["old_stream"].handler(ctx, b"", sender)
+    assert emitted == [b"ok"]
+
+
+@pytest.mark.asyncio
+async def test_u55_new_unary_signature_ctx_input_files():
+    """U-55: New unary handler (ctx, input, files) works and accepts_files=True."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("new_unary")
+    async def handler(ctx, input, files):
+        return json.dumps({"file_count": len(files)}).encode()
+
+    assert c._runes["new_unary"].accepts_files is True
+    ctx = RuneContext(rune_name="new_unary", request_id="r-1")
+    att = FileAttachment(filename="test.txt", data=b"hi", mime_type="text/plain")
+    result = await c._runes["new_unary"].handler(ctx, b"", [att])
+    parsed = json.loads(result)
+    assert parsed["file_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_u56_new_stream_signature_ctx_input_files_stream():
+    """U-56: New stream handler (ctx, input, files, stream) works and accepts_files=True."""
+    c = Caster("localhost:50070", caster_id="test")
+    emitted = []
+
+    @c.stream_rune("new_stream")
+    async def handler(ctx, input, files, stream):
+        await stream.emit(f"got {len(files)} files".encode())
+
+    assert c._runes["new_stream"].accepts_files is True
+
+    async def mock_send(data: bytes) -> None:
+        emitted.append(data)
+
+    ctx = RuneContext(rune_name="new_stream", request_id="r-1")
+    sender = StreamSender(mock_send)
+    att = FileAttachment(filename="a.txt", data=b"aaa", mime_type="text/plain")
+    await c._runes["new_stream"].handler(ctx, b"", [att], sender)
+    assert emitted == [b"got 1 files"]
