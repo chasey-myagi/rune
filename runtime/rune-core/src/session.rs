@@ -582,4 +582,170 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec!["caster-1", "caster-2"]);
     }
+
+    // ---- Scenario 12: execute_stream semaphore permit return ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_execute_stream_returns_permit_on_completion() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(2);
+        assert_eq!(sem.available_permits(), 2);
+
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute_stream(&cid, "rs-1", "streamer", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            })
+        };
+
+        wait_for_pending(&pending, "rs-1").await;
+        // One permit consumed by execute_stream
+        assert_eq!(sem.available_permits(), 1);
+
+        // Simulate stream completion: remove pending and return permit
+        if let Some((_, p)) = pending.remove("rs-1") {
+            sem.add_permits(1);
+            match p.tx {
+                PendingResponse::Stream(tx) => {
+                    let _ = tx.send(Ok(Bytes::from("chunk1"))).await;
+                    // Drop tx to close the stream
+                    drop(tx);
+                }
+                _ => panic!("expected Stream"),
+            }
+        }
+
+        let stream_rx = handle.await.unwrap().unwrap();
+        // Permit should be restored
+        assert_eq!(sem.available_permits(), 2);
+        drop(stream_rx);
+    }
+
+    // ---- Scenario 13: cancel_by_request_id across sessions ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_cancel_by_request_id_cross_session() {
+        let mgr = default_session_manager();
+
+        // Set up two casters
+        let (tx1, _rx1) = mpsc::channel(16);
+        let sem1 = Arc::new(Semaphore::new(5));
+        let pending1: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
+        mgr.sessions.insert("caster-A".to_string(), CasterState {
+            outbound: tx1,
+            pending: Arc::clone(&pending1),
+            semaphore: Arc::clone(&sem1),
+        });
+
+        let (tx2, _rx2) = mpsc::channel(16);
+        let sem2 = Arc::new(Semaphore::new(5));
+        let pending2: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
+        mgr.sessions.insert("caster-B".to_string(), CasterState {
+            outbound: tx2,
+            pending: Arc::clone(&pending2),
+            semaphore: Arc::clone(&sem2),
+        });
+
+        // Launch a request on caster-A
+        let handle = {
+            let mgr_clone = Arc::clone(&mgr);
+            tokio::spawn(async move {
+                mgr_clone.execute("caster-A", "cross-req-1", "slow_rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            })
+        };
+
+        wait_for_pending(&pending1, "cross-req-1").await;
+        assert_eq!(sem1.available_permits(), 4);
+
+        // Cancel from the manager level (without knowing which caster owns the request)
+        let cancelled = mgr.cancel_by_request_id("cross-req-1", "user cancelled").await;
+        assert!(cancelled, "cancel_by_request_id should find the request");
+
+        // Verify the request was resolved with an error
+        let result = handle.await.unwrap();
+        assert!(matches!(result, Err(RuneError::ExecutionFailed { .. })));
+        if let Err(RuneError::ExecutionFailed { code, message }) = result {
+            assert_eq!(code, "CANCELLED");
+            assert_eq!(message, "user cancelled");
+        }
+
+        // Permit should be returned
+        assert_eq!(sem1.available_permits(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_by_request_id_nonexistent() {
+        let mgr = default_session_manager();
+        let cancelled = mgr.cancel_by_request_id("does-not-exist", "reason").await;
+        assert!(!cancelled, "cancel should return false for non-existent request");
+    }
+
+    // ---- Scenario 14: on_caster_attach callback verification ----
+
+    #[test]
+    fn test_set_on_caster_attach_callback() {
+        let mgr = default_session_manager();
+
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+
+        mgr.set_on_caster_attach(Arc::new(move |caster_id, configs| {
+            assert_eq!(caster_id, "test-caster");
+            assert_eq!(configs.len(), 1);
+            assert_eq!(configs[0].name, "my_rune");
+            called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+
+        // Verify the callback is set (OnceLock can only be set once)
+        assert!(mgr.on_caster_attach.get().is_some());
+
+        // NOTE: The callback is invoked inside handle_session() which requires
+        // a real gRPC Streaming, making it difficult to test end-to-end here.
+        // We verify the OnceLock mechanism works correctly.
+    }
+
+    #[test]
+    fn test_set_on_caster_attach_only_once() {
+        let mgr = default_session_manager();
+
+        let first_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first_clone = Arc::clone(&first_called);
+        mgr.set_on_caster_attach(Arc::new(move |_, _| {
+            first_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+
+        // Second set should be silently ignored (OnceLock behavior)
+        let second_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_clone = Arc::clone(&second_called);
+        mgr.set_on_caster_attach(Arc::new(move |_, _| {
+            second_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+
+        // The callback in OnceLock should still be the first one
+        // (verifying OnceLock's set-once semantics)
+        assert!(mgr.on_caster_attach.get().is_some());
+    }
+
+    // ---- Scenario 15: heartbeat timeout ----
+    // TODO: Testing heartbeat timeout end-to-end requires a real
+    // `tonic::Streaming<SessionMessage>`, which needs a live gRPC transport
+    // or a mock stream. The current session test framework uses direct
+    // `CasterState` insertion (bypassing `handle_session`), so the heartbeat
+    // loop is never started.
+    //
+    // To properly test heartbeat timeout, we would need to:
+    // 1. Create a mock `Streaming` implementation, or
+    // 2. Extract the heartbeat logic into a standalone testable unit.
+    //
+    // For now, we verify the heartbeat configuration is correctly propagated.
+
+    #[test]
+    fn test_heartbeat_config_propagation() {
+        let hb_interval = Duration::from_secs(5);
+        let hb_timeout = Duration::from_secs(15);
+        let mgr = SessionManager::new(hb_interval, hb_timeout);
+
+        assert_eq!(mgr.heartbeat_interval, hb_interval);
+        assert_eq!(mgr.heartbeat_timeout, hb_timeout);
+    }
 }

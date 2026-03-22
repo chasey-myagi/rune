@@ -36,3 +36,26 @@ async fn test_noop_verifier_very_long_key() {
     assert!(verifier.verify_gate_key(&long_key).await);
     assert!(verifier.verify_caster_key(&long_key).await);
 }
+
+// ---- Scenario 6: Bearer prefix variant ----
+// The KeyVerifier trait receives the raw key string, not the full
+// "Authorization: Bearer <token>" header.  Stripping the "Bearer " prefix
+// is the responsibility of the HTTP middleware layer (rune-gate), not
+// rune-core's KeyVerifier.  Therefore we only test that NoopVerifier
+// accepts keys that happen to contain the "Bearer " prefix as-is.
+//
+// A proper "Bearer prefix stripping" test belongs in the rune-gate crate
+// where the HTTP middleware lives.
+// TODO: add Bearer-prefix-stripping test to rune-gate's middleware tests.
+
+#[tokio::test]
+async fn test_noop_verifier_bearer_prefix_variants() {
+    let verifier = NoopVerifier;
+
+    // Keys with Bearer-style prefixes are just opaque strings to KeyVerifier
+    assert!(verifier.verify_gate_key("Bearer my-token-123").await);
+    assert!(verifier.verify_gate_key("bearer my-token-123").await);
+    assert!(verifier.verify_gate_key("BEARER my-token-123").await);
+    assert!(verifier.verify_gate_key("Bearer").await);
+    assert!(verifier.verify_gate_key("Bearer ").await);
+}

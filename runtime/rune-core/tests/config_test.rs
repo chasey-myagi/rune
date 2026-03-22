@@ -296,3 +296,182 @@ key = "value"
     let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
     assert_eq!(config.server.grpc_port, 9090);
 }
+
+// ---- Scenario 1: env override takes priority over TOML file ----
+
+#[test]
+fn test_env_overrides_toml_value() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    // TOML sets grpc_port=9090, env overrides to 11111
+    let toml_content = r#"
+[server]
+grpc_port = 9090
+
+[auth]
+enabled = true
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    std::env::set_var("RUNE_SERVER__GRPC_PORT", "11111");
+    std::env::set_var("RUNE_AUTH__ENABLED", "false");
+
+    let mut config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    // Before env override: TOML values
+    assert_eq!(config.server.grpc_port, 9090);
+    assert!(config.auth.enabled);
+
+    config.apply_env_overrides();
+    // After env override: env wins
+    assert_eq!(config.server.grpc_port, 11111);
+    assert!(!config.auth.enabled);
+
+    std::env::remove_var("RUNE_SERVER__GRPC_PORT");
+    std::env::remove_var("RUNE_AUTH__ENABLED");
+}
+
+// ---- Scenario 2: port boundary values ----
+
+#[test]
+fn test_port_boundary_zero() {
+    let toml_content = r#"
+[server]
+grpc_port = 0
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(config.server.grpc_port, 0);
+    // SocketAddr should also accept port 0 (OS assigns ephemeral port)
+    assert_eq!(config.grpc_addr().port(), 0);
+}
+
+#[test]
+fn test_port_boundary_max_valid() {
+    let toml_content = r#"
+[server]
+grpc_port = 65535
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(config.server.grpc_port, 65535);
+    assert_eq!(config.grpc_addr().port(), 65535);
+}
+
+#[test]
+fn test_port_boundary_overflow_rejected() {
+    // 65536 exceeds u16 range — TOML deserialization should fail
+    let toml_content = r#"
+[server]
+grpc_port = 65536
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let result = AppConfig::from_file(path.to_str().unwrap());
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("grpc_port"),
+        "error should mention the offending field, got: {}",
+        err_msg
+    );
+}
+
+// ---- Scenario 3: invalid IP env var is silently ignored ----
+
+#[test]
+fn test_invalid_ip_env_var_ignored() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("RUNE_SERVER__GRPC_HOST", "not_an_ip");
+
+    let mut config = AppConfig::default();
+    let original_host = config.server.grpc_host;
+    config.apply_env_overrides();
+
+    // Invalid IP should be silently ignored, keeping the default
+    assert_eq!(config.server.grpc_host, original_host);
+    assert_eq!(config.server.grpc_host, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+
+    std::env::remove_var("RUNE_SERVER__GRPC_HOST");
+}
+
+// ---- Scenario 4: dev_mode overrides TOML auth.enabled=true ----
+
+#[test]
+fn test_dev_mode_overrides_toml_auth_enabled() {
+    let toml_content = r#"
+[auth]
+enabled = true
+
+[server]
+grpc_port = 9999
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let mut config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
+    assert!(config.auth.enabled, "TOML explicitly set auth.enabled=true");
+    assert_eq!(config.server.grpc_port, 9999);
+
+    config.apply_dev_mode();
+
+    // apply_dev_mode() must disable auth even when TOML set it to true
+    assert!(!config.auth.enabled);
+    assert!(config.server.dev_mode);
+    assert_eq!(config.server.grpc_host, IpAddr::V4(Ipv4Addr::LOCALHOST));
+    assert_eq!(config.server.http_host, IpAddr::V4(Ipv4Addr::LOCALHOST));
+    // Non-dev_mode fields should be preserved
+    assert_eq!(config.server.grpc_port, 9999);
+}
+
+// ---- Scenario 5: TOML type mismatch errors ----
+
+#[test]
+fn test_toml_type_mismatch_port_as_string() {
+    let toml_content = r#"
+[server]
+grpc_port = "abc"
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let result = AppConfig::from_file(path.to_str().unwrap());
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("grpc_port"),
+        "error should reference the mistyped field, got: {}",
+        err_msg
+    );
+}
+
+#[test]
+fn test_toml_type_mismatch_bool_as_integer() {
+    let toml_content = r#"
+[auth]
+enabled = 123
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, toml_content).unwrap();
+
+    let result = AppConfig::from_file(path.to_str().unwrap());
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("enabled"),
+        "error should reference the mistyped field, got: {}",
+        err_msg
+    );
+}

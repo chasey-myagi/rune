@@ -187,4 +187,285 @@ mod tests {
         relay.remove_caster("c1");
         assert!(relay.resolve("x", &resolver).is_none());
     }
+
+    // ---- Scenario 7: gate.path route conflict between different runes ----
+
+    #[test]
+    fn test_gate_path_conflict_different_runes() {
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, input| async move { Ok(input) });
+        let h2 = make_handler(|_ctx, input| async move { Ok(input) });
+
+        let config1 = RuneConfig {
+            name: "rune_a".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/do-something".into(),
+                method: "POST".into(),
+            }),
+        };
+        let config2 = RuneConfig {
+            name: "rune_b".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/do-something".into(),
+                method: "POST".into(),
+            }),
+        };
+
+        relay.register(config1, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
+        let result = relay.register(config2, Arc::new(crate::invoker::LocalInvoker::new(h2)), None);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("route conflict"), "error should mention route conflict, got: {}", err);
+        assert!(err.contains("rune_a"), "error should mention first rune name, got: {}", err);
+        assert!(err.contains("rune_b"), "error should mention second rune name, got: {}", err);
+    }
+
+    #[test]
+    fn test_gate_path_no_conflict_different_methods() {
+        // Same path but different HTTP methods should NOT conflict
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, input| async move { Ok(input) });
+        let h2 = make_handler(|_ctx, input| async move { Ok(input) });
+
+        let config1 = RuneConfig {
+            name: "rune_a".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/resource".into(),
+                method: "POST".into(),
+            }),
+        };
+        let config2 = RuneConfig {
+            name: "rune_b".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/resource".into(),
+                method: "GET".into(),
+            }),
+        };
+
+        relay.register(config1, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
+        relay.register(config2, Arc::new(crate::invoker::LocalInvoker::new(h2)), None).unwrap();
+    }
+
+    #[test]
+    fn test_gate_path_no_conflict_same_rune_name() {
+        // Same rune name registering same path+method (e.g. scaling) should be allowed
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, input| async move { Ok(input) });
+        let h2 = make_handler(|_ctx, input| async move { Ok(input) });
+
+        let config = RuneConfig {
+            name: "same_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/shared".into(),
+                method: "POST".into(),
+            }),
+        };
+
+        relay.register(config.clone(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
+        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c2".into())).unwrap();
+    }
+
+    // ---- Scenario 8: reserved route conflict ----
+
+    #[test]
+    fn test_reserved_route_health() {
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let config = RuneConfig {
+            name: "my_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/health".into(),
+                method: "GET".into(),
+            }),
+        };
+
+        let result = relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("/health"), "error should mention /health, got: {}", err);
+        assert!(err.contains("management route"), "error should mention management route, got: {}", err);
+    }
+
+    #[test]
+    fn test_reserved_route_runes_api() {
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let config = RuneConfig {
+            name: "my_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/v1/runes".into(),
+                method: "POST".into(),
+            }),
+        };
+
+        let result = relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("/api/v1/runes"), "error should mention /api/v1/runes, got: {}", err);
+    }
+
+    #[test]
+    fn test_reserved_route_sub_path() {
+        // Paths that start with a reserved prefix should also be rejected
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let config = RuneConfig {
+            name: "my_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/v1/runes/custom".into(),
+                method: "POST".into(),
+            }),
+        };
+
+        let result = relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("/api/v1/runes"), "error should mention the reserved prefix, got: {}", err);
+    }
+
+    // ---- Scenario 9: list() method ----
+
+    #[test]
+    fn test_list_empty_relay() {
+        let relay = Relay::new();
+        let result = relay.list();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_list_returns_all_registered_runes() {
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, input| async move { Ok(input) });
+        let h2 = make_handler(|_ctx, input| async move { Ok(input) });
+        let h3 = make_handler(|_ctx, input| async move { Ok(input) });
+
+        relay.register(RuneConfig {
+            name: "echo".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/echo".into(),
+                method: "POST".into(),
+            }),
+        }, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
+
+        relay.register(RuneConfig {
+            name: "translate".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: None,
+        }, Arc::new(crate::invoker::LocalInvoker::new(h2)), None).unwrap();
+
+        // Same name "echo" from another caster
+        relay.register(RuneConfig {
+            name: "echo".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/echo".into(),
+                method: "POST".into(),
+            }),
+        }, Arc::new(crate::invoker::LocalInvoker::new(h3)), Some("c2".into())).unwrap();
+
+        let list = relay.list();
+        assert_eq!(list.len(), 3);
+
+        // Verify the entries contain the expected names and gate paths
+        let echo_entries: Vec<_> = list.iter().filter(|(n, _)| n == "echo").collect();
+        assert_eq!(echo_entries.len(), 2);
+        for (_, gate_path) in &echo_entries {
+            assert_eq!(gate_path.as_deref(), Some("/api/echo"));
+        }
+
+        let translate_entries: Vec<_> = list.iter().filter(|(n, _)| n == "translate").collect();
+        assert_eq!(translate_entries.len(), 1);
+        assert_eq!(translate_entries[0].1, None);
+    }
+
+    // ---- Scenario 10: remove_caster then re-register same caster_id ----
+
+    #[test]
+    fn test_remove_caster_then_reregister() {
+        let relay = Relay::new();
+        let resolver = RoundRobinResolver::new();
+
+        let h1 = make_handler(|_ctx, _input| async { Ok(Bytes::from("first")) });
+        let config = RuneConfig {
+            name: "my_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: None,
+        };
+
+        // Register with caster_id "c1"
+        relay.register(config.clone(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
+        assert!(relay.resolve("my_rune", &resolver).is_some());
+
+        // Remove caster "c1"
+        relay.remove_caster("c1");
+        assert!(relay.resolve("my_rune", &resolver).is_none());
+
+        // Re-register with same caster_id "c1"
+        let h2 = make_handler(|_ctx, _input| async { Ok(Bytes::from("second")) });
+        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c1".into())).unwrap();
+        assert!(relay.resolve("my_rune", &resolver).is_some());
+    }
+
+    // ---- Scenario 11: remove_caster on empty relay does not panic ----
+
+    #[test]
+    fn test_remove_caster_empty_relay_no_panic() {
+        let relay = Relay::new();
+        // Should not panic when removing from empty registry
+        relay.remove_caster("nonexistent_caster");
+        assert!(relay.list().is_empty());
+    }
+
+    #[test]
+    fn test_remove_caster_unknown_id_no_panic() {
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let config = RuneConfig {
+            name: "rune_a".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: None,
+        };
+        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), Some("c1".into())).unwrap();
+
+        // Removing a non-existent caster should not affect existing entries
+        relay.remove_caster("c99");
+        assert_eq!(relay.list().len(), 1);
+        assert_eq!(relay.list()[0].0, "rune_a");
+    }
 }
