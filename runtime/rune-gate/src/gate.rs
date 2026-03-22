@@ -2763,8 +2763,22 @@ mod tests {
     //   - file_broker: Arc<FileBroker>
     //   - max_upload_size_mb: u64
     // And new routes:
-    //   - GET /api/v1/files/:id
-    //   - multipart handling in dynamic_rune_handler / run_rune
+    //   - GET  /api/v1/files/:id
+    //   - POST multipart handling in dynamic_rune_handler / run_rune
+    //
+    // Expected upload response shape:
+    //   {
+    //     "files": [
+    //       { "file_id": "...", "filename": "...", "size": N, "mime_type": "..." }
+    //     ]
+    //   }
+    //
+    // Expected download response:
+    //   200 with Content-Type matching stored MIME, Content-Disposition header,
+    //   and body equal to original file bytes.
+    //
+    // Expected error response shape:
+    //   { "error": { "code": "...", "message": "..." } }
     // =========================================================================
 
     /// Helper: build a multipart body with the given boundary and parts.
@@ -2801,81 +2815,152 @@ mod tests {
         body
     }
 
-    // ---- Multipart Upload Tests ----
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_multipart_upload_single_file_via_gate_path() {
-        // POST multipart/form-data with a single file to a rune's gate_path
-        // should succeed and pass the file as an attachment to the handler.
-        let app = test_router();
-        let boundary = "----TestBoundaryUpload1";
-        let body = build_multipart_body(
-            boundary,
-            &[(
-                "file",
-                Some("test.txt"),
-                "text/plain",
-                b"hello world",
-            )],
-        );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
+    /// Helper: build a multipart body with parts that may omit Content-Type.
+    /// Each part is (name, Option<filename>, Option<content_type>, data).
+    fn build_multipart_body_optional_ct(
+        boundary: &str,
+        parts: &[(&str, Option<&str>, Option<&str>, &[u8])],
+    ) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (name, filename, content_type, data) in parts {
+            body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+            match filename {
+                Some(fname) => {
+                    body.extend_from_slice(
+                        format!(
+                            "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+                            name, fname
+                        )
+                        .as_bytes(),
+                    );
+                }
+                None => {
+                    body.extend_from_slice(
+                        format!("Content-Disposition: form-data; name=\"{}\"\r\n", name)
+                            .as_bytes(),
+                    );
+                }
+            }
+            if let Some(ct) = content_type {
+                body.extend_from_slice(format!("Content-Type: {}\r\n", ct).as_bytes());
+            }
+            body.extend_from_slice(b"\r\n");
+            body.extend_from_slice(data);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+        body
     }
 
+    /// Helper: send a multipart upload request and return the response.
+    async fn send_multipart(
+        app: Router,
+        uri: &str,
+        boundary: &str,
+        body: Vec<u8>,
+    ) -> axum::http::Response<axum::body::Body> {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={}", boundary),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Helper: extract JSON body from response.
+    async fn json_body(response: axum::http::Response<axum::body::Body>) -> serde_json::Value {
+        let body_bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body_bytes).unwrap()
+    }
+
+    /// Helper: extract raw body bytes from response.
+    async fn raw_body(response: axum::http::Response<axum::body::Body>) -> bytes::Bytes {
+        axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+            .await
+            .unwrap()
+    }
+
+    // =========================================================================
+    // 3.1 — Multipart Upload: single file with response body validation
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
-    async fn test_multipart_upload_json_and_file_together() {
-        // multipart containing both a JSON "input" field and a file attachment.
-        // Both should be correctly parsed: JSON as the rune input, file as attachment.
+    #[ignore] // multipart handling not yet implemented
+    async fn test_upload_single_file_response_contains_file_metadata() {
+        let app = test_router();
+        let boundary = "----TestBoundaryUpload1";
+        let file_content = b"hello world";
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("test.txt"), "text/plain", file_content)],
+        );
+
+        let response = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        // Response must contain a "files" array with metadata
+        assert!(json["files"].is_array(), "response should have files array");
+        let files = json["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1, "should have exactly 1 file");
+
+        let f = &files[0];
+        assert_eq!(f["filename"], "test.txt");
+        assert_eq!(f["mime_type"], "text/plain");
+        assert_eq!(f["size"], file_content.len() as u64);
+        assert!(f["file_id"].is_string(), "file should have a file_id");
+        assert!(!f["file_id"].as_str().unwrap().is_empty(), "file_id should not be empty");
+    }
+
+    // =========================================================================
+    // 3.2 — Multipart Upload: JSON input + file together
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // multipart handling not yet implemented
+    async fn test_upload_json_and_file_together_response_body() {
         let app = test_router();
         let boundary = "----TestBoundaryJsonFile";
-        let json_part = br#"{"key": "value"}"#;
         let body = build_multipart_body(
             boundary,
             &[
-                ("input", None, "application/json", json_part),
+                ("input", None, "application/json", br#"{"key": "value"}"#),
                 ("file", Some("data.csv"), "text/csv", b"a,b,c\n1,2,3"),
             ],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        // The rune should receive the JSON input
+        assert!(
+            json["files"].is_array(),
+            "response should include files metadata"
+        );
+        let files = json["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["filename"], "data.csv");
+        assert_eq!(files[0]["mime_type"], "text/csv");
+        assert_eq!(files[0]["size"], 11); // "a,b,c\n1,2,3" = 11 bytes
     }
 
+    // =========================================================================
+    // 3.3 — Multipart Upload: multiple files with distinct metadata
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
-    async fn test_multipart_upload_multiple_files() {
-        // Multiple files uploaded simultaneously — all should be passed as attachments.
+    #[ignore] // multipart handling not yet implemented
+    async fn test_upload_multiple_files_response_body() {
         let app = test_router();
         let boundary = "----TestBoundaryMulti";
         let body = build_multipart_body(
@@ -2887,29 +2972,35 @@ mod tests {
             ],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files array");
+        assert_eq!(files.len(), 3, "should have 3 files");
+
+        // Verify each file has distinct filename and correct size
+        let filenames: Vec<&str> = files.iter().map(|f| f["filename"].as_str().unwrap()).collect();
+        assert!(filenames.contains(&"a.txt"));
+        assert!(filenames.contains(&"b.txt"));
+        assert!(filenames.contains(&"c.bin"));
+
+        let a = files.iter().find(|f| f["filename"] == "a.txt").unwrap();
+        assert_eq!(a["size"], 14); // "file a content" = 14 bytes
+        assert_eq!(a["mime_type"], "text/plain");
+
+        let c = files.iter().find(|f| f["filename"] == "c.bin").unwrap();
+        assert_eq!(c["size"], 3);
+        assert_eq!(c["mime_type"], "application/octet-stream");
     }
 
+    // =========================================================================
+    // 3.4 — Multipart with only JSON (no file) — backward compat
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
-    async fn test_multipart_no_file_only_json() {
-        // multipart/form-data with only a JSON "input" field and no file —
-        // should work normally, processing just the JSON part.
+    #[ignore] // multipart handling not yet implemented
+    async fn test_multipart_no_file_only_json_processes_input() {
         let app = test_router();
         let boundary = "----TestBoundaryNoFile";
         let body = build_multipart_body(
@@ -2917,38 +3008,27 @@ mod tests {
             &[("input", None, "application/json", br#"{"only":"json"}"#)],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let resp_body = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+
+        let json = json_body(response).await;
+        // The JSON input should be processed; no files expected
         assert_eq!(json["only"], "json");
+        // If "files" is present, it should be empty
+        if json["files"].is_array() {
+            assert_eq!(json["files"].as_array().unwrap().len(), 0);
+        }
     }
 
-    // ---- Size Limit Tests ----
+    // =========================================================================
+    // 3.5 — Size Limit: file under max_upload_size_mb succeeds
+    // =========================================================================
 
     #[tokio::test]
-    #[ignore]
+    #[ignore] // multipart + size limits not yet implemented
     async fn test_file_under_max_upload_size_succeeds() {
-        // File smaller than max_upload_size_mb should upload successfully (200).
         // Assuming default max_upload_size_mb = 10, a 1MB file is well under.
         let state = test_state();
-        // state.max_upload_size_mb will default to 10 once the field is added
         let app = build_router(state, None);
         let boundary = "----TestBoundarySizeOk";
         let small_data = vec![0x41u8; 1024 * 1024]; // 1MB
@@ -2957,96 +3037,80 @@ mod tests {
             &[("file", Some("small.bin"), "application/octet-stream", &small_data)],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files array");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["filename"], "small.bin");
+        assert_eq!(files[0]["size"], 1024 * 1024);
     }
 
+    // =========================================================================
+    // 3.6 — Size Limit: file exactly at max_upload_size_mb boundary succeeds
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
+    #[ignore] // multipart + size limits not yet implemented
     async fn test_file_equal_to_max_upload_size_succeeds() {
-        // File exactly at the limit should still succeed.
-        // When max_upload_size_mb = 1, a 1MB file should pass.
+        // When max_upload_size_mb = 1, a file of exactly 1MB should pass.
         let state = test_state();
-        // state.max_upload_size_mb = 1; // will be set once field is added
+        // TODO: set state.max_upload_size_mb = 1 once the field is added
         let app = build_router(state, None);
         let boundary = "----TestBoundarySizeEq";
-        let exact_data = vec![0x42u8; 1 * 1024 * 1024]; // exactly 1MB
+        let exact_data = vec![0x42u8; 1 * 1024 * 1024];
         let body = build_multipart_body(
             boundary,
             &[("file", Some("exact.bin"), "application/octet-stream", &exact_data)],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // With max_upload_size_mb=1, a 1MB file is at the boundary — should succeed
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        assert_eq!(files[0]["size"], 1 * 1024 * 1024);
     }
 
+    // =========================================================================
+    // 3.7 — Size Limit: file exceeds max_upload_size_mb returns 413
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
+    #[ignore] // multipart + size limits not yet implemented
     async fn test_file_exceeds_max_upload_size_returns_413() {
-        // File larger than max_upload_size_mb should be rejected with 413.
         let state = test_state();
-        // state.max_upload_size_mb = 1; // 1MB limit, will be set once field is added
+        // TODO: set state.max_upload_size_mb = 1 once the field is added
         let app = build_router(state, None);
         let boundary = "----TestBoundarySizeOver";
-        let big_data = vec![0x43u8; 2 * 1024 * 1024]; // 2MB, over 1MB limit
+        let big_data = vec![0x43u8; 2 * 1024 * 1024]; // 2MB > 1MB limit
         let body = build_multipart_body(
             boundary,
             &[("file", Some("big.bin"), "application/octet-stream", &big_data)],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let json = json_body(response).await;
+        assert!(json["error"].is_object(), "413 should have error object");
+        assert_eq!(json["error"]["code"], "PAYLOAD_TOO_LARGE");
+        assert!(
+            json["error"]["message"].as_str().unwrap_or("").contains("size"),
+            "error message should mention size"
+        );
     }
 
+    // =========================================================================
+    // 3.8 — Size Limit: multiple files total exceed limit returns 413
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
+    #[ignore] // multipart + size limits not yet implemented
     async fn test_multiple_files_total_size_exceeds_limit_returns_413() {
-        // Multiple files whose total size exceeds max_upload_size_mb → 413.
         let state = test_state();
-        // state.max_upload_size_mb = 1; // 1MB limit
+        // TODO: set state.max_upload_size_mb = 1
         let app = build_router(state, None);
         let boundary = "----TestBoundaryMultiOver";
         let chunk = vec![0x44u8; 600 * 1024]; // 600KB each, total 1.2MB > 1MB
@@ -3058,64 +3122,224 @@ mod tests {
             ],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let json = json_body(response).await;
+        assert_eq!(json["error"]["code"], "PAYLOAD_TOO_LARGE");
     }
 
-    // ---- File Broker API Tests ----
+    // =========================================================================
+    // 3.9 — Size Limit: exact 4MB threshold boundary test
+    // =========================================================================
 
     #[tokio::test]
-    #[ignore]
-    async fn test_download_file_by_id_returns_200() {
-        // After a file is stored in the broker, GET /api/v1/files/:id should
-        // return 200 with correct Content-Type and Content-Disposition.
-        let state = test_state();
-        // Pre-store a file in the broker:
-        // let file_id = state.file_broker.store(
-        //     "report.pdf".into(),
-        //     b"fake pdf data".to_vec(),
-        //     "application/pdf".into(),
-        // ).unwrap();
-        let app = build_router(state, None);
+    #[ignore] // threshold routing not yet implemented
+    async fn test_file_exactly_4mb_threshold_inline() {
+        // A file of exactly 4MB (4 * 1024 * 1024 bytes) should be sent inline
+        // (at the threshold boundary, inline is used for <= 4MB).
+        let app = test_router();
+        let boundary = "----TestBoundary4MBExact";
+        let data_4mb = vec![0x55u8; 4 * 1024 * 1024];
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("exact4mb.bin"), "application/octet-stream", &data_4mb)],
+        );
 
-        // This test relies on a file being pre-stored via the broker.
-        // The file_id would be used in the URI.
-        let response = app
+        let response = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["size"], 4 * 1024 * 1024);
+        // Inline transfer: file_id should be absent or "transfer_mode" == "inline"
+        let transfer = files[0]["transfer_mode"].as_str().unwrap_or("inline");
+        assert_eq!(transfer, "inline", "4MB file at threshold should be inline");
+    }
+
+    // =========================================================================
+    // 3.10 — Small vs Large File Threshold: under 4MB sent inline
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // threshold routing not yet implemented
+    async fn test_small_file_under_4mb_sent_inline() {
+        let app = test_router();
+        let boundary = "----TestBoundarySmallInline";
+        let small_data = vec![0x50u8; 3 * 1024 * 1024]; // 3MB
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("small_inline.bin"), "application/octet-stream", &small_data)],
+        );
+
+        let response = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["size"], 3 * 1024 * 1024);
+        // Verify inline transfer mode
+        let mode = files[0]["transfer_mode"].as_str().unwrap_or("inline");
+        assert_eq!(mode, "inline", "3MB file should be transferred inline");
+    }
+
+    // =========================================================================
+    // 3.11 — Small vs Large File Threshold: over 4MB uses broker
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // threshold routing not yet implemented
+    async fn test_large_file_over_4mb_uses_broker() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryLargeBroker";
+        let large_data = vec![0x51u8; 5 * 1024 * 1024]; // 5MB
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("large_broker.bin"), "application/octet-stream", &large_data)],
+        );
+
+        let response = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["size"], 5 * 1024 * 1024);
+        // Broker transfer: should have a file_id and "transfer_mode" == "broker"
+        let mode = files[0]["transfer_mode"].as_str().unwrap_or("");
+        assert_eq!(mode, "broker", "5MB file should use broker transfer");
+        assert!(
+            files[0]["file_id"].is_string() && !files[0]["file_id"].as_str().unwrap().is_empty(),
+            "broker file should have a file_id"
+        );
+    }
+
+    // =========================================================================
+    // 3.12 — Mixed small + large files: threshold per-file
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // threshold routing not yet implemented
+    async fn test_mixed_small_and_large_files_different_transfer_modes() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryMixed";
+        let small = vec![0x60u8; 2 * 1024 * 1024]; // 2MB inline
+        let large = vec![0x61u8; 5 * 1024 * 1024]; // 5MB broker
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file1", Some("small.bin"), "application/octet-stream", &small),
+                ("file2", Some("large.bin"), "application/octet-stream", &large),
+            ],
+        );
+
+        let response = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        assert_eq!(files.len(), 2);
+
+        let small_file = files.iter().find(|f| f["filename"] == "small.bin").unwrap();
+        let large_file = files.iter().find(|f| f["filename"] == "large.bin").unwrap();
+
+        assert_eq!(
+            small_file["transfer_mode"].as_str().unwrap_or("inline"),
+            "inline",
+            "2MB file should be inline"
+        );
+        assert_eq!(
+            large_file["transfer_mode"].as_str().unwrap_or(""),
+            "broker",
+            "5MB file should use broker"
+        );
+    }
+
+    // =========================================================================
+    // 3.13 — File Broker: upload then download complete lifecycle (E2E)
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // file broker not yet implemented
+    async fn test_upload_then_download_e2e_lifecycle() {
+        // E2E: upload a file via multipart, extract file_id from response,
+        // then GET /api/v1/files/:file_id and verify content matches.
+        let state = test_state();
+        let file_content = b"The quick brown fox jumps over the lazy dog.";
+
+        // Step 1: Upload
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryE2E";
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("fox.txt"), "text/plain", file_content)],
+        );
+        let upload_resp = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(upload_resp.status(), StatusCode::OK);
+
+        let upload_json = json_body(upload_resp).await;
+        let files = upload_json["files"].as_array().expect("should have files");
+        assert_eq!(files.len(), 1);
+        let file_id = files[0]["file_id"].as_str().expect("should have file_id");
+        assert!(!file_id.is_empty());
+
+        // Step 2: Download by file_id
+        let app2 = build_router(state.clone(), None);
+        let download_resp = app2
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/api/v1/files/placeholder-file-id")
+                    .uri(format!("/api/v1/files/{}", file_id))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        // Once implemented with a real file_id, should be 200
-        // with headers:
-        //   Content-Type: application/pdf
-        //   Content-Disposition: attachment; filename="report.pdf"
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(download_resp.status(), StatusCode::OK);
+
+        // Verify Content-Type
+        let ct = download_resp
+            .headers()
+            .get("content-type")
+            .expect("should have content-type")
+            .to_str()
+            .unwrap();
+        assert_eq!(ct, "text/plain");
+
+        // Verify Content-Disposition
+        let cd = download_resp
+            .headers()
+            .get("content-disposition")
+            .expect("should have content-disposition")
+            .to_str()
+            .unwrap();
+        assert!(
+            cd.contains("fox.txt"),
+            "content-disposition should contain original filename, got: {}",
+            cd
+        );
+
+        // Verify content matches
+        let downloaded = raw_body(download_resp).await;
+        assert_eq!(
+            &downloaded[..],
+            file_content,
+            "downloaded content should match uploaded content"
+        );
     }
 
+    // =========================================================================
+    // 3.14 — File Broker: download nonexistent file returns 404 with error body
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
-    async fn test_download_nonexistent_file_returns_404() {
-        // GET /api/v1/files/:nonexistent → 404
+    #[ignore] // file broker not yet implemented
+    async fn test_download_nonexistent_file_returns_404_with_error() {
         let app = test_router();
         let response = app
             .oneshot(
@@ -3129,125 +3353,217 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let json = json_body(response).await;
+        assert!(json["error"].is_object(), "404 should have error object");
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+        assert!(
+            json["error"]["message"].as_str().unwrap_or("").len() > 0,
+            "error message should not be empty"
+        );
     }
 
-    #[tokio::test]
-    #[ignore]
-    async fn test_file_cleaned_up_after_request_returns_404() {
-        // After a rune execution completes, temporary files should be cleaned up.
-        // A subsequent GET /api/v1/files/:id should return 404.
-        let state = test_state();
-        // Step 1: store a file and get file_id
-        // let file_id = state.file_broker.store(
-        //     "temp.dat".into(),
-        //     b"temp data".to_vec(),
-        //     "application/octet-stream".into(),
-        // ).unwrap();
-        //
-        // Step 2: simulate request completion → broker.remove(file_id)
-        // state.file_broker.remove(&file_id);
-        let app = build_router(state, None);
+    // =========================================================================
+    // 3.15 — File Broker: file cleaned up after rune execution returns 404
+    // =========================================================================
 
-        // Step 3: try to download the cleaned-up file
-        let response = app
+    #[tokio::test]
+    #[ignore] // file broker not yet implemented
+    async fn test_file_cleaned_up_after_request_returns_404() {
+        // Upload a file, process the rune, then verify the temporary file
+        // is cleaned up and no longer downloadable.
+        let state = test_state();
+
+        // Step 1: Upload a file
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryCleanup";
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("temp.dat"), "application/octet-stream", b"temp data")],
+        );
+        let upload_resp = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(upload_resp.status(), StatusCode::OK);
+
+        let upload_json = json_body(upload_resp).await;
+        let file_id = upload_json["files"][0]["file_id"]
+            .as_str()
+            .expect("should have file_id");
+
+        // Step 2: Rune execution completes (implicit in sync mode).
+        // After completion, temporary files should be cleaned up.
+
+        // Step 3: Try to download the cleaned-up file
+        let app2 = build_router(state, None);
+        let download_resp = app2
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/api/v1/files/cleaned-up-file-id")
+                    .uri(format!("/api/v1/files/{}", file_id))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(download_resp.status(), StatusCode::NOT_FOUND);
+        let json = json_body(download_resp).await;
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
     }
 
-    // ---- File Metadata Tests ----
+    // =========================================================================
+    // 3.16 — File Broker: download returns correct Content-Type header
+    // =========================================================================
 
     #[tokio::test]
-    #[ignore]
+    #[ignore] // file broker not yet implemented
+    async fn test_download_file_correct_content_type_header() {
+        let state = test_state();
+
+        // Upload a PNG-like file
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryPngCT";
+        let png_magic = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("image.png"), "image/png", &png_magic)],
+        );
+        let upload_resp = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(upload_resp.status(), StatusCode::OK);
+
+        let upload_json = json_body(upload_resp).await;
+        let file_id = upload_json["files"][0]["file_id"]
+            .as_str()
+            .expect("should have file_id");
+
+        // Download and check Content-Type
+        let app2 = build_router(state, None);
+        let download_resp = app2
+            .oneshot(
+                Request::get(format!("/api/v1/files/{}", file_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(download_resp.status(), StatusCode::OK);
+        let ct = download_resp
+            .headers()
+            .get("content-type")
+            .expect("should have content-type header")
+            .to_str()
+            .unwrap();
+        assert_eq!(ct, "image/png");
+    }
+
+    // =========================================================================
+    // 3.17 — File Broker: download returns Content-Disposition with filename
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // file broker not yet implemented
+    async fn test_download_file_content_disposition_header() {
+        let state = test_state();
+
+        // Upload a CSV
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryCsvCD";
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("report.csv"), "text/csv", b"a,b\n1,2")],
+        );
+        let upload_resp = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(upload_resp.status(), StatusCode::OK);
+
+        let upload_json = json_body(upload_resp).await;
+        let file_id = upload_json["files"][0]["file_id"]
+            .as_str()
+            .expect("should have file_id");
+
+        // Download and check Content-Disposition
+        let app2 = build_router(state, None);
+        let download_resp = app2
+            .oneshot(
+                Request::get(format!("/api/v1/files/{}", file_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(download_resp.status(), StatusCode::OK);
+        let cd = download_resp
+            .headers()
+            .get("content-disposition")
+            .expect("should have content-disposition header")
+            .to_str()
+            .unwrap();
+        assert!(
+            cd.contains("report.csv"),
+            "content-disposition should contain filename 'report.csv', got: {}",
+            cd
+        );
+    }
+
+    // =========================================================================
+    // 3.18 — Metadata: filename and MIME type preserved in response
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // multipart handling not yet implemented
     async fn test_upload_preserves_original_filename_and_mime_type() {
-        // When a file is uploaded with a specific filename and MIME type,
-        // the attachment should preserve both values exactly.
         let app = test_router();
         let boundary = "----TestBoundaryMeta";
         let body = build_multipart_body(
             boundary,
-            &[(
-                "file",
-                Some("report-2024.pdf"),
-                "application/pdf",
-                b"pdf content here",
-            )],
+            &[("file", Some("report-2024.pdf"), "application/pdf", b"pdf content here")],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
-        // The echo rune (or a test-specific handler) should reflect the
-        // attachment metadata in its response so we can verify:
-        //   filename == "report-2024.pdf"
-        //   mime_type == "application/pdf"
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["filename"], "report-2024.pdf");
+        assert_eq!(files[0]["mime_type"], "application/pdf");
+        assert_eq!(files[0]["size"], 16); // "pdf content here" = 16 bytes
     }
 
+    // =========================================================================
+    // 3.19 — Metadata: missing MIME type defaults to application/octet-stream
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
+    #[ignore] // multipart handling not yet implemented
     async fn test_upload_without_mime_type_defaults_to_octet_stream() {
-        // When no Content-Type is specified for a file part, the system
-        // should default to application/octet-stream.
         let app = test_router();
         let boundary = "----TestBoundaryNoMime";
-        // Build a part without specifying Content-Type (we'll use a raw body)
-        let mut body = Vec::new();
-        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-        body.extend_from_slice(
-            b"Content-Disposition: form-data; name=\"file\"; filename=\"mystery.dat\"\r\n",
+        // Build a part without Content-Type header
+        let body = build_multipart_body_optional_ct(
+            boundary,
+            &[("file", Some("mystery.dat"), None, b"some unknown data")],
         );
-        // No Content-Type header for this part
-        body.extend_from_slice(b"\r\n");
-        body.extend_from_slice(b"some unknown data");
-        body.extend_from_slice(b"\r\n");
-        body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
-        // Verify the attachment has mime_type == "application/octet-stream"
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        assert_eq!(files[0]["filename"], "mystery.dat");
+        assert_eq!(
+            files[0]["mime_type"], "application/octet-stream",
+            "missing MIME type should default to application/octet-stream"
+        );
     }
 
-    // ---- Boundary / Edge Case Tests ----
+    // =========================================================================
+    // 3.20 — Edge case: empty file (0 bytes)
+    // =========================================================================
 
     #[tokio::test]
-    #[ignore]
-    async fn test_empty_file_zero_bytes() {
-        // An empty file (0 bytes) should be accepted and processed normally.
+    #[ignore] // multipart handling not yet implemented
+    async fn test_empty_file_zero_bytes_accepted() {
         let app = test_router();
         let boundary = "----TestBoundaryEmpty";
         let body = build_multipart_body(
@@ -3255,134 +3571,100 @@ mod tests {
             &[("file", Some("empty.txt"), "text/plain", b"")],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["filename"], "empty.txt");
+        assert_eq!(files[0]["size"], 0, "empty file should have size 0");
     }
 
+    // =========================================================================
+    // 3.21 — Edge case: filename with spaces preserved
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
-    async fn test_filename_with_spaces() {
-        // Filename containing spaces should be preserved correctly.
+    #[ignore] // multipart handling not yet implemented
+    async fn test_filename_with_spaces_preserved() {
         let app = test_router();
         let boundary = "----TestBoundarySpaces";
         let body = build_multipart_body(
             boundary,
-            &[(
-                "file",
-                Some("my file name.txt"),
-                "text/plain",
-                b"content",
-            )],
+            &[("file", Some("my file name.txt"), "text/plain", b"content")],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        assert_eq!(files[0]["filename"], "my file name.txt");
     }
 
+    // =========================================================================
+    // 3.22 — Edge case: CJK filename preserved
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
-    async fn test_filename_with_chinese_characters() {
-        // Filename with CJK characters should be preserved correctly.
+    #[ignore] // multipart handling not yet implemented
+    async fn test_filename_with_chinese_characters_preserved() {
         let app = test_router();
         let boundary = "----TestBoundaryCJK";
         let body = build_multipart_body(
             boundary,
-            &[(
-                "file",
-                Some("\u{62a5}\u{544a}\u{6587}\u{4ef6}.pdf"),
-                "application/pdf",
-                b"pdf content",
-            )],
+            &[("file", Some("\u{62a5}\u{544a}\u{6587}\u{4ef6}.pdf"), "application/pdf", b"pdf")],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        assert_eq!(files[0]["filename"], "\u{62a5}\u{544a}\u{6587}\u{4ef6}.pdf");
     }
 
+    // =========================================================================
+    // 3.23 — Edge case: path traversal in filename sanitized
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
-    async fn test_filename_with_path_separators_sanitized() {
-        // Filenames containing path separators (/, \) should be sanitized
-        // or preserved as-is (without directory traversal risk).
+    #[ignore] // multipart handling not yet implemented
+    async fn test_filename_path_traversal_sanitized() {
         let app = test_router();
         let boundary = "----TestBoundaryPathSep";
         let body = build_multipart_body(
             boundary,
-            &[(
-                "file",
-                Some("../../etc/passwd"),
-                "text/plain",
-                b"not really",
-            )],
+            &[("file", Some("../../etc/passwd"), "text/plain", b"not really")],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // Should succeed but the filename stored should be sanitized
-        // (e.g., just "passwd" or the full string without traversal effect)
+        let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        let stored_name = files[0]["filename"].as_str().unwrap();
+        // The filename should be sanitized: no directory traversal components
+        assert!(
+            !stored_name.contains(".."),
+            "filename should not contain '..' after sanitization, got: {}",
+            stored_name
+        );
+        assert!(
+            !stored_name.starts_with('/'),
+            "filename should not start with '/' after sanitization, got: {}",
+            stored_name
+        );
     }
 
+    // =========================================================================
+    // 3.24 — Edge case: very long filename handled gracefully
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
+    #[ignore] // multipart handling not yet implemented
     async fn test_very_long_filename_handled() {
-        // Filename exceeding 255 characters should be handled gracefully —
-        // either truncated or rejected with a clear error.
         let app = test_router();
         let boundary = "----TestBoundaryLongName";
         let long_name = "x".repeat(300) + ".txt";
@@ -3391,73 +3673,165 @@ mod tests {
             &[("file", Some(&long_name), "text/plain", b"data")],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // Either 200 (with truncated name) or 400 (rejected) — both acceptable.
-        // Should NOT panic or return 500.
+        let response = send_multipart(app, "/echo", boundary, body).await;
         let status = response.status().as_u16();
+        // Either 200 (with truncated name) or 400 (rejected) — both acceptable.
         assert!(
             status == 200 || status == 400,
             "expected 200 or 400 for very long filename, got {}",
             status,
         );
+
+        if status == 200 {
+            let json = json_body(response).await;
+            let files = json["files"].as_array().expect("should have files");
+            let stored_name = files[0]["filename"].as_str().unwrap();
+            assert!(
+                stored_name.len() <= 255,
+                "filename should be truncated to <= 255 chars, got {} chars",
+                stored_name.len()
+            );
+        } else {
+            let json = json_body(response).await;
+            assert_eq!(json["error"]["code"], "BAD_REQUEST");
+        }
     }
 
+    // =========================================================================
+    // 3.25 — Edge case: empty filename
+    // =========================================================================
+
     #[tokio::test]
-    #[ignore]
-    async fn test_binary_file_transfer() {
-        // Binary file (non-text) should be transmitted without corruption.
+    #[ignore] // multipart handling not yet implemented
+    async fn test_empty_filename_handled() {
         let app = test_router();
-        let boundary = "----TestBoundaryBinary";
-        let binary_data: Vec<u8> = (0..=255).collect();
+        let boundary = "----TestBoundaryEmptyName";
         let body = build_multipart_body(
             boundary,
-            &[(
-                "file",
-                Some("binary.bin"),
-                "application/octet-stream",
-                &binary_data,
-            )],
+            &[("file", Some(""), "text/plain", b"data with empty name")],
         );
 
-        let response = app
+        let response = send_multipart(app, "/echo", boundary, body).await;
+        let status = response.status().as_u16();
+        // Should either accept with a generated filename or reject with 400
+        assert!(
+            status == 200 || status == 400,
+            "empty filename should return 200 or 400, got {}",
+            status
+        );
+
+        if status == 200 {
+            let json = json_body(response).await;
+            let files = json["files"].as_array().expect("should have files");
+            // If accepted, the filename should be non-empty (auto-generated)
+            let name = files[0]["filename"].as_str().unwrap_or("");
+            assert!(
+                !name.is_empty(),
+                "accepted empty filename should be replaced with generated name"
+            );
+        }
+    }
+
+    // =========================================================================
+    // 3.26 — Edge case: no filename attribute in Content-Disposition
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // multipart handling not yet implemented
+    async fn test_no_filename_attribute_in_disposition() {
+        // A file part without the filename attribute in Content-Disposition
+        let app = test_router();
+        let boundary = "----TestBoundaryNoFilenameAttr";
+        // Use build_multipart_body with None for filename
+        let body = build_multipart_body(
+            boundary,
+            &[("file", None, "application/octet-stream", b"data without filename")],
+        );
+
+        let response = send_multipart(app, "/echo", boundary, body).await;
+        let status = response.status().as_u16();
+        assert!(
+            status == 200 || status == 400,
+            "no filename attribute should return 200 or 400, got {}",
+            status
+        );
+
+        if status == 200 {
+            let json = json_body(response).await;
+            let empty = vec![];
+            let files = json["files"].as_array().unwrap_or(&empty);
+            if !files.is_empty() {
+                // If treated as a file, filename should be auto-generated
+                let name = files[0]["filename"].as_str().unwrap_or("");
+                assert!(
+                    !name.is_empty(),
+                    "file without filename attribute should get a generated name"
+                );
+            }
+        }
+    }
+
+    // =========================================================================
+    // 3.27 — Binary file transfer with data integrity verification
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // file broker not yet implemented
+    async fn test_binary_file_transfer_data_integrity() {
+        // Upload binary data (all 256 byte values), download it, and verify
+        // byte-for-byte integrity.
+        let state = test_state();
+        let binary_data: Vec<u8> = (0..=255).collect();
+
+        // Upload
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryBinaryIntegrity";
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("binary.bin"), "application/octet-stream", &binary_data)],
+        );
+        let upload_resp = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(upload_resp.status(), StatusCode::OK);
+
+        let upload_json = json_body(upload_resp).await;
+        let files = upload_json["files"].as_array().expect("should have files");
+        assert_eq!(files[0]["size"], 256);
+        let file_id = files[0]["file_id"].as_str().expect("should have file_id");
+
+        // Download
+        let app2 = build_router(state, None);
+        let download_resp = app2
             .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
+                Request::get(format!("/api/v1/files/{}", file_id))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(download_resp.status(), StatusCode::OK);
+        let downloaded = raw_body(download_resp).await;
+
+        // Byte-for-byte integrity check
+        assert_eq!(
+            downloaded.len(),
+            binary_data.len(),
+            "downloaded size should match uploaded size"
+        );
+        assert_eq!(
+            &downloaded[..],
+            &binary_data[..],
+            "binary content should be identical after round-trip"
+        );
     }
 
-    // ---- Debug Route Multipart Tests ----
+    // =========================================================================
+    // 3.28 — Debug route: multipart upload
+    // =========================================================================
 
     #[tokio::test]
-    #[ignore]
+    #[ignore] // multipart handling not yet implemented
     async fn test_multipart_upload_via_debug_route() {
-        // The debug route /api/v1/runes/:name/run should also support
-        // multipart/form-data file uploads.
         let app = test_router();
         let boundary = "----TestBoundaryDebugMulti";
         let body = build_multipart_body(
@@ -3468,31 +3842,44 @@ mod tests {
             ],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/runes/echo/run")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/api/v1/runes/echo/run", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
+
+        let json = json_body(response).await;
+        let files = json["files"].as_array().expect("should have files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["filename"], "debug.txt");
+        assert_eq!(files[0]["size"], 15); // "debug file data" = 15 bytes
     }
 
-    // ---- Async Mode with Multipart Tests ----
+    // =========================================================================
+    // 3.29 — Debug route: multipart to nonexistent rune returns 404
+    // =========================================================================
 
     #[tokio::test]
-    #[ignore]
+    #[ignore] // multipart handling not yet implemented
+    async fn test_multipart_debug_route_nonexistent_rune_404() {
+        let app = test_router();
+        let boundary = "----TestBoundaryDebug404";
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("x.txt"), "text/plain", b"data")],
+        );
+
+        let response = send_multipart(app, "/api/v1/runes/nonexistent/run", boundary, body).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let json = json_body(response).await;
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+    }
+
+    // =========================================================================
+    // 3.30 — Async mode: multipart returns 202 with task_id
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // multipart + async not yet implemented
     async fn test_multipart_with_async_mode_returns_task_id() {
-        // multipart + ?async=true → should return 202 Accepted with task_id.
-        // Files should remain available during async execution.
         let state = test_state();
         let app = build_router(state.clone(), None);
         let boundary = "----TestBoundaryAsync";
@@ -3504,212 +3891,25 @@ mod tests {
             ],
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo?async=true")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let response = send_multipart(app, "/echo?async=true", boundary, body).await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let resp_body = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
-        assert!(json["task_id"].is_string());
+
+        let json = json_body(response).await;
+        assert!(json["task_id"].is_string(), "should have task_id");
+        assert!(
+            !json["task_id"].as_str().unwrap().is_empty(),
+            "task_id should not be empty"
+        );
         assert_eq!(json["status"], "running");
     }
 
-    // ---- File Broker Content Verification Tests ----
+    // =========================================================================
+    // 3.31 — Async mode: multipart via debug route returns 202
+    // =========================================================================
 
     #[tokio::test]
-    #[ignore]
-    async fn test_download_file_correct_content_type_header() {
-        // Verify that GET /api/v1/files/:id sets the Content-Type header
-        // to the MIME type of the stored file.
-        let state = test_state();
-        // Pre-store a file:
-        // let file_id = state.file_broker.store(
-        //     "image.png".into(),
-        //     vec![0x89, 0x50, 0x4E, 0x47], // PNG magic bytes
-        //     "image/png".into(),
-        // ).unwrap();
-        let app = build_router(state, None);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/v1/files/placeholder-png-id")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // Once implemented with real file_id:
-        // assert_eq!(response.status(), StatusCode::OK);
-        // let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
-        // assert_eq!(ct, "image/png");
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_download_file_content_disposition_header() {
-        // Verify that GET /api/v1/files/:id sets Content-Disposition
-        // with the original filename.
-        let state = test_state();
-        // Pre-store:
-        // let file_id = state.file_broker.store(
-        //     "report.csv".into(),
-        //     b"a,b\n1,2".to_vec(),
-        //     "text/csv".into(),
-        // ).unwrap();
-        let app = build_router(state, None);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/v1/files/placeholder-csv-id")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        // Once implemented with real file_id:
-        // assert_eq!(response.status(), StatusCode::OK);
-        // let cd = response.headers().get("content-disposition").unwrap().to_str().unwrap();
-        // assert!(cd.contains("report.csv"));
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    // ---- Small vs Large File Threshold Tests ----
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_small_file_under_4mb_sent_inline() {
-        // Files ≤ 4MB should be sent inline via gRPC attachments field
-        // (FileAttachment with data populated directly).
-        let app = test_router();
-        let boundary = "----TestBoundarySmallInline";
-        let small_data = vec![0x50u8; 3 * 1024 * 1024]; // 3MB, under 4MB threshold
-        let body = build_multipart_body(
-            boundary,
-            &[(
-                "file",
-                Some("small_inline.bin"),
-                "application/octet-stream",
-                &small_data,
-            )],
-        );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        // Ideally: verify the handler received FileAttachment with data populated
-        // (not a file_id reference)
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_large_file_over_4mb_uses_broker() {
-        // Files > 4MB should be stored in the file broker and referenced
-        // by file_id instead of inline data.
-        let state = test_state();
-        let app = build_router(state.clone(), None);
-        let boundary = "----TestBoundaryLargeBroker";
-        let large_data = vec![0x51u8; 5 * 1024 * 1024]; // 5MB, over 4MB threshold
-        let body = build_multipart_body(
-            boundary,
-            &[(
-                "file",
-                Some("large_broker.bin"),
-                "application/octet-stream",
-                &large_data,
-            )],
-        );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        // Ideally: verify the file was stored in the broker and the handler
-        // received a file_id reference
-    }
-
-    // ---- Multipart via gate_path vs debug route parity ----
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_multipart_debug_route_nonexistent_rune_404() {
-        // Multipart upload to a debug route for a nonexistent rune → 404.
-        let app = test_router();
-        let boundary = "----TestBoundaryDebug404";
-        let body = build_multipart_body(
-            boundary,
-            &[("file", Some("x.txt"), "text/plain", b"data")],
-        );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/runes/nonexistent/run")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    // ---- Async + Multipart via debug route ----
-
-    #[tokio::test]
-    #[ignore]
+    #[ignore] // multipart + async not yet implemented
     async fn test_multipart_async_via_debug_route() {
-        // multipart + ?async=true via /api/v1/runes/:name/run
         let state = test_state();
         let app = build_router(state.clone(), None);
         let boundary = "----TestBoundaryAsyncDebug";
@@ -3721,27 +3921,477 @@ mod tests {
             ],
         );
 
+        let response =
+            send_multipart(app, "/api/v1/runes/echo/run?async=true", boundary, body).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let json = json_body(response).await;
+        assert!(json["task_id"].is_string(), "should have task_id");
+        assert_eq!(json["status"], "running");
+    }
+
+    // =========================================================================
+    // 3.32 — Error: malformed multipart body
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // multipart handling not yet implemented
+    async fn test_malformed_multipart_body_returns_400() {
+        let app = test_router();
+        // Send garbage bytes with multipart content-type
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/runes/echo/run?async=true")
-                    .header(
-                        "content-type",
-                        format!("multipart/form-data; boundary={}", boundary),
-                    )
-                    .body(Body::from(body))
+                    .uri("/echo")
+                    .header("content-type", "multipart/form-data; boundary=----Garbage")
+                    .body(Body::from(b"this is not a valid multipart body".to_vec()))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let resp_body = axum::body::to_bytes(response.into_body(), 4096)
+        let status = response.status().as_u16();
+        assert_eq!(status, 400, "malformed multipart should return 400");
+
+        let json = json_body(response).await;
+        assert!(json["error"].is_object(), "should have error object");
+        assert_eq!(json["error"]["code"], "BAD_REQUEST");
+    }
+
+    // =========================================================================
+    // 3.33 — Error: truncated multipart body (missing closing boundary)
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // multipart handling not yet implemented
+    async fn test_truncated_multipart_body_returns_400() {
+        let app = test_router();
+        let boundary = "----TestBoundaryTruncated";
+        // Build a partial multipart body — missing closing boundary
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"trunc.txt\"\r\n",
+        );
+        body.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+        body.extend_from_slice(b"partial data");
+        // No closing boundary!
+
+        let response = send_multipart(app, "/echo", boundary, body).await;
+        let status = response.status().as_u16();
+        assert_eq!(status, 400, "truncated multipart should return 400");
+
+        let json = json_body(response).await;
+        assert_eq!(json["error"]["code"], "BAD_REQUEST");
+    }
+
+    // =========================================================================
+    // 3.34 — Error: invalid file_id format returns 400 or 404
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // file broker not yet implemented
+    async fn test_invalid_file_id_format_returns_error() {
+        // Try various invalid file_id formats
+        for invalid_id in &[
+            "not-a-uuid",
+            "12345",
+            "",
+            "../../../etc/passwd",
+            "<script>alert(1)</script>",
+        ] {
+            let uri = format!("/api/v1/files/{}", invalid_id);
+            let app = test_router();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(&uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let status = response.status().as_u16();
+            assert!(
+                status == 400 || status == 404,
+                "invalid file_id '{}' should return 400 or 404, got {}",
+                invalid_id,
+                status
+            );
+
+            let json = json_body(response).await;
+            assert!(
+                json["error"].is_object(),
+                "invalid file_id '{}' should have error object",
+                invalid_id
+            );
+        }
+    }
+
+    // =========================================================================
+    // 3.35 — Error: Content-Type header says multipart but body is JSON
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // multipart handling not yet implemented
+    async fn test_content_type_multipart_but_body_is_json_returns_400() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "multipart/form-data; boundary=----Fake")
+                    .body(Body::from(r#"{"this":"is json not multipart"}"#))
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
-        assert!(json["task_id"].is_string());
+
+        let status = response.status().as_u16();
+        assert_eq!(status, 400, "JSON body with multipart content-type should return 400");
+
+        let json = json_body(response).await;
+        assert_eq!(json["error"]["code"], "BAD_REQUEST");
+    }
+
+    // =========================================================================
+    // 3.36 — Error: Content-Type says JSON but body is multipart
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // multipart handling not yet implemented
+    async fn test_content_type_json_but_body_is_multipart() {
+        let app = test_router();
+        let boundary = "----TestBoundaryMismatch";
+        let multipart_body = build_multipart_body(
+            boundary,
+            &[("file", Some("test.txt"), "text/plain", b"data")],
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(multipart_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // When content-type is JSON, the system should try to parse as JSON.
+        // A multipart body is not valid JSON, so it should fail.
+        let status = response.status().as_u16();
+        assert!(
+            status == 400 || status == 200,
+            "JSON content-type with multipart body should return 400 (parse error) or 200 (raw echo), got {}",
+            status
+        );
+    }
+
+    // =========================================================================
+    // 3.37 — Concurrent uploads: isolation between requests
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // multipart handling not yet implemented
+    async fn test_concurrent_uploads_isolation() {
+        // Multiple concurrent uploads should not interfere with each other.
+        // Each upload should get its own file_ids and metadata.
+        let state = test_state();
+
+        let mut handles = Vec::new();
+        for i in 0..5 {
+            let state_clone = state.clone();
+            let handle = tokio::spawn(async move {
+                let app = build_router(state_clone, None);
+                let boundary = format!("----TestBoundaryConcurrent{}", i);
+                let filename = format!("concurrent_{}.txt", i);
+                let content = format!("content for file {}", i);
+                let body = build_multipart_body(
+                    &boundary,
+                    &[("file", Some(&filename), "text/plain", content.as_bytes())],
+                );
+
+                let response = send_multipart(app, "/echo", &boundary, body).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "concurrent upload {} should succeed",
+                    i
+                );
+
+                let json = json_body(response).await;
+                let files = json["files"].as_array().expect("should have files");
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0]["filename"].as_str().unwrap(), filename);
+
+                // Return file_id for uniqueness check
+                files[0]["file_id"].as_str().unwrap().to_string()
+            });
+            handles.push(handle);
+        }
+
+        // Collect all file_ids
+        let mut file_ids = Vec::new();
+        for handle in handles {
+            let file_id = handle.await.unwrap();
+            file_ids.push(file_id);
+        }
+
+        // All file_ids should be unique
+        let unique: std::collections::HashSet<&String> = file_ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            5,
+            "all concurrent upload file_ids should be unique"
+        );
+    }
+
+    // =========================================================================
+    // 3.38 — Config: max_upload_size_mb = 0 rejects all files
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // size limit config not yet implemented
+    async fn test_max_upload_size_zero_rejects_all() {
+        let state = test_state();
+        // TODO: set state.max_upload_size_mb = 0 once the field is added
+        let app = build_router(state, None);
+        let boundary = "----TestBoundaryZeroLimit";
+        // Even a 1-byte file should be rejected
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("tiny.txt"), "text/plain", b"x")],
+        );
+
+        let response = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "max_upload_size_mb=0 should reject all file uploads"
+        );
+
+        let json = json_body(response).await;
+        assert_eq!(json["error"]["code"], "PAYLOAD_TOO_LARGE");
+    }
+
+    // =========================================================================
+    // 3.39 — Full E2E lifecycle: upload, list, download, verify, cleanup
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // file broker not yet implemented
+    async fn test_full_e2e_lifecycle_multiple_files() {
+        let state = test_state();
+        let files_data = vec![
+            ("doc.txt", "text/plain", b"Hello World".as_slice()),
+            ("data.json", "application/json", br#"{"key":"value"}"#.as_slice()),
+            ("image.bin", "application/octet-stream", &[0xFFu8, 0xD8, 0xFF, 0xE0] as &[u8]),
+        ];
+
+        // Step 1: Upload all files
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryFullE2E";
+        let parts: Vec<(&str, Option<&str>, &str, &[u8])> = files_data
+            .iter()
+            .map(|(name, mime, data)| ("file", Some(*name), *mime, *data))
+            .collect();
+        let body = build_multipart_body(boundary, &parts);
+
+        let upload_resp = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(upload_resp.status(), StatusCode::OK);
+
+        let upload_json = json_body(upload_resp).await;
+        let files = upload_json["files"].as_array().expect("should have files");
+        assert_eq!(files.len(), 3, "should upload 3 files");
+
+        // Step 2: Download each file and verify content
+        for (original_name, original_mime, original_data) in &files_data {
+            let file_entry = files
+                .iter()
+                .find(|f| f["filename"].as_str().unwrap() == *original_name)
+                .unwrap_or_else(|| panic!("should find file {}", original_name));
+
+            let file_id = file_entry["file_id"].as_str().expect("should have file_id");
+
+            let app = build_router(state.clone(), None);
+            let download_resp = app
+                .oneshot(
+                    Request::get(format!("/api/v1/files/{}", file_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                download_resp.status(),
+                StatusCode::OK,
+                "download {} should succeed",
+                original_name
+            );
+
+            // Verify Content-Type
+            let ct = download_resp
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert_eq!(
+                ct, *original_mime,
+                "Content-Type for {} should match",
+                original_name
+            );
+
+            // Verify content
+            let downloaded = raw_body(download_resp).await;
+            assert_eq!(
+                &downloaded[..],
+                *original_data,
+                "content of {} should match after download",
+                original_name
+            );
+        }
+    }
+
+    // =========================================================================
+    // 3.40 — Upload via gate_path and debug route produce same response shape
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // multipart handling not yet implemented
+    async fn test_gate_path_and_debug_route_same_response_shape() {
+        let state = test_state();
+        let boundary = "----TestBoundaryParity";
+        let file_content = b"parity test data";
+
+        // Upload via gate_path
+        let app1 = build_router(state.clone(), None);
+        let body1 = build_multipart_body(
+            boundary,
+            &[("file", Some("parity.txt"), "text/plain", file_content)],
+        );
+        let resp1 = send_multipart(app1, "/echo", boundary, body1).await;
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let json1 = json_body(resp1).await;
+
+        // Upload via debug route
+        let app2 = build_router(state.clone(), None);
+        let body2 = build_multipart_body(
+            boundary,
+            &[("file", Some("parity.txt"), "text/plain", file_content)],
+        );
+        let resp2 = send_multipart(app2, "/api/v1/runes/echo/run", boundary, body2).await;
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = json_body(resp2).await;
+
+        // Both should have same shape: files array with same metadata
+        assert!(json1["files"].is_array());
+        assert!(json2["files"].is_array());
+        assert_eq!(
+            json1["files"].as_array().unwrap().len(),
+            json2["files"].as_array().unwrap().len()
+        );
+
+        let f1 = &json1["files"][0];
+        let f2 = &json2["files"][0];
+        assert_eq!(f1["filename"], f2["filename"]);
+        assert_eq!(f1["mime_type"], f2["mime_type"]);
+        assert_eq!(f1["size"], f2["size"]);
+    }
+
+    // =========================================================================
+    // 3.41 — Multipart with no boundary in Content-Type returns 400
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // multipart handling not yet implemented
+    async fn test_multipart_no_boundary_in_content_type_returns_400() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    // multipart/form-data without boundary parameter
+                    .header("content-type", "multipart/form-data")
+                    .body(Body::from(b"some body".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status().as_u16();
+        assert_eq!(status, 400, "multipart without boundary should return 400");
+
+        let json = json_body(response).await;
+        assert_eq!(json["error"]["code"], "BAD_REQUEST");
+    }
+
+    // =========================================================================
+    // 3.42 — Large binary file round-trip with computed checksum
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore] // file broker not yet implemented
+    async fn test_large_binary_round_trip_checksum() {
+        // Upload a deterministic 1MB binary file, download it, and verify
+        // that every byte matches via a simple checksum.
+        let state = test_state();
+
+        // Generate deterministic 1MB data
+        let mut data = Vec::with_capacity(1024 * 1024);
+        for i in 0u32..(1024 * 1024 / 4) {
+            data.extend_from_slice(&i.to_le_bytes());
+        }
+        assert_eq!(data.len(), 1024 * 1024);
+
+        // Compute a simple checksum (sum of all bytes mod u64)
+        let upload_checksum: u64 = data.iter().map(|b| *b as u64).sum();
+
+        // Upload
+        let app = build_router(state.clone(), None);
+        let boundary = "----TestBoundaryLargeChecksum";
+        let body = build_multipart_body(
+            boundary,
+            &[("file", Some("large.bin"), "application/octet-stream", &data)],
+        );
+        let upload_resp = send_multipart(app, "/echo", boundary, body).await;
+        assert_eq!(upload_resp.status(), StatusCode::OK);
+
+        let upload_json = json_body(upload_resp).await;
+        let file_id = upload_json["files"][0]["file_id"]
+            .as_str()
+            .expect("should have file_id");
+
+        // Download
+        let app2 = build_router(state, None);
+        let download_resp = app2
+            .oneshot(
+                Request::get(format!("/api/v1/files/{}", file_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(download_resp.status(), StatusCode::OK);
+
+        let downloaded = raw_body(download_resp).await;
+        assert_eq!(downloaded.len(), data.len(), "sizes should match");
+
+        let download_checksum: u64 = downloaded.iter().map(|b| *b as u64).sum();
+        assert_eq!(
+            upload_checksum, download_checksum,
+            "checksums should match for round-trip integrity"
+        );
+        assert_eq!(&downloaded[..], &data[..], "byte-for-byte match");
     }
 
     // =======================================================================
