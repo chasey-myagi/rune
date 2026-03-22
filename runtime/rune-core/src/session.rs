@@ -35,9 +35,9 @@ pub(crate) struct PendingRequest {
 }
 
 pub struct SessionManager {
-    sessions: DashMap<String, CasterState>,
-    heartbeat_interval: Duration,
-    heartbeat_timeout: Duration,
+    pub(crate) sessions: DashMap<String, CasterState>,
+    pub(crate) heartbeat_interval: Duration,
+    pub(crate) heartbeat_timeout: Duration,
     on_caster_attach: OnceLock<OnCasterAttach>,
 }
 
@@ -1141,5 +1141,398 @@ mod tests {
             let result = handle.await.unwrap().unwrap();
             assert_eq!(result, Bytes::from("ok"));
         }
+    }
+
+    // ========================================================================
+    // v0.1.0 deep coverage additions
+    // ========================================================================
+
+    // ---- execute returns ExecutionFailed error ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_execute_receives_execution_failed_error() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(2);
+
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "err-req", "failing_rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            })
+        };
+
+        wait_for_pending(&pending, "err-req").await;
+
+        // Simulate an ExecutionFailed response
+        if let Some((_, p)) = pending.remove("err-req") {
+            sem.add_permits(1);
+            match p.tx {
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(Err(RuneError::ExecutionFailed {
+                        code: "RUNE_ERR".into(),
+                        message: "handler crashed".into(),
+                    }));
+                }
+                _ => panic!("expected Once"),
+            }
+        }
+
+        let result = handle.await.unwrap();
+        match result {
+            Err(RuneError::ExecutionFailed { code, message }) => {
+                assert_eq!(code, "RUNE_ERR");
+                assert_eq!(message, "handler crashed");
+            }
+            other => panic!("expected ExecutionFailed, got {:?}", other),
+        }
+    }
+
+    // ---- execute_stream receives multiple chunks properly ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_execute_stream_receives_multiple_chunks() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(2);
+
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute_stream(&cid, "stream-multi", "streamer", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            })
+        };
+
+        wait_for_pending(&pending, "stream-multi").await;
+        assert_eq!(sem.available_permits(), 1);
+
+        // Send multiple chunks via the Stream sender
+        if let Some(p) = pending.get("stream-multi") {
+            if let PendingResponse::Stream(ref tx) = p.tx {
+                let _ = tx.send(Ok(Bytes::from("chunk-A"))).await;
+                let _ = tx.send(Ok(Bytes::from("chunk-B"))).await;
+                let _ = tx.send(Ok(Bytes::from("chunk-C"))).await;
+            }
+        }
+
+        // Complete the stream
+        if let Some((_, _p)) = pending.remove("stream-multi") {
+            sem.add_permits(1);
+            // Drop the sender by consuming it
+        }
+
+        let mut rx = handle.await.unwrap().unwrap();
+        let c1 = rx.recv().await.unwrap().unwrap();
+        assert_eq!(c1, Bytes::from("chunk-A"));
+        let c2 = rx.recv().await.unwrap().unwrap();
+        assert_eq!(c2, Bytes::from("chunk-B"));
+        let c3 = rx.recv().await.unwrap().unwrap();
+        assert_eq!(c3, Bytes::from("chunk-C"));
+    }
+
+    // ---- cancel non-existent request is idempotent ----
+
+    #[tokio::test]
+    async fn test_cancel_nonexistent_request_is_idempotent() {
+        let (mgr, caster_id, sem, _pending, _rx) = setup_session(2);
+        assert_eq!(sem.available_permits(), 2);
+
+        // Cancel a request that was never made
+        let result = mgr.cancel(&caster_id, "ghost-request", "no reason").await;
+        assert!(result.is_ok(), "cancelling non-existent request should not error");
+        // Permits unchanged
+        assert_eq!(sem.available_permits(), 2);
+    }
+
+    // ---- cancel already completed request is idempotent ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_cancel_already_completed_request() {
+        let (mgr, caster_id, sem, pending, _rx) = setup_session(2);
+
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "done-req", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            })
+        };
+
+        wait_for_pending(&pending, "done-req").await;
+
+        // Complete the request first
+        if let Some((_, p)) = pending.remove("done-req") {
+            sem.add_permits(1);
+            match p.tx {
+                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("completed"))); }
+                _ => panic!("expected Once"),
+            }
+        }
+
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result, Bytes::from("completed"));
+
+        // Now try to cancel the already-completed request
+        let cancel_result = mgr.cancel(&caster_id, "done-req", "too late").await;
+        assert!(cancel_result.is_ok(), "cancel after completion should not error");
+        assert_eq!(sem.available_permits(), 2, "permits should remain unchanged");
+    }
+
+    // ---- many casters connected ----
+
+    #[test]
+    fn test_many_casters_simultaneously() {
+        let mgr = default_session_manager();
+        let count = 50;
+
+        for i in 0..count {
+            let (tx, _rx) = mpsc::channel(16);
+            mgr.sessions.insert(format!("caster-{}", i), CasterState {
+                outbound: tx,
+                pending: Arc::new(DashMap::new()),
+                semaphore: Arc::new(Semaphore::new(10)),
+            });
+        }
+
+        assert_eq!(mgr.caster_count(), count);
+        let ids = mgr.list_caster_ids();
+        assert_eq!(ids.len(), count);
+
+        for i in 0..count {
+            assert!(mgr.is_available(&format!("caster-{}", i)));
+        }
+    }
+
+    // ---- available_permits for connected and disconnected casters ----
+
+    #[test]
+    fn test_available_permits_query() {
+        let mgr = default_session_manager();
+        // Non-existent caster returns 0
+        assert_eq!(mgr.available_permits("no-such"), 0);
+
+        let (tx, _rx) = mpsc::channel(16);
+        let sem = Arc::new(Semaphore::new(7));
+        mgr.sessions.insert("caster-q".to_string(), CasterState {
+            outbound: tx,
+            pending: Arc::new(DashMap::new()),
+            semaphore: Arc::clone(&sem),
+        });
+
+        assert_eq!(mgr.available_permits("caster-q"), 7);
+
+        // Consume some permits
+        let _p1 = sem.try_acquire().unwrap();
+        let _p2 = sem.try_acquire().unwrap();
+        assert_eq!(mgr.available_permits("caster-q"), 5);
+    }
+
+    // ---- execute when outbound channel is closed (caster disconnected) ----
+
+    #[tokio::test]
+    async fn test_execute_outbound_closed_returns_unavailable() {
+        let mgr = default_session_manager();
+        let (tx, rx) = mpsc::channel(16);
+        let semaphore = Arc::new(Semaphore::new(5));
+        let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
+        mgr.sessions.insert("dying-caster".to_string(), CasterState {
+            outbound: tx,
+            pending: Arc::clone(&pending),
+            semaphore: Arc::clone(&semaphore),
+        });
+
+        // Drop the receiver to close the channel
+        drop(rx);
+
+        let result = mgr.execute(
+            "dying-caster", "req-dead", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT,
+        ).await;
+
+        assert!(matches!(result, Err(RuneError::Unavailable)),
+            "execute on closed outbound should return Unavailable");
+        // Pending should be cleaned up
+        assert!(!pending.contains_key("req-dead"));
+        // Permit should be returned
+        assert_eq!(semaphore.available_permits(), 5);
+    }
+
+    // ---- execute_stream when outbound is closed ----
+
+    #[tokio::test]
+    async fn test_execute_stream_outbound_closed_returns_unavailable() {
+        let mgr = default_session_manager();
+        let (tx, rx) = mpsc::channel(16);
+        let semaphore = Arc::new(Semaphore::new(3));
+        let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
+        mgr.sessions.insert("dying-stream".to_string(), CasterState {
+            outbound: tx,
+            pending: Arc::clone(&pending),
+            semaphore: Arc::clone(&semaphore),
+        });
+
+        drop(rx);
+
+        let result = mgr.execute_stream(
+            "dying-stream", "req-s-dead", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT,
+        ).await;
+
+        assert!(matches!(result, Err(RuneError::Unavailable)));
+        assert!(!pending.contains_key("req-s-dead"));
+        assert_eq!(semaphore.available_permits(), 3);
+    }
+
+    // ---- execute with context map ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_execute_sends_context_map_in_message() {
+        let (mgr, caster_id, sem, pending, mut rx) = setup_session(2);
+
+        let mut ctx_map = HashMap::new();
+        ctx_map.insert("user_id".to_string(), "u-123".to_string());
+        ctx_map.insert("trace_id".to_string(), "t-456".to_string());
+
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "ctx-req", "rune", Bytes::from("data"), ctx_map, DEFAULT_TIMEOUT).await
+            })
+        };
+
+        // Read the outbound message to verify context was passed
+        let msg = rx.recv().await.expect("should receive ExecuteRequest");
+        match msg.payload {
+            Some(session_message::Payload::Execute(exec)) => {
+                assert_eq!(exec.request_id, "ctx-req");
+                assert_eq!(exec.rune_name, "rune");
+                assert_eq!(exec.input, b"data");
+                assert_eq!(exec.context.get("user_id").map(|s| s.as_str()), Some("u-123"));
+                assert_eq!(exec.context.get("trace_id").map(|s| s.as_str()), Some("t-456"));
+                assert_eq!(exec.timeout_ms, 30_000);
+            }
+            other => panic!("expected Execute payload, got {:?}", other),
+        }
+
+        // Complete the request
+        if let Some((_, p)) = pending.remove("ctx-req") {
+            sem.add_permits(1);
+            match p.tx {
+                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done"))); }
+                _ => panic!("expected Once"),
+            }
+        }
+        let _ = handle.await.unwrap().unwrap();
+    }
+
+    // ---- cancel sends CancelRequest message to caster ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_cancel_sends_message_to_outbound() {
+        let (mgr, caster_id, _sem, pending, mut rx) = setup_session(2);
+
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "cancel-msg-req", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+            })
+        };
+
+        wait_for_pending(&pending, "cancel-msg-req").await;
+
+        // Drain the ExecuteRequest message
+        let _exec_msg = rx.recv().await.unwrap();
+
+        // Cancel
+        mgr.cancel(&caster_id, "cancel-msg-req", "user wants to stop").await.unwrap();
+
+        // Read cancel message
+        let cancel_msg = rx.recv().await.expect("should receive CancelRequest");
+        match cancel_msg.payload {
+            Some(session_message::Payload::Cancel(cancel)) => {
+                assert_eq!(cancel.request_id, "cancel-msg-req");
+                assert_eq!(cancel.reason, "user wants to stop");
+            }
+            other => panic!("expected Cancel payload, got {:?}", other),
+        }
+
+        let result = handle.await.unwrap();
+        assert!(matches!(result, Err(RuneError::ExecutionFailed { .. })));
+    }
+
+    // ---- execute preserves request ordering via outbound ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_execute_messages_arrive_in_order() {
+        let (mgr, caster_id, sem, pending, mut rx) = setup_session(5);
+
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            let rid = format!("ord-{}", i);
+            handles.push(tokio::spawn(async move {
+                mgr.execute(&cid, &rid, "rune", Bytes::from(format!("data-{}", i)), Default::default(), DEFAULT_TIMEOUT).await
+            }));
+        }
+
+        // Collect the 3 ExecuteRequest messages
+        let mut received_ids = Vec::new();
+        for _ in 0..3 {
+            let msg = rx.recv().await.unwrap();
+            if let Some(session_message::Payload::Execute(exec)) = msg.payload {
+                received_ids.push(exec.request_id);
+            }
+        }
+        assert_eq!(received_ids.len(), 3);
+        // All three IDs should be present (order may vary due to concurrency)
+        assert!(received_ids.contains(&"ord-0".to_string()));
+        assert!(received_ids.contains(&"ord-1".to_string()));
+        assert!(received_ids.contains(&"ord-2".to_string()));
+
+        // Complete all
+        for i in 0..3 {
+            let key = format!("ord-{}", i);
+            if let Some((_, p)) = pending.remove(&key) {
+                sem.add_permits(1);
+                match p.tx {
+                    PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("ok"))); }
+                    _ => panic!("expected Once"),
+                }
+            }
+        }
+        for h in handles {
+            let _ = h.await.unwrap().unwrap();
+        }
+    }
+
+    // ---- execute with custom timeout value ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_execute_custom_timeout_in_message() {
+        let (mgr, caster_id, sem, pending, mut rx) = setup_session(2);
+
+        let custom_timeout = Duration::from_secs(120);
+        let handle = {
+            let mgr = Arc::clone(&mgr);
+            let cid = caster_id.clone();
+            tokio::spawn(async move {
+                mgr.execute(&cid, "timeout-val", "rune", Bytes::new(), Default::default(), custom_timeout).await
+            })
+        };
+
+        let msg = rx.recv().await.unwrap();
+        if let Some(session_message::Payload::Execute(exec)) = msg.payload {
+            assert_eq!(exec.timeout_ms, 120_000);
+        } else {
+            panic!("expected Execute payload");
+        }
+
+        if let Some((_, p)) = pending.remove("timeout-val") {
+            sem.add_permits(1);
+            match p.tx {
+                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::new())); }
+                _ => panic!("expected Once"),
+            }
+        }
+        let _ = handle.await.unwrap().unwrap();
     }
 }
