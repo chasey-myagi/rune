@@ -268,6 +268,8 @@ async fn main() -> anyhow::Result<()> {
         cors_origins: config.gate.cors_origins.clone(),
         dev_mode: config.server.dev_mode,
         started_at: Instant::now(),
+        file_broker: Arc::new(gate::FileBroker::new()),
+        max_upload_size_mb: 100,
     };
 
     let flow_engine = Arc::new(flow_engine);

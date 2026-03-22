@@ -11,6 +11,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use bytes::Bytes;
+use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -22,6 +23,78 @@ use rune_core::rune::{RuneContext, RuneError};
 use rune_schema::validator::{validate_input, validate_output};
 use rune_schema::openapi::{generate_openapi, RuneInfo};
 use rune_store::{CallLog, RuneStore, TaskStatus};
+
+// ---------------------------------------------------------------------------
+// File Broker — manages temporary file storage for multipart uploads
+// ---------------------------------------------------------------------------
+
+/// Metadata for a stored file in the broker.
+#[derive(Clone)]
+pub struct StoredFile {
+    pub filename: String,
+    pub mime_type: String,
+    pub data: Bytes,
+    /// The request_id that uploaded this file
+    pub request_id: String,
+}
+
+/// FileBroker stores uploaded files in memory, keyed by unique file_id.
+/// Files are associated with a request_id. After sync execution, the request_id
+/// is marked as completed, and files from completed requests are no longer downloadable.
+#[derive(Clone)]
+pub struct FileBroker {
+    files: Arc<DashMap<String, StoredFile>>,
+    completed_requests: Arc<DashMap<String, ()>>,
+}
+
+impl FileBroker {
+    pub fn new() -> Self {
+        Self {
+            files: Arc::new(DashMap::new()),
+            completed_requests: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Store a file and return its unique file_id.
+    pub fn store(&self, filename: String, mime_type: String, data: Bytes, request_id: &str) -> String {
+        let file_id = uuid::Uuid::new_v4().to_string();
+        self.files.insert(
+            file_id.clone(),
+            StoredFile {
+                filename,
+                mime_type,
+                data,
+                request_id: request_id.to_string(),
+            },
+        );
+        file_id
+    }
+
+    /// Get a stored file by id. Returns None if the file's request has been completed.
+    pub fn get(&self, file_id: &str) -> Option<StoredFile> {
+        if let Some(entry) = self.files.get(file_id) {
+            let file = entry.value().clone();
+            if self.completed_requests.contains_key(&file.request_id) {
+                // Request completed, file is no longer available
+                None
+            } else {
+                Some(file)
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Remove a stored file by id.
+    pub fn remove(&self, file_id: &str) -> Option<StoredFile> {
+        self.files.remove(file_id).map(|(_, v)| v)
+    }
+
+    /// Mark a request as completed, making its files unavailable for download.
+    pub fn complete_request(&self, request_id: &str) {
+        self.completed_requests.insert(request_id.to_string(), ());
+    }
+}
 
 /// Gate shared state
 #[derive(Clone)]
@@ -36,6 +109,8 @@ pub struct GateState {
     pub cors_origins: Vec<String>,
     pub dev_mode: bool,
     pub started_at: Instant,
+    pub file_broker: Arc<FileBroker>,
+    pub max_upload_size_mb: u64,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -59,7 +134,8 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
         .route("/api/v1/logs", get(mgmt_logs))
         .route("/api/v1/keys", get(mgmt_list_keys).post(mgmt_create_key))
         .route("/api/v1/keys/:id", delete(mgmt_revoke_key))
-        .route("/api/v1/openapi.json", get(openapi_handler));
+        .route("/api/v1/openapi.json", get(openapi_handler))
+        .route("/api/v1/files/:id", get(download_file));
 
     if let Some(extra) = extra_routes {
         router = router.merge(extra);
@@ -201,9 +277,34 @@ async fn run_rune(
     State(state): State<GateState>,
     Path(name): Path<String>,
     Query(params): Query<RunParams>,
-    body: Bytes,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    execute_rune(&state, &name, params, body).await
+    let content_type = req
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // Read body with appropriate size limit
+    let max_body = if is_multipart(&content_type) {
+        (state.max_upload_size_mb as usize + 10) * 1024 * 1024
+    } else {
+        1024 * 1024
+    };
+
+    let body = match axum::body::to_bytes(req.into_body(), max_body).await {
+        Ok(b) => b,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "failed to read body",
+            );
+        }
+    };
+
+    execute_rune(&state, &name, params, body, &content_type).await
 }
 
 /// gate_path dynamic routing: find rune by matching path
@@ -213,8 +314,21 @@ async fn dynamic_rune_handler(
 ) -> impl IntoResponse {
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
+    let content_type = req
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
 
-    let body = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
+    // Read body with appropriate size limit
+    let max_body = if is_multipart(&content_type) {
+        (state.max_upload_size_mb as usize + 10) * 1024 * 1024
+    } else {
+        1024 * 1024
+    };
+
+    let body = match axum::body::to_bytes(req.into_body(), max_body).await {
         Ok(b) => b,
         Err(_) => {
             return error_response(
@@ -251,7 +365,7 @@ async fn dynamic_rune_handler(
 
     let params: RunParams = serde_urlencoded::from_str(&query).unwrap_or_default();
 
-    execute_rune(&state, &rune_name, params, Bytes::from(body.to_vec())).await
+    execute_rune(&state, &rune_name, params, Bytes::from(body.to_vec()), &content_type).await
 }
 
 /// Unified rune execution logic for both debug and dynamic routes
@@ -260,6 +374,7 @@ async fn execute_rune(
     rune_name: &str,
     params: RunParams,
     body: Bytes,
+    content_type: &str,
 ) -> axum::response::Response {
     let invoker = match state.relay.resolve(rune_name, &*state.resolver) {
         Some(inv) => inv,
@@ -298,16 +413,31 @@ async fn execute_rune(
         }
     }
 
-    // Input schema validation
-    if let Err(e) = validate_input(input_schema.as_deref(), &body) {
-        return error_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "VALIDATION_FAILED",
-            &e.to_string(),
-        );
-    }
-
     let request_id = unique_request_id();
+
+    // Handle multipart vs regular body
+    let (rune_input, file_metadata, file_ids) = if is_multipart(content_type) {
+        match parse_multipart(state, content_type, body, &request_id).await {
+            Ok(result) => {
+                let rune_input = result.json_input.unwrap_or_default();
+                (rune_input, Some(result.files), result.file_ids)
+            }
+            Err(err_response) => return err_response,
+        }
+    } else {
+        (body, None, Vec::new())
+    };
+
+    // Input schema validation (skip for multipart — the JSON part may be absent)
+    if file_metadata.is_none() {
+        if let Err(e) = validate_input(input_schema.as_deref(), &rune_input) {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "VALIDATION_FAILED",
+                &e.to_string(),
+            );
+        }
+    }
     let ctx = RuneContext {
         rune_name: rune_name.to_string(),
         request_id: request_id.clone(),
@@ -326,21 +456,25 @@ async fn execute_rune(
 
     // async mode
     if params.async_mode.unwrap_or(false) {
-        return async_execute(state, invoker, ctx, body, request_id).await;
+        return async_execute(state, invoker, ctx, rune_input, request_id).await;
     }
 
     // stream mode
     if params.stream.unwrap_or(false) {
-        return stream_execute(state, &request_id, invoker, ctx, body).await;
+        return stream_execute(state, &request_id, invoker, ctx, rune_input).await;
     }
 
     // sync mode (default)
     let start = Instant::now();
-    let input_size = body.len() as i64;
+    let input_size = rune_input.len() as i64;
     let rune_name_owned = rune_name.to_string();
     let req_id = request_id.clone();
 
-    let response = sync_execute(invoker, ctx, body, output_schema).await;
+    let response = if let Some(files) = file_metadata {
+        sync_execute_multipart(invoker, ctx, rune_input, output_schema, files, &file_ids, state).await
+    } else {
+        sync_execute(invoker, ctx, rune_input, output_schema).await
+    };
 
     // Record call log (best-effort)
     let latency_ms = start.elapsed().as_millis() as i64;
@@ -383,6 +517,66 @@ async fn sync_execute(
             }
         }
         Err(e) => map_error(e),
+    }
+}
+
+async fn sync_execute_multipart(
+    invoker: Arc<dyn RuneInvoker>,
+    ctx: RuneContext,
+    body: Bytes,
+    output_schema: Option<String>,
+    files: Vec<FileMetadata>,
+    file_ids: &[String],
+    state: &GateState,
+) -> axum::response::Response {
+    // If there are no files, just run the normal path
+    if files.is_empty() {
+        return sync_execute(invoker, ctx, body, output_schema).await;
+    }
+
+    match invoker.invoke_once(ctx, body).await {
+        Ok(output) => {
+            // Build response: merge handler output with files metadata
+            let files_json: Vec<serde_json::Value> = files
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "file_id": f.file_id,
+                        "filename": f.filename,
+                        "mime_type": f.mime_type,
+                        "size": f.size,
+                        "transfer_mode": f.transfer_mode,
+                    })
+                })
+                .collect();
+
+            let mut response_json = if output.is_empty() {
+                serde_json::json!({})
+            } else {
+                match serde_json::from_slice::<serde_json::Value>(&output) {
+                    Ok(json) => json,
+                    Err(_) => serde_json::json!({"output": String::from_utf8_lossy(&output)}),
+                }
+            };
+
+            if let Some(obj) = response_json.as_object_mut() {
+                obj.insert("files".to_string(), serde_json::json!(files_json));
+            } else {
+                response_json = serde_json::json!({
+                    "output": response_json,
+                    "files": files_json,
+                });
+            }
+
+            (StatusCode::OK, Json(response_json)).into_response()
+        }
+        Err(e) => {
+            // Clean up files on error
+            for fid in file_ids {
+                state.file_broker.remove(fid);
+            }
+            map_error(e)
+        }
     }
 }
 
@@ -719,6 +913,374 @@ fn map_error(e: RuneError) -> axum::response::Response {
     error_response(status, code, &e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// File download handler
+// ---------------------------------------------------------------------------
+
+async fn download_file(
+    State(state): State<GateState>,
+    Path(file_id): Path<String>,
+) -> axum::response::Response {
+    match state.file_broker.get(&file_id) {
+        Some(stored) => {
+            let headers = [
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    stored.mime_type.clone(),
+                ),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}\"", stored.filename),
+                ),
+            ];
+            (StatusCode::OK, headers, stored.data.to_vec()).into_response()
+        }
+        None => error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "file not found"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multipart parsing
+// ---------------------------------------------------------------------------
+
+/// Threshold for inline vs broker transfer: 4MB
+const INLINE_THRESHOLD: usize = 4 * 1024 * 1024;
+
+/// File metadata for the response JSON.
+#[derive(serde::Serialize, Clone)]
+struct FileMetadata {
+    file_id: String,
+    filename: String,
+    mime_type: String,
+    size: usize,
+    transfer_mode: String,
+}
+
+/// Sanitize a filename: remove path components, limit length.
+fn sanitize_filename(name: &str) -> String {
+    // Extract just the filename part (remove directory components)
+    let name = name
+        .replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or(name)
+        .to_string();
+    // Remove ".." components
+    let name = name.replace("..", "");
+    // Trim leading dots and slashes
+    let name = name.trim_start_matches('/').trim_start_matches('.').to_string();
+    // Limit length to 255 characters
+    if name.len() > 255 {
+        // Try to preserve extension
+        if let Some(dot_pos) = name.rfind('.') {
+            let ext = &name[dot_pos..];
+            if ext.len() < 255 {
+                let stem_len = 255 - ext.len();
+                return format!("{}{}", &name[..stem_len], ext);
+            }
+        }
+        name[..255].to_string()
+    } else if name.is_empty() {
+        // Generate a name for empty filenames
+        format!("upload_{}", uuid::Uuid::new_v4())
+    } else {
+        name
+    }
+}
+
+/// Extract the boundary from a multipart/form-data content-type header.
+fn extract_boundary(content_type: &str) -> Option<String> {
+    content_type
+        .split(';')
+        .find_map(|part| {
+            let part = part.trim();
+            if let Some(val) = part.strip_prefix("boundary=") {
+                Some(val.trim_matches('"').to_string())
+            } else {
+                None
+            }
+        })
+}
+
+/// Result of parsing a multipart body.
+struct MultipartParseResult {
+    /// JSON input part (if any), to be passed to the rune handler.
+    json_input: Option<Bytes>,
+    /// File metadata and stored file_ids.
+    files: Vec<FileMetadata>,
+    /// file_ids for cleanup after rune execution.
+    file_ids: Vec<String>,
+}
+
+/// Parse a multipart body, store files in the broker, and return parsed data.
+async fn parse_multipart(
+    state: &GateState,
+    content_type: &str,
+    body: Bytes,
+    request_id: &str,
+) -> Result<MultipartParseResult, axum::response::Response> {
+    let boundary = match extract_boundary(content_type) {
+        Some(b) => b,
+        None => {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "missing boundary in multipart content-type",
+            ));
+        }
+    };
+
+    let max_size_bytes = state.max_upload_size_mb as usize * 1024 * 1024;
+
+    let stream = futures_free_multipart_stream(body, &boundary);
+    let mut json_input: Option<Bytes> = None;
+    let mut files: Vec<FileMetadata> = Vec::new();
+    let mut file_ids: Vec<String> = Vec::new();
+    let mut total_file_size: usize = 0;
+
+    for part in stream {
+        let part = match part {
+            Ok(p) => p,
+            Err(e) => {
+                // Clean up any files already stored
+                for fid in &file_ids {
+                    state.file_broker.remove(fid);
+                }
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    &format!("failed to parse multipart body: {}", e),
+                ));
+            }
+        };
+
+        if part.filename.is_some() || (part.name != "input" && part.content_type.as_deref() != Some("application/json")) {
+            // This is a file part
+            let raw_filename = part.filename.unwrap_or_default();
+            let filename = sanitize_filename(&raw_filename);
+            let mime_type = part
+                .content_type
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let data = Bytes::from(part.data);
+            let size = data.len();
+
+            total_file_size += size;
+
+            // Check size limit
+            if total_file_size > max_size_bytes {
+                // Clean up any files already stored
+                for fid in &file_ids {
+                    state.file_broker.remove(fid);
+                }
+                return Err(error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "PAYLOAD_TOO_LARGE",
+                    "total upload size exceeds maximum allowed size",
+                ));
+            }
+
+            // Determine transfer mode
+            let transfer_mode = if size <= INLINE_THRESHOLD {
+                "inline".to_string()
+            } else {
+                "broker".to_string()
+            };
+
+            // Store in broker
+            let file_id = state.file_broker.store(filename.clone(), mime_type.clone(), data, request_id);
+            file_ids.push(file_id.clone());
+
+            files.push(FileMetadata {
+                file_id,
+                filename,
+                mime_type,
+                size,
+                transfer_mode,
+            });
+        } else {
+            // This is a JSON input part
+            json_input = Some(Bytes::from(part.data));
+        }
+    }
+
+    Ok(MultipartParseResult {
+        json_input,
+        files,
+        file_ids,
+    })
+}
+
+/// A simple multipart part.
+struct MultipartPart {
+    name: String,
+    filename: Option<String>,
+    content_type: Option<String>,
+    data: Vec<u8>,
+}
+
+/// Parse multipart body without external dependencies (simple synchronous parser).
+fn futures_free_multipart_stream(body: Bytes, boundary: &str) -> Vec<Result<MultipartPart, String>> {
+    let body = body.to_vec();
+    parse_multipart_binary(&body, boundary)
+}
+
+fn parse_multipart_binary(body: &[u8], boundary: &str) -> Vec<Result<MultipartPart, String>> {
+    let delimiter = format!("--{}", boundary).into_bytes();
+    let end_delimiter = format!("--{}--", boundary).into_bytes();
+    let mut results = Vec::new();
+
+    // Check for end delimiter presence
+    let has_end_delimiter = body.windows(end_delimiter.len()).any(|w| w == end_delimiter.as_slice());
+
+    // Find all delimiter positions
+    let mut positions = Vec::new();
+    let mut pos = 0;
+    while pos + delimiter.len() <= body.len() {
+        if &body[pos..pos + delimiter.len()] == delimiter.as_slice() {
+            positions.push(pos);
+        }
+        pos += 1;
+    }
+
+    if positions.is_empty() {
+        results.push(Err("no multipart boundaries found".to_string()));
+        return results;
+    }
+
+    if !has_end_delimiter {
+        results.push(Err("truncated multipart body: missing closing boundary".to_string()));
+        return results;
+    }
+
+    let mut _found_end = false;
+
+    for i in 0..positions.len() {
+        let start = positions[i] + delimiter.len();
+        // Check if this is the end delimiter
+        if start + 2 <= body.len() && &body[start..start + 2] == b"--" {
+            _found_end = true;
+            break; // End delimiter
+        }
+
+        let end = if i + 1 < positions.len() {
+            positions[i + 1]
+        } else {
+            body.len()
+        };
+
+        let part_data = &body[start..end];
+
+        // Skip leading \r\n after delimiter
+        let part_data = if part_data.starts_with(b"\r\n") {
+            &part_data[2..]
+        } else if part_data.starts_with(b"\n") {
+            &part_data[1..]
+        } else {
+            part_data
+        };
+
+        // Find the header/body separator (double CRLF)
+        let header_end = find_double_crlf(part_data);
+        if header_end.is_none() {
+            // Might be end delimiter or malformed
+            continue;
+        }
+        let header_end = header_end.unwrap();
+        let header_bytes = &part_data[..header_end];
+        let body_start = header_end + 4; // skip \r\n\r\n
+
+        let headers_str = match std::str::from_utf8(header_bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                results.push(Err("invalid UTF-8 in headers".to_string()));
+                continue;
+            }
+        };
+
+        // Parse headers
+        let mut name = String::new();
+        let mut filename: Option<String> = None;
+        let mut content_type: Option<String> = None;
+
+        for line in headers_str.lines() {
+            let line = line.trim();
+            if let Some(val) = line.strip_prefix("Content-Disposition:") {
+                let val = val.trim();
+                // Extract name
+                if let Some(n) = extract_header_param(val, "name") {
+                    name = n;
+                }
+                // Extract filename
+                if let Some(f) = extract_header_param(val, "filename") {
+                    filename = Some(f);
+                }
+            } else if let Some(val) = line.strip_prefix("Content-Type:") {
+                content_type = Some(val.trim().to_string());
+            }
+        }
+
+        // Get body data (strip trailing \r\n before next delimiter)
+        let mut body_data = if body_start < part_data.len() {
+            part_data[body_start..].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        // Strip trailing \r\n
+        if body_data.ends_with(b"\r\n") {
+            body_data.truncate(body_data.len() - 2);
+        }
+
+        results.push(Ok(MultipartPart {
+            name,
+            filename,
+            content_type,
+            data: body_data,
+        }));
+    }
+
+    if results.is_empty() {
+        results.push(Err("no valid parts found in multipart body".to_string()));
+    }
+
+    results
+}
+
+fn find_double_crlf(data: &[u8]) -> Option<usize> {
+    for i in 0..data.len().saturating_sub(3) {
+        if &data[i..i + 4] == b"\r\n\r\n" {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn extract_header_param(header: &str, param: &str) -> Option<String> {
+    let search = format!("{}=\"", param);
+    if let Some(start) = header.find(&search) {
+        let start = start + search.len();
+        if let Some(end) = header[start..].find('"') {
+            return Some(header[start..start + end].to_string());
+        }
+    }
+    // Try without quotes
+    let search = format!("{}=", param);
+    if let Some(start) = header.find(&search) {
+        let start = start + search.len();
+        let end = header[start..].find(';').unwrap_or(header[start..].len());
+        let val = header[start..start + end].trim().to_string();
+        if !val.is_empty() {
+            return Some(val);
+        }
+    }
+    None
+}
+
+/// Check if the content-type indicates multipart/form-data.
+fn is_multipart(content_type: &str) -> bool {
+    content_type.starts_with("multipart/form-data")
+}
+
 fn unique_request_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -804,6 +1366,8 @@ mod tests {
             cors_origins: vec![],
             dev_mode: true,
             started_at: Instant::now(),
+            file_broker: Arc::new(FileBroker::new()),
+            max_upload_size_mb: 10,
         }
     }
 
@@ -1711,6 +2275,8 @@ mod tests {
             cors_origins: vec![],
             dev_mode: true,
             started_at: Instant::now(),
+            file_broker: Arc::new(FileBroker::new()),
+            max_upload_size_mb: 10,
         };
 
         for (path, expected_name) in [("/alpha", "alpha"), ("/beta", "beta"), ("/gamma", "gamma")] {
@@ -2043,6 +2609,8 @@ mod tests {
             cors_origins: vec![],
             dev_mode: true,
             started_at: Instant::now(),
+            file_broker: Arc::new(FileBroker::new()),
+            max_upload_size_mb: 10,
         };
 
         let app = build_router(state, None);
@@ -2569,6 +3137,8 @@ mod tests {
             cors_origins: vec![],
             dev_mode: true,
             started_at: Instant::now(),
+            file_broker: Arc::new(FileBroker::new()),
+            max_upload_size_mb: 10,
         };
 
         // Requesting the percent-encoded path — the dynamic_rune_handler
@@ -2656,6 +3226,8 @@ mod tests {
             cors_origins: vec![],
             dev_mode: true,
             started_at: Instant::now(),
+            file_broker: Arc::new(FileBroker::new()),
+            max_upload_size_mb: 10,
         };
 
         // Debug route with a rune name that doesn't exist (contains unicode)
@@ -2730,6 +3302,8 @@ mod tests {
             cors_origins: vec![],
             dev_mode: true,
             started_at: Instant::now(),
+            file_broker: Arc::new(FileBroker::new()),
+            max_upload_size_mb: 10,
         };
 
         // Percent-encoded request for "/符文"
@@ -2960,7 +3534,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_upload_single_file_response_contains_file_metadata() {
         let app = test_router();
         let boundary = "----TestBoundaryUpload1";
@@ -2992,7 +3565,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_upload_json_and_file_together_response_body() {
         let app = test_router();
         let boundary = "----TestBoundaryJsonFile";
@@ -3025,7 +3597,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_upload_multiple_files_response_body() {
         let app = test_router();
         let boundary = "----TestBoundaryMulti";
@@ -3065,7 +3636,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_multipart_no_file_only_json_processes_input() {
         let app = test_router();
         let boundary = "----TestBoundaryNoFile";
@@ -3091,7 +3661,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart + size limits not yet implemented
     async fn test_file_under_max_upload_size_succeeds() {
         // Assuming default max_upload_size_mb = 10, a 1MB file is well under.
         let state = test_state();
@@ -3118,11 +3687,10 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart + size limits not yet implemented
     async fn test_file_equal_to_max_upload_size_succeeds() {
         // When max_upload_size_mb = 1, a file of exactly 1MB should pass.
-        let state = test_state();
-        // TODO: set state.max_upload_size_mb = 1 once the field is added
+        let mut state = test_state();
+        state.max_upload_size_mb = 1;
         let app = build_router(state, None);
         let boundary = "----TestBoundarySizeEq";
         let exact_data = vec![0x42u8; 1 * 1024 * 1024];
@@ -3144,10 +3712,9 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart + size limits not yet implemented
     async fn test_file_exceeds_max_upload_size_returns_413() {
-        let state = test_state();
-        // TODO: set state.max_upload_size_mb = 1 once the field is added
+        let mut state = test_state();
+        state.max_upload_size_mb = 1;
         let app = build_router(state, None);
         let boundary = "----TestBoundarySizeOver";
         let big_data = vec![0x43u8; 2 * 1024 * 1024]; // 2MB > 1MB limit
@@ -3173,10 +3740,9 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart + size limits not yet implemented
     async fn test_multiple_files_total_size_exceeds_limit_returns_413() {
-        let state = test_state();
-        // TODO: set state.max_upload_size_mb = 1
+        let mut state = test_state();
+        state.max_upload_size_mb = 1;
         let app = build_router(state, None);
         let boundary = "----TestBoundaryMultiOver";
         let chunk = vec![0x44u8; 600 * 1024]; // 600KB each, total 1.2MB > 1MB
@@ -3200,7 +3766,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // threshold routing not yet implemented
     async fn test_file_exactly_4mb_threshold_inline() {
         // A file of exactly 4MB (4 * 1024 * 1024 bytes) should be sent inline
         // (at the threshold boundary, inline is used for <= 4MB).
@@ -3229,7 +3794,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // threshold routing not yet implemented
     async fn test_small_file_under_4mb_sent_inline() {
         let app = test_router();
         let boundary = "----TestBoundarySmallInline";
@@ -3256,7 +3820,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // threshold routing not yet implemented
     async fn test_large_file_over_4mb_uses_broker() {
         let state = test_state();
         let app = build_router(state.clone(), None);
@@ -3288,7 +3851,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // threshold routing not yet implemented
     async fn test_mixed_small_and_large_files_different_transfer_modes() {
         let state = test_state();
         let app = build_router(state.clone(), None);
@@ -3330,7 +3892,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // file broker not yet implemented
     async fn test_upload_then_download_e2e_lifecycle() {
         // E2E: upload a file via multipart, extract file_id from response,
         // then GET /api/v1/files/:file_id and verify content matches.
@@ -3404,7 +3965,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // file broker not yet implemented
     async fn test_download_nonexistent_file_returns_404_with_error() {
         let app = test_router();
         let response = app
@@ -3434,10 +3994,10 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // file broker not yet implemented
     async fn test_file_cleaned_up_after_request_returns_404() {
-        // Upload a file, process the rune, then verify the temporary file
-        // is cleaned up and no longer downloadable.
+        // Upload a file, then explicitly mark the request as completed
+        // (simulating rune execution finishing), then verify the file
+        // is no longer downloadable.
         let state = test_state();
 
         // Step 1: Upload a file
@@ -3455,10 +4015,12 @@ mod tests {
             .as_str()
             .expect("should have file_id");
 
-        // Step 2: Rune execution completes (implicit in sync mode).
-        // After completion, temporary files should be cleaned up.
+        // Step 2: Look up the request_id from the broker, then mark it completed
+        let stored = state.file_broker.get(file_id).expect("file should exist before cleanup");
+        let request_id = stored.request_id.clone();
+        state.file_broker.complete_request(&request_id);
 
-        // Step 3: Try to download the cleaned-up file
+        // Step 3: Try to download the cleaned-up file → should be 404
         let app2 = build_router(state, None);
         let download_resp = app2
             .oneshot(
@@ -3481,7 +4043,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // file broker not yet implemented
     async fn test_download_file_correct_content_type_header() {
         let state = test_state();
 
@@ -3527,7 +4088,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // file broker not yet implemented
     async fn test_download_file_content_disposition_header() {
         let state = test_state();
 
@@ -3576,7 +4136,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_upload_preserves_original_filename_and_mime_type() {
         let app = test_router();
         let boundary = "----TestBoundaryMeta";
@@ -3601,7 +4160,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_upload_without_mime_type_defaults_to_octet_stream() {
         let app = test_router();
         let boundary = "----TestBoundaryNoMime";
@@ -3628,7 +4186,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_empty_file_zero_bytes_accepted() {
         let app = test_router();
         let boundary = "----TestBoundaryEmpty";
@@ -3652,7 +4209,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_filename_with_spaces_preserved() {
         let app = test_router();
         let boundary = "----TestBoundarySpaces";
@@ -3674,7 +4230,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_filename_with_chinese_characters_preserved() {
         let app = test_router();
         let boundary = "----TestBoundaryCJK";
@@ -3696,7 +4251,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_filename_path_traversal_sanitized() {
         let app = test_router();
         let boundary = "----TestBoundaryPathSep";
@@ -3729,7 +4283,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_very_long_filename_handled() {
         let app = test_router();
         let boundary = "----TestBoundaryLongName";
@@ -3768,7 +4321,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_empty_filename_handled() {
         let app = test_router();
         let boundary = "----TestBoundaryEmptyName";
@@ -3803,7 +4355,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_no_filename_attribute_in_disposition() {
         // A file part without the filename attribute in Content-Disposition
         let app = test_router();
@@ -3842,7 +4393,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // file broker not yet implemented
     async fn test_binary_file_transfer_data_integrity() {
         // Upload binary data (all 256 byte values), download it, and verify
         // byte-for-byte integrity.
@@ -3896,7 +4446,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_multipart_upload_via_debug_route() {
         let app = test_router();
         let boundary = "----TestBoundaryDebugMulti";
@@ -3923,7 +4472,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_multipart_debug_route_nonexistent_rune_404() {
         let app = test_router();
         let boundary = "----TestBoundaryDebug404";
@@ -3944,7 +4492,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart + async not yet implemented
     async fn test_multipart_with_async_mode_returns_task_id() {
         let state = test_state();
         let app = build_router(state.clone(), None);
@@ -3974,7 +4521,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart + async not yet implemented
     async fn test_multipart_async_via_debug_route() {
         let state = test_state();
         let app = build_router(state.clone(), None);
@@ -4001,7 +4547,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_malformed_multipart_body_returns_400() {
         let app = test_router();
         // Send garbage bytes with multipart content-type
@@ -4030,7 +4575,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_truncated_multipart_body_returns_400() {
         let app = test_router();
         let boundary = "----TestBoundaryTruncated";
@@ -4057,7 +4601,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // file broker not yet implemented
     async fn test_invalid_file_id_format_returns_error() {
         // Try various invalid file_id formats
         for invalid_id in &[
@@ -4065,7 +4608,7 @@ mod tests {
             "12345",
             "",
             "../../../etc/passwd",
-            "<script>alert(1)</script>",
+            "%3Cscript%3Ealert(1)%3C/script%3E",
         ] {
             let uri = format!("/api/v1/files/{}", invalid_id);
             let app = test_router();
@@ -4102,7 +4645,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_content_type_multipart_but_body_is_json_returns_400() {
         let app = test_router();
         let response = app
@@ -4129,7 +4671,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_content_type_json_but_body_is_multipart() {
         let app = test_router();
         let boundary = "----TestBoundaryMismatch";
@@ -4165,7 +4706,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_concurrent_uploads_isolation() {
         // Multiple concurrent uploads should not interfere with each other.
         // Each upload should get its own file_ids and metadata.
@@ -4224,10 +4764,9 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // size limit config not yet implemented
     async fn test_max_upload_size_zero_rejects_all() {
-        let state = test_state();
-        // TODO: set state.max_upload_size_mb = 0 once the field is added
+        let mut state = test_state();
+        state.max_upload_size_mb = 0;
         let app = build_router(state, None);
         let boundary = "----TestBoundaryZeroLimit";
         // Even a 1-byte file should be rejected
@@ -4252,7 +4791,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // file broker not yet implemented
     async fn test_full_e2e_lifecycle_multiple_files() {
         let state = test_state();
         let files_data = vec![
@@ -4332,7 +4870,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_gate_path_and_debug_route_same_response_shape() {
         let state = test_state();
         let boundary = "----TestBoundaryParity";
@@ -4378,7 +4915,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // multipart handling not yet implemented
     async fn test_multipart_no_boundary_in_content_type_returns_400() {
         let app = test_router();
         let response = app
@@ -4406,7 +4942,6 @@ mod tests {
     // =========================================================================
 
     #[tokio::test]
-    #[ignore] // file broker not yet implemented
     async fn test_large_binary_round_trip_checksum() {
         // Upload a deterministic 1MB binary file, download it, and verify
         // that every byte matches via a simple checksum.
@@ -4574,6 +5109,8 @@ mod tests {
             cors_origins: vec![],
             dev_mode: true,
             started_at: Instant::now(),
+            file_broker: Arc::new(FileBroker::new()),
+            max_upload_size_mb: 10,
         }
     }
 

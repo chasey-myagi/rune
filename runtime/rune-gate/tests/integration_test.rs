@@ -61,6 +61,8 @@ fn make_state(auth_enabled: bool) -> GateState {
         cors_origins: vec![],
         dev_mode: !auth_enabled,
         started_at: Instant::now(),
+        file_broker: Arc::new(gate::FileBroker::new()),
+        max_upload_size_mb: 10,
     }
 }
 
@@ -790,6 +792,8 @@ async fn test_mixed_sync_and_stream_runes() {
         cors_origins: vec![],
         dev_mode: true,
         started_at: std::time::Instant::now(),
+        file_broker: Arc::new(gate::FileBroker::new()),
+        max_upload_size_mb: 10,
     };
 
     // Sync rune: normal call works
@@ -913,6 +917,8 @@ async fn test_stats_accumulate_across_runes() {
         cors_origins: vec![],
         dev_mode: true,
         started_at: std::time::Instant::now(),
+        file_broker: Arc::new(gate::FileBroker::new()),
+        max_upload_size_mb: 10,
     };
 
     // Call rune_a 4 times
