@@ -216,8 +216,8 @@ async fn main() -> anyhow::Result<()> {
     // Build final router with gate + flow routes
     let http_router = gate::build_router(gate_state, Some(flow_routes));
 
-    let http_listener = tokio::net::TcpListener::bind(running.config.http_addr).await?;
-    tracing::info!("gate listening on {}", running.config.http_addr);
+    let http_listener = tokio::net::TcpListener::bind(running.config.http_addr()).await?;
+    tracing::info!("gate listening on {}", running.config.http_addr());
 
     let http_handle = tokio::spawn(async move {
         axum::serve(http_listener, http_router).await.unwrap();
@@ -230,12 +230,12 @@ async fn main() -> anyhow::Result<()> {
         session_mgr: Arc::clone(&running.session_mgr),
     };
 
-    tracing::info!("grpc listening on {}", running.config.grpc_addr);
+    tracing::info!("grpc listening on {}", running.config.grpc_addr());
 
     let grpc_handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(RuneServiceServer::new(grpc_service))
-            .serve(running.config.grpc_addr)
+            .serve(running.config.grpc_addr())
             .await
             .unwrap();
     });

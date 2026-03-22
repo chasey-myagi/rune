@@ -66,7 +66,7 @@ impl App {
     /// NOT get access to components for building an HTTP server; use `build()`
     /// instead if you need that.
     pub async fn run(self) -> anyhow::Result<()> {
-        let grpc_addr = self.config.grpc_addr;
+        let grpc_addr = self.config.grpc_addr();
 
         let grpc_service = RuneGrpcService {
             relay: Arc::clone(&self.relay),

@@ -4,5 +4,6 @@ pub mod relay;
 pub mod resolver;
 pub mod session;
 pub mod app;
+pub mod auth;
 pub mod config;
 pub mod grpc_service;
