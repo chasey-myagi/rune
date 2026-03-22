@@ -21,6 +21,9 @@ pub struct RuneConfig {
     pub description: String,
     pub supports_stream: bool,
     pub gate: Option<GateConfig>,
+    pub input_schema: Option<String>,   // JSON Schema string
+    pub output_schema: Option<String>,  // JSON Schema string
+    pub priority: i32,                  // Caster 优先级（高值优先）
 }
 
 #[derive(Debug, Clone)]

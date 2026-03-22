@@ -38,6 +38,7 @@ message CasterAttach {
 message AttachAck {
     bool accepted = 1;
     string reason = 2;
+    repeated string supported_features = 3;   // Runtime 支持的特性集
 }
 
 message CasterDetach {
@@ -50,14 +51,24 @@ message RuneDeclaration {
     string name = 1;
     string version = 2;
     string description = 3;
-    reserved 4, 5;  // input_schema, output_schema — removed in v0.1.0, reserved for future contract support
+    string input_schema = 4;         // JSON Schema string（可选，不声明则跳过校验）
+    string output_schema = 5;        // JSON Schema string（可选）
     bool supports_stream = 6;
     GateConfig gate = 7;
+    int32 priority = 8;              // Caster 优先级（高值优先）
 }
 
 message GateConfig {
     string path = 1;
     string method = 2;
+}
+
+// ── 文件附件 ──
+
+message FileAttachment {
+    string filename = 1;
+    bytes data = 2;
+    string mime_type = 3;
 }
 
 // ── 执行 ──
@@ -68,6 +79,7 @@ message ExecuteRequest {
     bytes input = 3;
     map<string, string> context = 4;
     uint32 timeout_ms = 5;
+    repeated FileAttachment attachments = 6;   // 文件附件
 }
 
 message CancelRequest {
@@ -80,6 +92,7 @@ message ExecuteResult {
     Status status = 2;
     bytes output = 3;
     ErrorDetail error = 4;
+    repeated FileAttachment attachments = 5;   // 返回文件附件
 }
 
 // ── 流式 ──

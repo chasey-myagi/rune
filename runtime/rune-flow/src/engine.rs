@@ -123,7 +123,7 @@ mod tests {
             Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
         });
         relay.register(
-            RuneConfig { name: "step_a".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
+            RuneConfig { name: "step_a".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None, input_schema: None, output_schema: None, priority: 0 },
             Arc::new(LocalInvoker::new(ha)), None,
         ).unwrap();
 
@@ -135,7 +135,7 @@ mod tests {
             Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
         });
         relay.register(
-            RuneConfig { name: "step_b".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
+            RuneConfig { name: "step_b".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None, input_schema: None, output_schema: None, priority: 0 },
             Arc::new(LocalInvoker::new(hb)), None,
         ).unwrap();
 
@@ -147,7 +147,7 @@ mod tests {
             Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
         });
         relay.register(
-            RuneConfig { name: "step_c".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
+            RuneConfig { name: "step_c".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None, input_schema: None, output_schema: None, priority: 0 },
             Arc::new(LocalInvoker::new(hc)), None,
         ).unwrap();
 
@@ -159,7 +159,7 @@ mod tests {
             })
         });
         relay.register(
-            RuneConfig { name: "fail_step".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None },
+            RuneConfig { name: "fail_step".into(), version: String::new(), description: "".into(), supports_stream: false, gate: None, input_schema: None, output_schema: None, priority: 0 },
             Arc::new(LocalInvoker::new(hf)), None,
         ).unwrap();
 

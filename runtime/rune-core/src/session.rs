@@ -181,6 +181,9 @@ impl SessionManager {
                                 path: g.path.clone(),
                                 method: if g.method.is_empty() { "POST".to_string() } else { g.method.clone() },
                             }),
+                            input_schema: if decl.input_schema.is_empty() { None } else { Some(decl.input_schema.clone()) },
+                            output_schema: if decl.output_schema.is_empty() { None } else { Some(decl.output_schema.clone()) },
+                            priority: decl.priority,
                         };
                         configs.push(config.clone());
                         let invoker = Arc::new(RemoteInvoker {
@@ -200,6 +203,7 @@ impl SessionManager {
                     let ack = SessionMessage {
                         payload: Some(session_message::Payload::AttachAck(AttachAck {
                             accepted: true, reason: String::new(),
+                            supported_features: Vec::new(),
                         })),
                     };
                     let _ = outbound_tx.send(ack).await;
@@ -304,6 +308,7 @@ impl SessionManager {
                 request_id: request_id.to_string(), rune_name: rune_name.to_string(),
                 input: input.to_vec(), context,
                 timeout_ms: timeout.as_millis() as u32,
+                attachments: Vec::new(),
             })),
         };
 
@@ -334,6 +339,7 @@ impl SessionManager {
                 request_id: request_id.to_string(), rune_name: rune_name.to_string(),
                 input: input.to_vec(), context,
                 timeout_ms: timeout.as_millis() as u32,
+                attachments: Vec::new(),
             })),
         };
 

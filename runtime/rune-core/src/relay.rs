@@ -115,6 +115,9 @@ mod tests {
             description: "echo test".into(),
             supports_stream: false,
             gate: None,
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
         relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
 
@@ -151,6 +154,9 @@ mod tests {
             description: "".into(),
             supports_stream: false,
             gate: None,
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
         relay.register(cfg("rr"), Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
         relay.register(cfg("rr"), Arc::new(crate::invoker::LocalInvoker::new(h2)), None).unwrap();
@@ -179,6 +185,9 @@ mod tests {
             description: "".into(),
             supports_stream: false,
             gate: None,
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
         relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), Some("c1".into())).unwrap();
 
@@ -205,6 +214,9 @@ mod tests {
                 path: "/api/do-something".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
         let config2 = RuneConfig {
             name: "rune_b".into(),
@@ -215,6 +227,9 @@ mod tests {
                 path: "/api/do-something".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
 
         relay.register(config1, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
@@ -243,6 +258,9 @@ mod tests {
                 path: "/api/resource".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
         let config2 = RuneConfig {
             name: "rune_b".into(),
@@ -253,6 +271,9 @@ mod tests {
                 path: "/api/resource".into(),
                 method: "GET".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
 
         relay.register(config1, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
@@ -275,6 +296,9 @@ mod tests {
                 path: "/api/shared".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
 
         relay.register(config.clone(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
@@ -296,6 +320,9 @@ mod tests {
                 path: "/health".into(),
                 method: "GET".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
 
         let result = relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
@@ -318,6 +345,9 @@ mod tests {
                 path: "/api/v1/runes".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
 
         let result = relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
@@ -340,6 +370,9 @@ mod tests {
                 path: "/api/v1/runes/custom".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
 
         let result = relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
@@ -373,6 +406,9 @@ mod tests {
                 path: "/api/echo".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         }, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
 
         relay.register(RuneConfig {
@@ -381,6 +417,9 @@ mod tests {
             description: "".into(),
             supports_stream: false,
             gate: None,
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         }, Arc::new(crate::invoker::LocalInvoker::new(h2)), None).unwrap();
 
         // Same name "echo" from another caster
@@ -393,6 +432,9 @@ mod tests {
                 path: "/api/echo".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         }, Arc::new(crate::invoker::LocalInvoker::new(h3)), Some("c2".into())).unwrap();
 
         let list = relay.list();
@@ -424,6 +466,9 @@ mod tests {
             description: "".into(),
             supports_stream: false,
             gate: None,
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
 
         // Register with caster_id "c1"
@@ -460,6 +505,9 @@ mod tests {
             description: "".into(),
             supports_stream: false,
             gate: None,
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
         relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), Some("c1".into())).unwrap();
 
@@ -487,6 +535,9 @@ mod tests {
                     path: format!("/api/rune_{}", i),
                     method: "POST".into(),
                 }),
+                input_schema: None,
+                output_schema: None,
+                priority: 0,
             };
             relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
         }
@@ -527,6 +578,9 @@ mod tests {
                 description: "".into(),
                 supports_stream: false,
                 gate: None,
+                input_schema: None,
+                output_schema: None,
+                priority: 0,
             };
             relay.register(
                 config,
@@ -581,6 +635,9 @@ mod tests {
             description: "".into(),
             supports_stream: false,
             gate: None,
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
 
         // Register A
@@ -632,6 +689,9 @@ mod tests {
                 path: "/api/path_a".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
         let config2 = RuneConfig {
             name: "multi_path_rune".into(),
@@ -642,6 +702,9 @@ mod tests {
                 path: "/api/path_b".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
 
         relay.register(config1, Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
@@ -676,6 +739,9 @@ mod tests {
                 path: "/translate?v=1".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
 
         // Should succeed (gate path is just a string, no URL parsing)
@@ -700,6 +766,9 @@ mod tests {
                 path: "/translate#section".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         };
 
         relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
@@ -723,6 +792,9 @@ mod tests {
                 description: "".into(),
                 supports_stream: false,
                 gate: None,
+                input_schema: None,
+                output_schema: None,
+                priority: 0,
             };
             relay.register(
                 config,

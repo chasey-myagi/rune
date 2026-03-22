@@ -187,6 +187,9 @@ async fn main() -> anyhow::Result<()> {
                 path: "/hello".into(),
                 method: "POST".into(),
             }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         },
         make_handler(|_ctx, _input| async {
             Ok(Bytes::from(r#"{"message":"hello from local rune!"}"#))
@@ -201,6 +204,9 @@ async fn main() -> anyhow::Result<()> {
             description: "local step_b".into(),
             supports_stream: false,
             gate: None,
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
         },
         make_handler(|_ctx, input| async move {
             let mut v: serde_json::Value =
