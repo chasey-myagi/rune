@@ -1790,6 +1790,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "dirs",
+ "rand 0.8.5",
  "rune-proto",
  "serde",
  "serde_json",

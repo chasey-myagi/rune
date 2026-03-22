@@ -169,6 +169,12 @@ async fn main() -> anyhow::Result<()> {
         file_broker: Arc::new(gate::FileBroker::new()),
         max_upload_size_mb: 100,
         flow_engine: Arc::clone(&flow_engine),
+        rate_limiter: if config.server.dev_mode {
+            None
+        } else {
+            Some(gate::RateLimitState::new(config.rate_limit.requests_per_minute, 60))
+        },
+        shutdown: gate::ShutdownCoordinator::new(),
     };
 
     let http_router = gate::build_router(gate_state, None);

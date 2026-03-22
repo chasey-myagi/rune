@@ -95,4 +95,65 @@ impl RuneStore {
             .collect::<Result<Vec<_>, _>>()?;
         Ok((total, by_rune))
     }
+
+    /// Enhanced call statistics: per-rune count, avg_latency, success_rate, p95_latency_ms.
+    /// Returns (total_calls, Vec<(rune_name, count, avg_latency, success_rate, p95_latency_ms)>).
+    pub fn call_stats_enhanced(&self) -> StoreResult<(i64, Vec<(String, i64, i64, f64, f64)>)> {
+        let conn = self.conn.lock().unwrap();
+        let total: i64 =
+            conn.query_row("SELECT COUNT(*) FROM call_logs", [], |row| row.get(0))?;
+
+        // Get distinct rune names
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT rune_name FROM call_logs ORDER BY rune_name",
+        )?;
+        let rune_names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut results = Vec::new();
+        for rune_name in rune_names {
+            // Count total and successful (status_code 200-299) calls
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM call_logs WHERE rune_name = ?1",
+                rusqlite::params![rune_name],
+                |row| row.get(0),
+            )?;
+            let success_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM call_logs WHERE rune_name = ?1 AND status_code >= 200 AND status_code < 300",
+                rusqlite::params![rune_name],
+                |row| row.get(0),
+            )?;
+            let avg_latency: i64 = conn.query_row(
+                "SELECT CAST(COALESCE(AVG(latency_ms), 0) AS INTEGER) FROM call_logs WHERE rune_name = ?1",
+                rusqlite::params![rune_name],
+                |row| row.get(0),
+            )?;
+
+            let success_rate = if count > 0 {
+                success_count as f64 / count as f64
+            } else {
+                0.0
+            };
+
+            // Get all latencies for p95 calculation
+            let mut lat_stmt = conn.prepare(
+                "SELECT latency_ms FROM call_logs WHERE rune_name = ?1 ORDER BY latency_ms ASC",
+            )?;
+            let latencies: Vec<i64> = lat_stmt
+                .query_map(rusqlite::params![rune_name], |row| row.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let p95 = if latencies.is_empty() {
+                0.0
+            } else {
+                let idx = ((latencies.len() as f64 * 0.95).ceil() as usize).min(latencies.len()) - 1;
+                latencies[idx] as f64
+            };
+
+            results.push((rune_name, count, avg_latency, success_rate, p95));
+        }
+
+        Ok((total, results))
+    }
 }

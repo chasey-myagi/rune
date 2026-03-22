@@ -68,6 +68,8 @@ fn make_state(auth_enabled: bool) -> GateState {
         file_broker: Arc::new(gate::FileBroker::new()),
         max_upload_size_mb: 10,
         flow_engine,
+        rate_limiter: None,
+        shutdown: gate::ShutdownCoordinator::new(),
     }
 }
 
@@ -803,6 +805,8 @@ async fn test_mixed_sync_and_stream_runes() {
         file_broker: Arc::new(gate::FileBroker::new()),
         max_upload_size_mb: 10,
         flow_engine,
+        rate_limiter: None,
+        shutdown: gate::ShutdownCoordinator::new(),
     };
 
     // Sync rune: normal call works
@@ -932,6 +936,8 @@ async fn test_stats_accumulate_across_runes() {
         file_broker: Arc::new(gate::FileBroker::new()),
         max_upload_size_mb: 10,
         flow_engine,
+        rate_limiter: None,
+        shutdown: gate::ShutdownCoordinator::new(),
     };
 
     // Call rune_a 4 times

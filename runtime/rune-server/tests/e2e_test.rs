@@ -155,6 +155,8 @@ fn build_test_state(auth_enabled: bool) -> (GateState, Arc<RuneStore>) {
         file_broker: Arc::new(gate::FileBroker::new()),
         max_upload_size_mb: 1, // 1MB for upload tests
         flow_engine,
+        rate_limiter: None,
+        shutdown: gate::ShutdownCoordinator::new(),
     };
 
     (state, store)

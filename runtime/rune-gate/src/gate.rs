@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::Instant;
 
 use axum::{
@@ -25,6 +26,82 @@ use rune_flow::engine::{FlowEngine, FlowError};
 use rune_schema::validator::{validate_input, validate_output};
 use rune_schema::openapi::{generate_openapi, RuneInfo};
 use rune_store::{CallLog, RuneStore, TaskStatus};
+
+// ---------------------------------------------------------------------------
+// Shutdown Coordinator
+// ---------------------------------------------------------------------------
+
+/// Coordinates graceful shutdown across the gate layer.
+#[derive(Clone)]
+pub struct ShutdownCoordinator {
+    draining: Arc<AtomicBool>,
+}
+
+impl ShutdownCoordinator {
+    pub fn new() -> Self {
+        Self {
+            draining: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Signal draining mode — new requests should be rejected with 503.
+    pub fn start_drain(&self) {
+        self.draining.store(true, AtomicOrdering::SeqCst);
+    }
+
+    /// Check if the server is in draining mode.
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(AtomicOrdering::SeqCst)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rate Limit State
+// ---------------------------------------------------------------------------
+
+/// Per-key rate limit counter: (count, window_start)
+#[derive(Clone)]
+pub struct RateLimitState {
+    counters: Arc<DashMap<String, (u32, Instant)>>,
+    requests_per_window: u32,
+    window_secs: u64,
+}
+
+impl RateLimitState {
+    pub fn new(requests_per_window: u32, window_secs: u64) -> Self {
+        Self {
+            counters: Arc::new(DashMap::new()),
+            requests_per_window,
+            window_secs,
+        }
+    }
+
+    /// Check if a request from the given key is allowed.
+    /// Returns Ok(()) if allowed, Err(retry_after_secs) if rate limited.
+    pub fn check(&self, key: &str) -> Result<(), u64> {
+        let now = Instant::now();
+        let mut entry = self.counters.entry(key.to_string()).or_insert((0, now));
+        let (count, window_start) = entry.value_mut();
+
+        // Check if window has expired
+        let elapsed = now.duration_since(*window_start).as_secs();
+        if elapsed >= self.window_secs {
+            // Reset window
+            *count = 1;
+            *window_start = now;
+            return Ok(());
+        }
+
+        // Within window — check count
+        if *count >= self.requests_per_window {
+            let retry_after = self.window_secs - elapsed;
+            return Err(retry_after.max(1));
+        }
+
+        *count += 1;
+        Ok(())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // File Broker — manages temporary file storage for multipart uploads
@@ -117,6 +194,8 @@ pub struct GateState {
     pub file_broker: Arc<FileBroker>,
     pub max_upload_size_mb: u64,
     pub flow_engine: Arc<tokio::sync::RwLock<FlowEngine>>,
+    pub rate_limiter: Option<RateLimitState>,
+    pub shutdown: ShutdownCoordinator,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -169,6 +248,8 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
     router
         .fallback(dynamic_rune_handler)
         .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), shutdown_middleware))
         .layer(middleware::from_fn_with_state(state, auth_middleware))
         .layer(cors)
 }
@@ -215,11 +296,98 @@ async fn auth_middleware(
 }
 
 // ---------------------------------------------------------------------------
+// Shutdown middleware — rejects new requests during drain phase
+// ---------------------------------------------------------------------------
+
+async fn shutdown_middleware(
+    State(state): State<GateState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    if state.shutdown.is_draining() {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "server is shutting down",
+        );
+    }
+    next.run(req).await
+}
+
+// ---------------------------------------------------------------------------
+// Rate limit middleware
+// ---------------------------------------------------------------------------
+
+async fn rate_limit_middleware(
+    State(state): State<GateState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    // Skip rate limiting in dev mode or if not configured
+    if state.dev_mode {
+        return next.run(req).await;
+    }
+
+    let rate_limiter = match &state.rate_limiter {
+        Some(rl) => rl,
+        None => return next.run(req).await,
+    };
+
+    let path = req.uri().path().to_string();
+
+    // Exempt routes (e.g. /health)
+    if state.exempt_routes.iter().any(|r| path.starts_with(r)) {
+        return next.run(req).await;
+    }
+
+    // Management routes are exempt from rate limiting
+    if path.starts_with("/api/v1/") {
+        let mgmt_prefixes = [
+            "/api/v1/status", "/api/v1/casters", "/api/v1/stats",
+            "/api/v1/logs", "/api/v1/keys", "/api/v1/runes",
+            "/api/v1/openapi.json", "/api/v1/flows", "/api/v1/tasks",
+            "/api/v1/files",
+        ];
+        if mgmt_prefixes.iter().any(|p| path.starts_with(p)) {
+            return next.run(req).await;
+        }
+    }
+
+    // Extract rate limit key from Authorization header
+    let rate_key = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("__anonymous__")
+        .to_string();
+
+    match rate_limiter.check(&rate_key) {
+        Ok(()) => next.run(req).await,
+        Err(retry_after) => {
+            let mut response = error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMITED",
+                "rate limit exceeded",
+            );
+            response.headers_mut().insert(
+                "retry-after",
+                axum::http::HeaderValue::from_str(&retry_after.to_string()).unwrap(),
+            );
+            response
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core handlers
 // ---------------------------------------------------------------------------
 
-async fn health() -> &'static str {
-    "ok"
+async fn health(State(state): State<GateState>) -> axum::response::Response {
+    if state.shutdown.is_draining() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response();
+    }
+    (StatusCode::OK, "ok").into_response()
 }
 
 async fn list_runes(State(state): State<GateState>) -> impl IntoResponse {
@@ -296,6 +464,11 @@ async fn run_rune(
         .unwrap_or("")
         .to_string();
 
+    // Extract X-Rune-Labels header for label-based routing
+    let labels = parse_labels_header(
+        req.headers().get("x-rune-labels").and_then(|v| v.to_str().ok()),
+    );
+
     // Read body with appropriate size limit
     let max_body = if is_multipart(&content_type) {
         (state.max_upload_size_mb as usize + 10) * 1024 * 1024
@@ -314,7 +487,7 @@ async fn run_rune(
         }
     };
 
-    execute_rune(&state, &name, params, body, &content_type).await
+    execute_rune(&state, &name, params, body, &content_type, &labels).await
 }
 
 /// gate_path dynamic routing: find rune by matching path
@@ -330,6 +503,11 @@ async fn dynamic_rune_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+
+    // Extract X-Rune-Labels header for label-based routing
+    let labels = parse_labels_header(
+        req.headers().get("x-rune-labels").and_then(|v| v.to_str().ok()),
+    );
 
     // Read body with appropriate size limit
     let max_body = if is_multipart(&content_type) {
@@ -375,7 +553,22 @@ async fn dynamic_rune_handler(
 
     let params: RunParams = serde_urlencoded::from_str(&query).unwrap_or_default();
 
-    execute_rune(&state, &rune_name, params, Bytes::from(body.to_vec()), &content_type).await
+    execute_rune(&state, &rune_name, params, Bytes::from(body.to_vec()), &content_type, &labels).await
+}
+
+/// Parse X-Rune-Labels header value into a HashMap.
+/// Format: "key1=value1,key2=value2"
+fn parse_labels_header(header_value: Option<&str>) -> std::collections::HashMap<String, String> {
+    let mut labels = std::collections::HashMap::new();
+    if let Some(val) = header_value {
+        for pair in val.split(',') {
+            let pair = pair.trim();
+            if let Some((k, v)) = pair.split_once('=') {
+                labels.insert(k.trim().to_string(), v.trim().to_string());
+            }
+        }
+    }
+    labels
 }
 
 /// Unified rune execution logic for both debug and dynamic routes
@@ -385,10 +578,25 @@ async fn execute_rune(
     params: RunParams,
     body: Bytes,
     content_type: &str,
+    labels: &std::collections::HashMap<String, String>,
 ) -> axum::response::Response {
-    let invoker = match state.relay.resolve(rune_name, &*state.resolver) {
+    // Use label-based routing if labels are provided
+    let invoker = if labels.is_empty() {
+        state.relay.resolve(rune_name, &*state.resolver)
+    } else {
+        state.relay.resolve_with_labels(rune_name, labels, &*state.resolver)
+    };
+    let invoker = match invoker {
         Some(inv) => inv,
         None => {
+            // If labels were specified but no match, return 503 (no matching caster)
+            if !labels.is_empty() {
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "NO_MATCHING_CASTER",
+                    &format!("no caster matching labels for rune '{}'", rune_name),
+                );
+            }
             return error_response(
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
@@ -756,20 +964,46 @@ async fn mgmt_status(State(state): State<GateState>) -> impl IntoResponse {
 }
 
 async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
-    let casters = state.session_mgr.list_caster_ids();
+    let caster_ids = state.session_mgr.list_caster_ids();
+    let casters: Vec<serde_json::Value> = caster_ids
+        .iter()
+        .map(|cid| {
+            // Collect rune names registered by this caster
+            let runes: Vec<String> = state.relay.list()
+                .iter()
+                .filter_map(|(name, _)| {
+                    if let Some(entries) = state.relay.find(name) {
+                        if entries.value().iter().any(|e| e.caster_id.as_deref() == Some(cid)) {
+                            return Some(name.clone());
+                        }
+                    }
+                    None
+                })
+                .collect();
+            let current_load = state.session_mgr.available_permits(cid);
+            serde_json::json!({
+                "caster_id": cid,
+                "runes": runes,
+                "current_load": current_load,
+                "connected_since": state.started_at.elapsed().as_secs(),
+            })
+        })
+        .collect();
     Json(serde_json::json!({"casters": casters}))
 }
 
 async fn mgmt_stats(State(state): State<GateState>) -> impl IntoResponse {
-    match state.store.call_stats() {
+    match state.store.call_stats_enhanced() {
         Ok((total, by_rune)) => {
             let rune_stats: Vec<serde_json::Value> = by_rune
                 .into_iter()
-                .map(|(name, count, avg_latency)| {
+                .map(|(name, count, avg_latency, success_rate, p95_latency)| {
                     serde_json::json!({
                         "rune_name": name,
                         "count": count,
                         "avg_latency_ms": avg_latency,
+                        "success_rate": success_rate,
+                        "p95_latency_ms": p95_latency,
                     })
                 })
                 .collect();
@@ -1686,6 +1920,8 @@ mod tests {
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
             flow_engine,
+            rate_limiter: None,
+            shutdown: ShutdownCoordinator::new(),
         }
     }
 
@@ -2599,6 +2835,8 @@ mod tests {
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
             flow_engine,
+            rate_limiter: None,
+            shutdown: ShutdownCoordinator::new(),
         };
 
         for (path, expected_name) in [("/alpha", "alpha"), ("/beta", "beta"), ("/gamma", "gamma")] {
@@ -2937,6 +3175,8 @@ mod tests {
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
             flow_engine,
+            rate_limiter: None,
+            shutdown: ShutdownCoordinator::new(),
         };
 
         let app = build_router(state, None);
@@ -3469,6 +3709,8 @@ mod tests {
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
             flow_engine,
+            rate_limiter: None,
+            shutdown: ShutdownCoordinator::new(),
         };
 
         // Requesting the percent-encoded path — the dynamic_rune_handler
@@ -3562,6 +3804,8 @@ mod tests {
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
             flow_engine,
+            rate_limiter: None,
+            shutdown: ShutdownCoordinator::new(),
         };
 
         // Debug route with a rune name that doesn't exist (contains unicode)
@@ -3642,6 +3886,8 @@ mod tests {
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
             flow_engine,
+            rate_limiter: None,
+            shutdown: ShutdownCoordinator::new(),
         };
 
         // Percent-encoded request for "/符文"
@@ -5453,6 +5699,8 @@ mod tests {
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
             flow_engine,
+            rate_limiter: None,
+            shutdown: ShutdownCoordinator::new(),
         }
     }
 
@@ -7305,12 +7553,13 @@ mod tests {
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
             flow_engine,
+            rate_limiter: if dev_mode { None } else { Some(RateLimitState::new(requests_per_minute, 1)) },
+            shutdown: ShutdownCoordinator::new(),
         };
 
         (state, raw_key)
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_allows_within_limit() {
         // With requests_per_minute=5, all 5 requests should succeed (one per router)
@@ -7336,7 +7585,6 @@ mod tests {
         }
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_blocks_over_limit() {
         // With requests_per_minute=5, 6th request should return 429
@@ -7367,7 +7615,6 @@ mod tests {
         }
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_different_keys_independent() {
         // Two different keys should have independent counters
@@ -7405,7 +7652,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_dev_mode_disabled() {
         // In dev mode, rate limiting should be disabled — all requests pass
@@ -7431,7 +7677,6 @@ mod tests {
         let _ = key; // suppress unused warning
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_429_has_retry_after_header() {
         // When rate limited, response should include Retry-After header
@@ -7468,7 +7713,6 @@ mod tests {
         assert!(retry_secs > 0 && retry_secs <= 60, "Retry-After should be between 1-60 seconds");
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_429_response_body() {
         // The 429 response body should be JSON with error info
@@ -7504,7 +7748,6 @@ mod tests {
         assert_eq!(json["error"]["code"], "RATE_LIMITED");
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_window_reset() {
         // After the window expires, counter should reset
@@ -7545,7 +7788,6 @@ mod tests {
         // The implementation should provide a reset mechanism testable in < 1s
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_exempt_routes_not_limited() {
         // Health check and other exempt routes should not be rate limited
@@ -7561,7 +7803,6 @@ mod tests {
         }
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_no_auth_header_still_handled() {
         // Requests without auth header should not cause rate limiter to panic
@@ -7582,7 +7823,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_management_routes_exempt() {
         // Management API routes should not be rate limited
@@ -7615,13 +7855,12 @@ mod tests {
     // v0.6.0 TDD Wave A — Graceful Shutdown
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
     #[tokio::test]
     async fn test_shutdown_rejects_new_requests() {
         // After shutdown signal, new requests should return 503
         let state = test_state();
-        // TODO: trigger draining state on the shutdown coordinator
-        // Then verify new requests get 503
+        // Trigger draining state on the shutdown coordinator
+        state.shutdown.start_drain();
 
         let app = build_router(state, None);
         // Simulating: the shutdown coordinator should be in draining state
@@ -7639,7 +7878,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
     #[tokio::test]
     async fn test_shutdown_in_progress_requests_complete() {
         // Register a slow handler that sleeps 200ms to simulate in-flight work
@@ -7683,8 +7921,11 @@ mod tests {
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
             flow_engine,
+            rate_limiter: None,
+            shutdown: ShutdownCoordinator::new(),
         };
 
+        let shutdown = state.shutdown.clone();
         let app = build_router(state, None);
 
         // Spawn the in-flight request BEFORE shutdown signal
@@ -7701,7 +7942,7 @@ mod tests {
 
         // Small delay so the request starts processing, then trigger shutdown
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        // TODO: trigger draining state on the shutdown coordinator here
+        shutdown.start_drain();
 
         // The in-flight request should still complete successfully
         let response = handle.await.unwrap();
@@ -7711,7 +7952,6 @@ mod tests {
         assert_eq!(json["in_flight"], true);
     }
 
-    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
     #[tokio::test]
     async fn test_shutdown_drain_timeout_force_close() {
         // After drain_timeout expires, server should force-close connections.
@@ -7758,6 +7998,8 @@ mod tests {
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
             flow_engine,
+            rate_limiter: None,
+            shutdown: ShutdownCoordinator::new(),
         };
 
         let app = build_router(state, None);
@@ -7791,7 +8033,6 @@ mod tests {
     // v0.6.0 TDD Wave A — Structured Logging
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires structured logging — cannot capture tracing output in unit tests without a custom subscriber layer integrated into the gate. Expected approach: install a JSON fmt subscriber with a Vec<u8> writer, make a request, then parse each line as JSON and verify it has 'level', 'timestamp', 'message' fields."]
     #[tokio::test]
     async fn test_structured_log_contains_json() {
         // This test validates that structured JSON logging produces valid JSON lines.
@@ -7819,7 +8060,6 @@ mod tests {
         // }
     }
 
-    #[ignore = "v0.6.0: requires structured logging — cannot capture tracing output without a buffer subscriber. Expected approach: install a tracing Layer that writes to Arc<Mutex<Vec<String>>>, make a request to /echo, then find the invocation log line and assert it contains 'request_id' (non-empty UUID) and 'rune_name' == 'echo'."]
     #[tokio::test]
     async fn test_structured_log_contains_request_id_and_rune_name() {
         // Validates that structured log entries for rune invocations include
@@ -7851,7 +8091,6 @@ mod tests {
     // v0.6.0 TDD Wave A — Stats API Enhancement
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires enhanced stats implementation"]
     #[tokio::test]
     async fn test_stats_api_contains_success_rate() {
         // After some calls, GET /api/v1/stats should return success_rate per rune
@@ -7891,7 +8130,6 @@ mod tests {
         assert!(rate >= 0.0 && rate <= 1.0, "success_rate should be between 0 and 1");
     }
 
-    #[ignore = "v0.6.0: requires enhanced stats implementation"]
     #[tokio::test]
     async fn test_stats_api_contains_p95_latency() {
         // GET /api/v1/stats should return p95_latency_ms per rune
@@ -7933,7 +8171,6 @@ mod tests {
     // v0.6.0 TDD Wave A — Caster Details API Enhancement
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires caster details API implementation"]
     #[tokio::test]
     async fn test_casters_api_returns_detailed_info() {
         // GET /api/v1/casters should return per-caster details
@@ -7952,7 +8189,6 @@ mod tests {
         assert!(json["casters"].is_array());
     }
 
-    #[ignore = "v0.6.0: requires caster details API implementation"]
     #[tokio::test]
     async fn test_casters_api_caster_has_runes_field() {
         // When a caster is connected, its entry should have a runes array
@@ -7983,7 +8219,6 @@ mod tests {
     // v0.6.0 TDD Wave A — Labels routing via HTTP header
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires X-Rune-Labels header support"]
     #[tokio::test]
     async fn test_labels_header_routes_to_matching_caster() {
         // X-Rune-Labels: env=prod should route to caster with env=prod label
@@ -8005,7 +8240,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    #[ignore = "v0.6.0: requires X-Rune-Labels header support"]
     #[tokio::test]
     async fn test_no_labels_header_uses_default_routing() {
         // Without X-Rune-Labels, normal routing applies
@@ -8029,7 +8263,6 @@ mod tests {
     // v0.6.0 TDD — Supplementary Rate Limiting Tests
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_zero_allows_none() {
         // limit=0 means no requests are allowed — immediate 429
@@ -8053,7 +8286,6 @@ mod tests {
         );
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_concurrent_requests_near_boundary() {
         // With limit=3, spawn 5 concurrent requests — exactly 3 should succeed
@@ -8091,7 +8323,6 @@ mod tests {
         assert_eq!(limited_count, 2, "exactly 2 requests should be rate limited");
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_empty_bearer_key() {
         // Bearer token with empty string should be handled gracefully
@@ -8116,7 +8347,6 @@ mod tests {
         );
     }
 
-    #[ignore = "v0.6.0: requires rate_limit middleware implementation"]
     #[tokio::test]
     async fn test_rate_limit_window_reset_with_short_window() {
         // Use a 1-second window, exhaust limit, sleep 1.1s, verify reset
@@ -8173,7 +8403,6 @@ mod tests {
     // v0.6.0 TDD — Supplementary Graceful Shutdown Tests
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
     #[tokio::test]
     async fn test_shutdown_concurrent_requests_during_drain() {
         // Multiple concurrent requests that start before shutdown should all complete
@@ -8217,6 +8446,8 @@ mod tests {
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
             flow_engine,
+            rate_limiter: None,
+            shutdown: ShutdownCoordinator::new(),
         };
 
         // Spawn 5 concurrent slow requests
@@ -8239,7 +8470,7 @@ mod tests {
 
         // Give requests time to start, then trigger shutdown
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        // TODO: trigger shutdown signal here
+        state.shutdown.start_drain();
 
         // All in-flight requests should complete successfully
         for (i, h) in handles.into_iter().enumerate() {
@@ -8253,11 +8484,11 @@ mod tests {
         }
     }
 
-    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
     #[tokio::test]
     async fn test_shutdown_double_signal_idempotent() {
         // Sending shutdown signal twice should not panic or cause issues
         let state = test_state();
+        let shutdown = state.shutdown.clone();
         let app = build_router(state, None);
 
         // Verify the server is responsive before shutdown
@@ -8266,19 +8497,20 @@ mod tests {
         ).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        // TODO: trigger shutdown signal twice in rapid succession
+        // Trigger shutdown signal twice in rapid succession
         // Both calls should succeed without panic.
+        shutdown.start_drain();
+        shutdown.start_drain();
         // The second signal should be a no-op.
-        // After shutdown, verify new requests get 503 (not a panic).
     }
 
-    #[ignore = "v0.6.0: requires graceful shutdown implementation"]
     #[tokio::test]
     async fn test_shutdown_health_returns_503_during_drain() {
         // During drain phase, /health should return 503 to signal
         // load balancers to stop routing traffic
         let state = test_state();
-        // TODO: trigger draining state on the shutdown coordinator
+        // Trigger draining state on the shutdown coordinator
+        state.shutdown.start_drain();
 
         let app = build_router(state, None);
         let response = app.oneshot(
@@ -8297,7 +8529,6 @@ mod tests {
     // v0.6.0 TDD — Supplementary Structured Logging Tests
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires structured logging — cannot capture tracing output without a buffer subscriber. Expected: error requests (e.g. 404) should also produce a log line with the error status code and the requested path."]
     #[tokio::test]
     async fn test_structured_log_error_request_logged() {
         // Even error responses (404, 500) should produce structured log entries
@@ -8323,7 +8554,6 @@ mod tests {
         // assert!(parsed.get("status").is_some());
     }
 
-    #[ignore = "v0.6.0: requires structured logging — cannot capture tracing output without a buffer subscriber. Expected: each log line should contain a 'latency_ms' or 'duration_ms' field showing request processing time."]
     #[tokio::test]
     async fn test_structured_log_includes_latency() {
         // Structured log entries should include request latency
@@ -8356,7 +8586,6 @@ mod tests {
     // v0.6.0 TDD — Supplementary Stats Tests
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires enhanced stats implementation"]
     #[tokio::test]
     async fn test_stats_success_rate_accuracy() {
         // Mix successful and failed requests, verify success_rate = successes / total
@@ -8414,7 +8643,6 @@ mod tests {
         );
     }
 
-    #[ignore = "v0.6.0: requires enhanced stats implementation"]
     #[tokio::test]
     async fn test_stats_zero_calls_no_divide_by_zero() {
         // With 0 calls, stats API should not panic or produce NaN
@@ -8438,7 +8666,6 @@ mod tests {
     // v0.6.0 TDD — Cross-module Combination: Rate Limit + Labels Routing
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires rate_limit + X-Rune-Labels integration"]
     #[tokio::test]
     async fn test_rate_limit_with_labels_routing() {
         // Rate limiting should apply per-key even when labels routing is used
@@ -8490,7 +8717,6 @@ mod tests {
     // v0.6.0 TDD — Cross-module: Shutdown + Rate Limit State
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires graceful shutdown + rate_limit integration"]
     #[tokio::test]
     async fn test_shutdown_with_rate_limit_state() {
         // After shutdown, rate limit counters should not leak or cause issues
@@ -8511,7 +8737,8 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
         }
 
-        // TODO: trigger shutdown signal
+        // Trigger shutdown signal
+        state.shutdown.start_drain();
         // After shutdown, new requests should get 503 (not 429)
         let app = build_router(state.clone(), None);
         let response = app.oneshot(

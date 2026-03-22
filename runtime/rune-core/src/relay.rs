@@ -889,7 +889,6 @@ mod tests {
 
     // ---- RandomResolver tests ----
 
-    #[ignore = "v0.6.0: requires RandomResolver implementation"]
     #[tokio::test]
     async fn test_random_resolver_returns_results() {
         // RandomResolver should return Some for non-empty candidates
@@ -917,7 +916,6 @@ mod tests {
         }
     }
 
-    #[ignore = "v0.6.0: requires RandomResolver implementation"]
     #[tokio::test]
     async fn test_random_resolver_varies_selection() {
         // Over many calls, RandomResolver should pick different candidates (probabilistic)
@@ -987,7 +985,6 @@ mod tests {
 
     // ---- LeastLoadResolver tests ----
 
-    #[ignore = "v0.6.0: requires LeastLoadResolver implementation"]
     #[test]
     fn test_least_load_resolver_picks_least_loaded() {
         // Create a SessionManager, register two casters with different loads
@@ -1107,7 +1104,6 @@ mod tests {
 
     // ---- Labels routing tests ----
 
-    #[ignore = "v0.6.0: requires resolve_with_labels implementation"]
     #[tokio::test]
     async fn test_labels_exact_match_routes_correctly() {
         let relay = Relay::new();
@@ -1145,7 +1141,6 @@ mod tests {
         assert_eq!(result, Bytes::from("prod"));
     }
 
-    #[ignore = "v0.6.0: requires resolve_with_labels implementation"]
     #[test]
     fn test_labels_no_match_returns_none() {
         let relay = Relay::new();
@@ -1167,7 +1162,6 @@ mod tests {
         assert!(relay.resolve_with_labels("labeled", &labels_dev, &resolver).is_none());
     }
 
-    #[ignore = "v0.6.0: requires resolve_with_labels implementation"]
     #[tokio::test]
     async fn test_labels_multiple_conditions_all_must_match() {
         let relay = Relay::new();
@@ -1192,7 +1186,6 @@ mod tests {
         assert!(relay.resolve_with_labels("multi_label", &req_labels, &resolver).is_some());
     }
 
-    #[ignore = "v0.6.0: requires resolve_with_labels implementation"]
     #[test]
     fn test_labels_partial_match_not_sufficient() {
         let relay = Relay::new();
@@ -1217,7 +1210,6 @@ mod tests {
         assert!(relay.resolve_with_labels("partial", &req_labels, &resolver).is_none());
     }
 
-    #[ignore = "v0.6.0: requires resolve_with_labels implementation"]
     #[test]
     fn test_labels_empty_filter_uses_default_strategy() {
         let relay = Relay::new();
@@ -1239,7 +1231,6 @@ mod tests {
         assert!(relay.resolve_with_labels("no_filter", &empty_labels, &resolver).is_some());
     }
 
-    #[ignore = "v0.6.0: requires resolve_with_labels implementation"]
     #[test]
     fn test_labels_superset_labels_on_caster_matches() {
         // Caster has more labels than requested — should still match
@@ -1267,7 +1258,6 @@ mod tests {
 
     // ---- Priority tests ----
 
-    #[ignore = "v0.6.0: requires PriorityResolver implementation"]
     #[tokio::test]
     async fn test_priority_higher_value_selected() {
         let relay = Relay::new();
@@ -1301,7 +1291,6 @@ mod tests {
         assert_eq!(result, Bytes::from("high"));
     }
 
-    #[ignore = "v0.6.0: requires PriorityResolver implementation"]
     #[tokio::test]
     async fn test_priority_fallback_when_high_removed() {
         let relay = Relay::new();
@@ -1338,7 +1327,6 @@ mod tests {
         assert_eq!(result, Bytes::from("low"));
     }
 
-    #[ignore = "v0.6.0: requires PriorityResolver implementation"]
     #[tokio::test]
     async fn test_priority_same_priority_uses_inner_strategy() {
         let relay = Relay::new();
@@ -1398,7 +1386,6 @@ mod tests {
     // v0.6.0 TDD — Supplementary Labels Tests
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires resolve_with_labels implementation"]
     #[test]
     fn test_labels_key_with_special_chars() {
         // Label keys containing special characters (=, comma, space) should
@@ -1442,7 +1429,6 @@ mod tests {
         );
     }
 
-    #[ignore = "v0.6.0: requires resolve_with_labels implementation"]
     #[test]
     fn test_labels_value_empty_string() {
         // Label value can be an empty string — should still match exactly
@@ -1477,7 +1463,6 @@ mod tests {
         );
     }
 
-    #[ignore = "v0.6.0: requires resolve_with_labels + PriorityResolver implementation"]
     #[tokio::test]
     async fn test_labels_combined_with_priority() {
         // Labels filter first, then priority picks among matches
@@ -1528,7 +1513,6 @@ mod tests {
     // v0.6.0 TDD — Supplementary Priority Tests
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires PriorityResolver implementation"]
     #[tokio::test]
     async fn test_priority_negative_value() {
         // Negative priority should work — lower than 0 means lowest tier
@@ -1563,7 +1547,6 @@ mod tests {
         assert_eq!(result, Bytes::from("pos"), "positive priority should be selected over negative");
     }
 
-    #[ignore = "v0.6.0: requires PriorityResolver implementation"]
     #[tokio::test]
     async fn test_priority_three_tiers() {
         // Three tiers: 10 (high), 5 (mid), 1 (low) — should always pick 10
@@ -1608,7 +1591,6 @@ mod tests {
     // v0.6.0 TDD — Cross-module: Priority wrapping LeastLoad
     // ====================================================================
 
-    #[ignore = "v0.6.0: requires PriorityResolver + LeastLoadResolver implementation"]
     #[tokio::test]
     async fn test_priority_with_least_load() {
         // PriorityResolver wrapping LeastLoadResolver:
