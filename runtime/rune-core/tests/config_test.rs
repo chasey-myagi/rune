@@ -1,9 +1,10 @@
-use rune_core::config::{
-    AppConfig, AuthConfig, GateServerConfig, LogConfig, RateLimitConfig, ResolverConfig,
-    ServerConfig, SessionConfig, StoreConfig,
-};
+use rune_core::config::AppConfig;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Mutex;
 use std::time::Duration;
+
+/// Serialize env-var tests to avoid races from set_var/remove_var across threads.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn test_default_config() {
@@ -19,7 +20,7 @@ fn test_default_config() {
 
     // Auth defaults
     assert!(config.auth.enabled);
-    assert!(config.auth.exempt_routes.is_empty());
+    assert_eq!(config.auth.exempt_routes, vec!["/health".to_string()]);
 
     // Store defaults
     assert_eq!(config.store.db_path, "rune.db");
@@ -135,8 +136,7 @@ fn test_dev_mode_overrides() {
 
 #[test]
 fn test_env_var_override() {
-    // Use unique env var names to avoid parallel test interference
-    // These are the actual RUNE_ prefixed vars the system uses
+    let _guard = ENV_LOCK.lock().unwrap();
     std::env::set_var("RUNE_SERVER__GRPC_PORT", "12345");
     std::env::set_var("RUNE_LOG__LEVEL", "trace");
 
@@ -153,6 +153,7 @@ fn test_env_var_override() {
 
 #[test]
 fn test_env_var_override_bool_and_ip() {
+    let _guard = ENV_LOCK.lock().unwrap();
     std::env::set_var("RUNE_AUTH__ENABLED", "false");
     std::env::set_var("RUNE_SERVER__GRPC_HOST", "127.0.0.1");
     std::env::set_var("RUNE_STORE__LOG_RETENTION_DAYS", "7");
@@ -171,6 +172,7 @@ fn test_env_var_override_bool_and_ip() {
 
 #[test]
 fn test_env_var_invalid_value_ignored() {
+    let _guard = ENV_LOCK.lock().unwrap();
     std::env::set_var("RUNE_SERVER__GRPC_PORT", "not_a_number");
 
     let mut config = AppConfig::default();

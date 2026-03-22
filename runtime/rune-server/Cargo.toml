@@ -8,13 +8,18 @@ rune-core = { path = "../rune-core" }
 rune-flow = { path = "../rune-flow" }
 rune-gate = { path = "../rune-gate" }
 rune-proto = { path = "../rune-proto" }
+rune-store = { path = "../rune-store" }
+clap = { version = "4", features = ["derive"] }
 serde_json.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 bytes.workspace = true
 anyhow.workspace = true
 axum.workspace = true
-dashmap.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

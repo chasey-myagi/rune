@@ -129,7 +129,7 @@ fn hash_key(raw_key: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-pub(crate) fn now_iso8601() -> String {
+pub fn now_iso8601() -> String {
     // Simple ISO 8601 timestamp without external chrono dependency
     use std::time::SystemTime;
     let dur = SystemTime::now()

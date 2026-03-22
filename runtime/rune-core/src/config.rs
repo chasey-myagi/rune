@@ -42,7 +42,7 @@ impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            exempt_routes: Vec::new(),
+            exempt_routes: vec!["/health".to_string()],
         }
     }
 }

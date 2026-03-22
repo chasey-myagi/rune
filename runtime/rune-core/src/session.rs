@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use bytes::Bytes;
@@ -19,10 +20,8 @@ pub(crate) enum SessionState {
     Disconnected,
 }
 
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(35);
-#[cfg(test)]
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Callback invoked when a caster attaches, with caster_id and registered rune configs.
+pub type OnCasterAttach = Arc<dyn Fn(&str, &[RuneConfig]) + Send + Sync>;
 
 pub(crate) enum PendingResponse {
     Once(oneshot::Sender<Result<Bytes, RuneError>>),
@@ -37,6 +36,9 @@ pub(crate) struct PendingRequest {
 
 pub struct SessionManager {
     sessions: DashMap<String, CasterState>,
+    heartbeat_interval: Duration,
+    heartbeat_timeout: Duration,
+    on_caster_attach: OnceLock<OnCasterAttach>,
 }
 
 pub(crate) struct CasterState {
@@ -46,14 +48,35 @@ pub(crate) struct CasterState {
 }
 
 impl SessionManager {
-    pub fn new() -> Self {
-        Self { sessions: DashMap::new() }
+    pub fn new(heartbeat_interval: Duration, heartbeat_timeout: Duration) -> Self {
+        Self {
+            sessions: DashMap::new(),
+            heartbeat_interval,
+            heartbeat_timeout,
+            on_caster_attach: OnceLock::new(),
+        }
+    }
+
+    /// Set the callback invoked when a caster successfully attaches.
+    /// Can only be called once; subsequent calls are silently ignored.
+    pub fn set_on_caster_attach(&self, callback: OnCasterAttach) {
+        let _ = self.on_caster_attach.set(callback);
     }
 
     pub fn is_available(&self, caster_id: &str) -> bool {
         self.sessions.get(caster_id)
             .map(|s| s.semaphore.available_permits() > 0)
             .unwrap_or(false)
+    }
+
+    /// Return the list of connected caster IDs.
+    pub fn list_caster_ids(&self) -> Vec<String> {
+        self.sessions.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Return the number of connected casters.
+    pub fn caster_count(&self) -> usize {
+        self.sessions.len()
     }
 
     pub async fn handle_session(
@@ -66,22 +89,26 @@ impl SessionManager {
         let mut _state = SessionState::Attaching;
         let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
         let last_heartbeat_ms = Arc::new(AtomicU64::new(now_ms()));
-        let semaphore = Arc::new(Semaphore::new(0)); // Attach 时 add_permits
+        let semaphore = Arc::new(Semaphore::new(0)); // Attach adds permits
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
-        // 心跳
+        // Capture config values
+        let hb_interval = self.heartbeat_interval;
+        let hb_timeout = self.heartbeat_timeout;
+
+        // Heartbeat task
         let hb_tx = outbound_tx.clone();
         let hb_last = Arc::clone(&last_heartbeat_ms);
         let hb_shutdown = shutdown_tx.clone();
         let hb_handle = tokio::spawn(async move {
             loop {
-                time::sleep(HEARTBEAT_INTERVAL).await;
+                time::sleep(hb_interval).await;
                 let msg = SessionMessage {
                     payload: Some(session_message::Payload::Heartbeat(Heartbeat { timestamp_ms: now_ms() })),
                 };
                 if hb_tx.send(msg).await.is_err() { break; }
                 let elapsed = now_ms().saturating_sub(hb_last.load(Ordering::Relaxed));
-                if elapsed > HEARTBEAT_TIMEOUT.as_millis() as u64 {
+                if elapsed > hb_timeout.as_millis() as u64 {
                     tracing::warn!(elapsed_ms = elapsed, "heartbeat timeout, forcing session shutdown");
                     let _ = hb_shutdown.send(true);
                     break;
@@ -90,7 +117,7 @@ impl SessionManager {
         });
         drop(shutdown_tx);
 
-        // 超时扫描
+        // Timeout scanner
         let timeout_pending = Arc::clone(&pending);
         let timeout_sem = Arc::clone(&semaphore);
         let timeout_handle = tokio::spawn(async move {
@@ -104,7 +131,7 @@ impl SessionManager {
                 for req_id in expired {
                     if let Some((_, p)) = timeout_pending.remove(&req_id) {
                         tracing::warn!(request_id = %req_id, "request timed out");
-                        timeout_sem.add_permits(1); // 归还 permit
+                        timeout_sem.add_permits(1);
                         match p.tx {
                             PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
                             PendingResponse::Stream(tx) => { let _ = tx.send(Err(RuneError::Timeout)).await; }
@@ -143,6 +170,7 @@ impl SessionManager {
                         semaphore: Arc::clone(&semaphore),
                     });
 
+                    let mut configs = Vec::new();
                     for decl in &attach.runes {
                         let config = RuneConfig {
                             name: decl.name.clone(),
@@ -154,6 +182,7 @@ impl SessionManager {
                                 method: if g.method.is_empty() { "POST".to_string() } else { g.method.clone() },
                             }),
                         };
+                        configs.push(config.clone());
                         let invoker = Arc::new(RemoteInvoker {
                             session: Arc::clone(self) as Arc<SessionManager>,
                             caster_id: id.clone(),
@@ -161,6 +190,11 @@ impl SessionManager {
                         if let Err(reason) = relay.register(config, invoker, Some(id.clone())) {
                             tracing::warn!(rune = %decl.name, %reason, "skipping rune registration");
                         }
+                    }
+
+                    // Notify attach callback (e.g. for snapshot recording)
+                    if let Some(callback) = self.on_caster_attach.get() {
+                        callback(&id, &configs);
                     }
 
                     let ack = SessionMessage {
@@ -191,7 +225,6 @@ impl SessionManager {
                             PendingResponse::Stream(tx) => { let _ = tx.send(outcome).await; }
                         }
                     }
-                    // Late result (already timed out / cancelled): silently ignored
                 }
 
                 Some(session_message::Payload::StreamEvent(event)) => {
@@ -218,7 +251,6 @@ impl SessionManager {
                             }
                         }
                     }
-                    // Late stream end: silently ignored
                 }
 
                 Some(session_message::Payload::Detach(detach)) => {
@@ -320,7 +352,7 @@ impl SessionManager {
         for session in self.sessions.iter() {
             if session.pending.contains_key(request_id) {
                 let caster_id = session.key().clone();
-                drop(session); // release DashMap ref before calling cancel
+                drop(session);
                 let _ = self.cancel(&caster_id, request_id, reason).await;
                 return true;
             }
@@ -359,8 +391,16 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+    fn default_session_manager() -> Arc<SessionManager> {
+        Arc::new(SessionManager::new(
+            Duration::from_secs(10),
+            Duration::from_secs(35),
+        ))
+    }
+
     /// Helper: creates a SessionManager with one registered caster session.
-    /// Returns the receiver too so the outbound channel stays open.
     fn setup_session(max_concurrent: usize) -> (
         Arc<SessionManager>,
         String,
@@ -368,7 +408,7 @@ mod tests {
         Arc<DashMap<String, PendingRequest>>,
         mpsc::Receiver<SessionMessage>,
     ) {
-        let mgr = Arc::new(SessionManager::new());
+        let mgr = default_session_manager();
         let (tx, rx) = mpsc::channel(16);
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
         let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
@@ -397,7 +437,6 @@ mod tests {
         let (mgr, caster_id, sem, pending, _rx) = setup_session(2);
         assert_eq!(sem.available_permits(), 2);
 
-        // execute() consumes one permit
         let handle = {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
@@ -406,11 +445,9 @@ mod tests {
             })
         };
 
-        // Wait for pending entry to appear
         wait_for_pending(&pending, "r-1").await;
         assert_eq!(sem.available_permits(), 1);
 
-        // Simulate result arriving: remove from pending + return permit
         if let Some((_, p)) = pending.remove("r-1") {
             sem.add_permits(1);
             match p.tx {
@@ -439,7 +476,6 @@ mod tests {
         wait_for_pending(&pending, "r-timeout").await;
         assert_eq!(sem.available_permits(), 1);
 
-        // Simulate timeout: remove from pending + return permit
         if let Some((_, p)) = pending.remove("r-timeout") {
             sem.add_permits(1);
             match p.tx {
@@ -450,10 +486,8 @@ mod tests {
 
         assert_eq!(sem.available_permits(), 2);
 
-        // Simulate late result: pending.remove returns None
         let late_found = pending.remove("r-timeout");
         assert!(late_found.is_none(), "late result should find nothing in pending");
-        // KEY ASSERTION: permit count must NOT exceed max_concurrent
         assert_eq!(sem.available_permits(), 2, "late result must not inflate permits");
 
         let result = handle.await.unwrap();
@@ -486,7 +520,6 @@ mod tests {
     async fn test_max_concurrent_enforced() {
         let (mgr, caster_id, sem, pending, _rx) = setup_session(1);
 
-        // First execute consumes the only permit
         let _handle = {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
@@ -498,7 +531,6 @@ mod tests {
         wait_for_pending(&pending, "r-1").await;
         assert_eq!(sem.available_permits(), 0);
 
-        // Second execute should fail immediately
         let result = mgr.execute(&caster_id, "r-2", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await;
         assert!(matches!(result, Err(RuneError::Unavailable)),
             "second request must be rejected when max_concurrent=1");
@@ -508,7 +540,6 @@ mod tests {
     async fn test_disconnect_clears_all_pending() {
         let (_mgr, _caster_id, _sem, pending, _rx) = setup_session(5);
 
-        // Insert 3 pending requests
         for i in 0..3 {
             let (tx, _rx) = oneshot::channel();
             pending.insert(format!("r-{}", i), PendingRequest {
@@ -520,12 +551,35 @@ mod tests {
 
         assert_eq!(pending.len(), 3);
 
-        // Simulate disconnect cleanup
         let keys: Vec<String> = pending.iter().map(|e| e.key().clone()).collect();
         for req_id in keys {
             let _ = pending.remove(&req_id);
         }
 
         assert!(pending.is_empty(), "all pending should be cleared after disconnect");
+    }
+
+    #[tokio::test]
+    async fn test_list_caster_ids() {
+        let mgr = default_session_manager();
+        assert!(mgr.list_caster_ids().is_empty());
+        assert_eq!(mgr.caster_count(), 0);
+
+        let (tx, _rx) = mpsc::channel(16);
+        mgr.sessions.insert("caster-1".to_string(), CasterState {
+            outbound: tx.clone(),
+            pending: Arc::new(DashMap::new()),
+            semaphore: Arc::new(Semaphore::new(1)),
+        });
+        mgr.sessions.insert("caster-2".to_string(), CasterState {
+            outbound: tx,
+            pending: Arc::new(DashMap::new()),
+            semaphore: Arc::new(Semaphore::new(1)),
+        });
+
+        assert_eq!(mgr.caster_count(), 2);
+        let mut ids = mgr.list_caster_ids();
+        ids.sort();
+        assert_eq!(ids, vec!["caster-1", "caster-2"]);
     }
 }

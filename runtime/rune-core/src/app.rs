@@ -25,11 +25,15 @@ pub struct RunningApp {
 
 impl App {
     pub fn new() -> Self {
+        let config = AppConfig::default();
         Self {
             relay: Arc::new(Relay::new()),
             resolver: Arc::new(RoundRobinResolver::new()),
-            session_mgr: Arc::new(SessionManager::new()),
-            config: AppConfig::default(),
+            session_mgr: Arc::new(SessionManager::new(
+                config.heartbeat_interval(),
+                config.heartbeat_timeout(),
+            )),
+            config,
         }
     }
 
@@ -37,7 +41,10 @@ impl App {
         Self {
             relay: Arc::new(Relay::new()),
             resolver: Arc::new(RoundRobinResolver::new()),
-            session_mgr: Arc::new(SessionManager::new()),
+            session_mgr: Arc::new(SessionManager::new(
+                config.heartbeat_interval(),
+                config.heartbeat_timeout(),
+            )),
             config,
         }
     }
@@ -60,11 +67,6 @@ impl App {
     }
 
     /// Start the gRPC server and block until shutdown signal (SIGINT / ctrl-c).
-    ///
-    /// This is the simplest way to run an App — it starts the gRPC server for
-    /// Caster connections and waits for a termination signal. The caller does
-    /// NOT get access to components for building an HTTP server; use `build()`
-    /// instead if you need that.
     pub async fn run(self) -> anyhow::Result<()> {
         let grpc_addr = self.config.grpc_addr();
 
@@ -87,10 +89,6 @@ impl App {
     }
 
     /// Finalize configuration and return components for custom server setup.
-    ///
-    /// The caller is responsible for starting gRPC and HTTP servers using the
-    /// returned `RunningApp`. This is the preferred approach when you need to
-    /// compose additional routes (e.g., Gate HTTP + Flow routes).
     pub fn build(self) -> RunningApp {
         RunningApp {
             relay: self.relay,

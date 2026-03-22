@@ -75,4 +75,24 @@ impl RuneStore {
         )?;
         Ok(deleted as u64)
     }
+
+    /// Get aggregate call statistics.
+    pub fn call_stats(&self) -> StoreResult<(i64, Vec<(String, i64, i64)>)> {
+        let conn = self.conn.lock().unwrap();
+        let total: i64 =
+            conn.query_row("SELECT COUNT(*) FROM call_logs", [], |row| row.get(0))?;
+        let mut stmt = conn.prepare(
+            "SELECT rune_name, COUNT(*), CAST(COALESCE(AVG(latency_ms), 0) AS INTEGER) FROM call_logs GROUP BY rune_name ORDER BY COUNT(*) DESC",
+        )?;
+        let by_rune = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((total, by_rune))
+    }
 }
