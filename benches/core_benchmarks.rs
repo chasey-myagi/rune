@@ -363,7 +363,7 @@ fn dag_benchmarks(c: &mut Criterion) {
 // ============================================================================
 
 fn schema_benchmarks(c: &mut Criterion) {
-    use rune_schema::validator::validate_input;
+    use rune_schema::validator::{validate_input, clear_validator_cache};
     use rune_schema::openapi::{generate_openapi, RuneInfo};
 
     let mut group = c.benchmark_group("schema");
@@ -381,9 +381,19 @@ fn schema_benchmarks(c: &mut Criterion) {
     let valid_input = r#"{"name": "Alice", "age": 30, "email": "alice@example.com"}"#;
     let invalid_input = r#"{"name": 123, "age": -5}"#;
 
-    // --- schema_validate_input (valid) ---
+    // --- schema_validate_input (valid, includes cache warmup) ---
     group.bench_function("validate_input_valid", |b| {
+        // Pre-warm the cache so benchmark measures cached path
+        validate_input(Some(schema), valid_input.as_bytes()).unwrap();
         b.iter(|| {
+            validate_input(Some(schema), valid_input.as_bytes()).unwrap();
+        });
+    });
+
+    // --- schema_validate_input (cold, no cache) ---
+    group.bench_function("validate_input_cold", |b| {
+        b.iter(|| {
+            clear_validator_cache();
             validate_input(Some(schema), valid_input.as_bytes()).unwrap();
         });
     });

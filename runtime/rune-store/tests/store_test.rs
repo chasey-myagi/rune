@@ -1958,6 +1958,134 @@ async fn test_empty_database_all_queries() {
 }
 
 // ============================================================
+// Performance regression: call_stats_enhanced correctness
+// Ensures optimized SQL produces identical results to N+1 version
+// ============================================================
+
+#[tokio::test]
+async fn test_call_stats_enhanced_correctness() {
+    let store = new_store();
+
+    // Insert logs across 3 runes with known patterns
+    // rune_a: 4 calls, all success (200), latencies: [10, 20, 30, 40]
+    // rune_b: 3 calls, 1 failure (500), latencies: [5, 15, 25]
+    // rune_c: 1 call, success, latency: [100]
+    let logs = vec![
+        ("rune_a", 10, 200),
+        ("rune_a", 20, 200),
+        ("rune_a", 30, 200),
+        ("rune_a", 40, 200),
+        ("rune_b", 5, 200),
+        ("rune_b", 15, 500),
+        ("rune_b", 25, 200),
+        ("rune_c", 100, 200),
+    ];
+
+    for (i, (rune, latency, status)) in logs.iter().enumerate() {
+        let log = CallLog {
+            id: 0,
+            request_id: format!("req-{}", i),
+            rune_name: rune.to_string(),
+            mode: "sync".into(),
+            caster_id: None,
+            latency_ms: *latency,
+            status_code: *status,
+            input_size: 100,
+            output_size: 50,
+            timestamp: format!("2026-03-23T00:00:{:02}Z", i),
+        };
+        store.insert_log(&log).await.unwrap();
+    }
+
+    let (total, stats) = store.call_stats_enhanced().await.unwrap();
+
+    // Total should be 8
+    assert_eq!(total, 8, "total call count");
+
+    // Should have 3 runes
+    assert_eq!(stats.len(), 3, "number of runes");
+
+    // Find each rune's stats (name, count, avg_latency, success_rate, p95)
+    let rune_a = stats.iter().find(|s| s.0 == "rune_a").expect("rune_a missing");
+    let rune_b = stats.iter().find(|s| s.0 == "rune_b").expect("rune_b missing");
+    let rune_c = stats.iter().find(|s| s.0 == "rune_c").expect("rune_c missing");
+
+    // rune_a: count=4, avg=25, success_rate=1.0, p95=40
+    assert_eq!(rune_a.1, 4, "rune_a count");
+    assert_eq!(rune_a.2, 25, "rune_a avg_latency"); // (10+20+30+40)/4 = 25
+    assert!((rune_a.3 - 1.0).abs() < 0.001, "rune_a success_rate should be 1.0, got {}", rune_a.3);
+    assert!((rune_a.4 - 40.0).abs() < 0.001, "rune_a p95 should be 40.0, got {}", rune_a.4);
+
+    // rune_b: count=3, avg=15, success_rate=2/3, p95=25
+    assert_eq!(rune_b.1, 3, "rune_b count");
+    assert_eq!(rune_b.2, 15, "rune_b avg_latency"); // (5+15+25)/3 = 15
+    let expected_rate = 2.0 / 3.0;
+    assert!(
+        (rune_b.3 - expected_rate).abs() < 0.001,
+        "rune_b success_rate should be ~0.667, got {}",
+        rune_b.3
+    );
+    assert!((rune_b.4 - 25.0).abs() < 0.001, "rune_b p95 should be 25.0, got {}", rune_b.4);
+
+    // rune_c: count=1, avg=100, success_rate=1.0, p95=100
+    assert_eq!(rune_c.1, 1, "rune_c count");
+    assert_eq!(rune_c.2, 100, "rune_c avg_latency");
+    assert!((rune_c.3 - 1.0).abs() < 0.001, "rune_c success_rate");
+    assert!((rune_c.4 - 100.0).abs() < 0.001, "rune_c p95");
+}
+
+#[tokio::test]
+async fn test_call_stats_enhanced_empty() {
+    let store = new_store();
+    let (total, stats) = store.call_stats_enhanced().await.unwrap();
+    assert_eq!(total, 0);
+    assert!(stats.is_empty());
+}
+
+#[tokio::test]
+async fn test_call_stats_enhanced_many_runes() {
+    let store = new_store();
+
+    // Insert 200 logs across 5 runes (same pattern as benchmark)
+    for i in 0..200u32 {
+        let log = CallLog {
+            id: 0,
+            request_id: format!("req-{}", i),
+            rune_name: format!("rune_{}", i % 5),
+            mode: "sync".into(),
+            caster_id: None,
+            latency_ms: (i % 100 + 1) as i64,
+            status_code: if i % 20 == 0 { 500 } else { 200 },
+            input_size: 100,
+            output_size: 50,
+            timestamp: format!("2026-03-23T00:{:02}:{:02}Z", (i / 60) % 60, i % 60),
+        };
+        store.insert_log(&log).await.unwrap();
+    }
+
+    let (total, stats) = store.call_stats_enhanced().await.unwrap();
+    assert_eq!(total, 200);
+    assert_eq!(stats.len(), 5);
+
+    // Each rune should have 40 calls
+    for stat in &stats {
+        assert_eq!(stat.1, 40, "each rune should have 40 calls, {} has {}", stat.0, stat.1);
+        // success_rate: i%20==0 gives status 500, each rune gets different distributions
+        // rune_0 (i%5==0): 10 failures (i=0,20,40,...,180), rate=30/40=0.75
+        // rune_1..4: fewer failures since i%20==0 AND i%5==k requires i%lcm(20,5)==k%5
+        assert!(stat.3 > 0.5, "success rate should be > 50%, {} got {}", stat.0, stat.3);
+        assert!(stat.3 <= 1.0, "success rate should be <= 1.0");
+        // p95 should be > 0
+        assert!(stat.4 > 0.0, "p95 should be > 0");
+    }
+}
+
+// ============================================================
+// Performance regression: schema validator caching
+// Ensures cached validation returns identical results
+// ============================================================
+
+// ============================================================
 // Issue 1 Regression: store operations use spawn_blocking
 // ============================================================
 

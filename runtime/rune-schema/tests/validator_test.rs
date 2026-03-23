@@ -1,4 +1,4 @@
-use rune_schema::validator::{validate_input, validate_output, SchemaError};
+use rune_schema::validator::{validate_input, validate_output, SchemaError, clear_validator_cache};
 
 // =============================================================================
 // Helper: common JSON Schema strings
@@ -376,4 +376,66 @@ fn test_boolean_schema_false() {
     let schema = "false";
     let result = validate_input(Some(schema), br#"{"anything": 42}"#);
     assert!(result.is_err(), "boolean schema 'false' should reject everything");
+}
+
+// =============================================================================
+// Performance regression: validator cache correctness
+// =============================================================================
+
+#[test]
+fn test_cached_validation_returns_same_result() {
+    clear_validator_cache();
+
+    let schema = r#"{
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string" } }
+    }"#;
+
+    // First call: compiles and caches
+    let r1 = validate_input(Some(schema), br#"{"name": "Alice"}"#);
+    assert!(r1.is_ok(), "first validation should pass");
+
+    // Second call: should use cache and produce identical result
+    let r2 = validate_input(Some(schema), br#"{"name": "Bob"}"#);
+    assert!(r2.is_ok(), "cached validation should also pass");
+
+    // Invalid input should still fail with cached validator
+    let r3 = validate_input(Some(schema), br#"{"name": 123}"#);
+    assert!(r3.is_err(), "cached validator should still reject invalid input");
+}
+
+#[test]
+fn test_different_schemas_cached_independently() {
+    clear_validator_cache();
+
+    let schema_a = r#"{"type": "object", "required": ["x"], "properties": {"x": {"type": "integer"}}}"#;
+    let schema_b = r#"{"type": "object", "required": ["y"], "properties": {"y": {"type": "string"}}}"#;
+
+    // Validate with schema_a
+    let r1 = validate_input(Some(schema_a), br#"{"x": 42}"#);
+    assert!(r1.is_ok());
+
+    // Validate with schema_b
+    let r2 = validate_input(Some(schema_b), br#"{"y": "hello"}"#);
+    assert!(r2.is_ok());
+
+    // Cross-validate: schema_a should reject schema_b's input
+    let r3 = validate_input(Some(schema_a), br#"{"y": "hello"}"#);
+    assert!(r3.is_err(), "schema_a should not accept schema_b input");
+}
+
+#[test]
+fn test_cache_works_for_output_validation_too() {
+    clear_validator_cache();
+
+    let schema = r#"{"type": "object", "required": ["result"], "properties": {"result": {"type": "string"}}}"#;
+
+    // First call via validate_output
+    let r1 = validate_output(Some(schema), br#"{"result": "ok"}"#);
+    assert!(r1.is_ok());
+
+    // Second call via validate_input (same schema, should reuse cache)
+    let r2 = validate_input(Some(schema), br#"{"result": "ok"}"#);
+    assert!(r2.is_ok());
 }

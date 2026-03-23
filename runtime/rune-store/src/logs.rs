@@ -36,6 +36,100 @@ impl RuneStore {
         &self,
     ) -> StoreResult<(i64, Vec<(String, i64, i64, f64, f64)>)> {
         let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || { let conn = conn.lock().unwrap(); let total: i64 = conn.query_row("SELECT COUNT(*) FROM call_logs", [], |row| row.get(0))?; let mut stmt = conn.prepare("SELECT DISTINCT rune_name FROM call_logs ORDER BY rune_name")?; let rune_names: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?; let mut results = Vec::new(); for rune_name in rune_names { let count: i64 = conn.query_row("SELECT COUNT(*) FROM call_logs WHERE rune_name = ?1", rusqlite::params![rune_name], |row| row.get(0))?; let success_count: i64 = conn.query_row("SELECT COUNT(*) FROM call_logs WHERE rune_name = ?1 AND status_code >= 200 AND status_code < 300", rusqlite::params![rune_name], |row| row.get(0))?; let avg_latency: i64 = conn.query_row("SELECT CAST(COALESCE(AVG(latency_ms), 0) AS INTEGER) FROM call_logs WHERE rune_name = ?1", rusqlite::params![rune_name], |row| row.get(0))?; let success_rate = if count > 0 { success_count as f64 / count as f64 } else { 0.0 }; let mut lat_stmt = conn.prepare("SELECT latency_ms FROM call_logs WHERE rune_name = ?1 ORDER BY latency_ms ASC")?; let latencies: Vec<i64> = lat_stmt.query_map(rusqlite::params![rune_name], |row| row.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>()?; let p95 = if latencies.is_empty() { 0.0 } else { let idx = ((latencies.len() as f64 * 0.95).ceil() as usize).min(latencies.len()) - 1; latencies[idx] as f64 }; results.push((rune_name, count, avg_latency, success_rate, p95)); } Ok((total, results)) }).await?
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+
+            // Query 1: Single aggregation for count, avg, success per rune
+            let mut agg_stmt = conn.prepare(
+                "SELECT \
+                     rune_name, \
+                     COUNT(*) as total, \
+                     CAST(COALESCE(AVG(latency_ms), 0) AS INTEGER) as avg_latency, \
+                     SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) as success_count \
+                 FROM call_logs \
+                 GROUP BY rune_name \
+                 ORDER BY rune_name"
+            )?;
+
+            struct RuneAgg {
+                name: String,
+                count: i64,
+                avg_latency: i64,
+                success_rate: f64,
+            }
+
+            let mut grand_total: i64 = 0;
+            let aggs: Vec<RuneAgg> = agg_stmt.query_map([], |row| {
+                let count: i64 = row.get(1)?;
+                let success_count: i64 = row.get(3)?;
+                Ok(RuneAgg {
+                    name: row.get(0)?,
+                    count,
+                    avg_latency: row.get(2)?,
+                    success_rate: if count > 0 { success_count as f64 / count as f64 } else { 0.0 },
+                })
+            })?.collect::<Result<Vec<_>, _>>()?;
+
+            for a in &aggs {
+                grand_total += a.count;
+            }
+
+            // Query 2: All latencies sorted by rune_name + latency for P95
+            let mut lat_stmt = conn.prepare(
+                "SELECT rune_name, latency_ms \
+                 FROM call_logs \
+                 ORDER BY rune_name, latency_ms ASC"
+            )?;
+
+            // Stream through sorted results, grouping by rune_name sequentially.
+            // Since results are sorted by rune_name, we can compute P95 per group
+            // without a HashMap by collecting latencies for the current group.
+            let mut p95_map: Vec<(String, f64)> = Vec::with_capacity(aggs.len());
+            let mut current_name = String::new();
+            let mut current_lats: Vec<i64> = Vec::new();
+
+            let rows = lat_stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+
+            for r in rows {
+                let (name, lat) = r?;
+                if name != current_name {
+                    if !current_name.is_empty() {
+                        let idx = ((current_lats.len() as f64 * 0.95).ceil() as usize)
+                            .min(current_lats.len()) - 1;
+                        p95_map.push((std::mem::take(&mut current_name), current_lats[idx] as f64));
+                        current_lats.clear();
+                    }
+                    current_name = name;
+                }
+                current_lats.push(lat);
+            }
+            if !current_name.is_empty() {
+                let idx = ((current_lats.len() as f64 * 0.95).ceil() as usize)
+                    .min(current_lats.len()) - 1;
+                p95_map.push((current_name, current_lats[idx] as f64));
+            }
+
+            // Combine aggregation + P95 (both are sorted by rune_name)
+            let mut p95_iter = p95_map.into_iter().peekable();
+            let results: Vec<(String, i64, i64, f64, f64)> = aggs
+                .into_iter()
+                .map(|a| {
+                    let p95 = if let Some(entry) = p95_iter.peek() {
+                        if entry.0 == a.name {
+                            p95_iter.next().unwrap().1
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    };
+                    (a.name, a.count, a.avg_latency, a.success_rate, p95)
+                })
+                .collect();
+
+            Ok((grand_total, results))
+        }).await?
     }
 }
