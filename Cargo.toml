@@ -1,3 +1,11 @@
+[package]
+name = "rune-workspace"
+version = "0.0.0"
+edition = "2021"
+publish = false
+autoexamples = false
+autobins = false
+
 [workspace]
 resolver = "2"
 members = [
@@ -12,6 +20,23 @@ members = [
     "sdks/rust",
     "examples/rust-caster",
 ]
+
+[[bench]]
+name = "core_benchmarks"
+harness = false
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rune-core = { path = "runtime/rune-core" }
+rune-flow = { path = "runtime/rune-flow" }
+rune-schema = { path = "runtime/rune-schema" }
+rune-store = { path = "runtime/rune-store" }
+rune-gate = { path = "runtime/rune-gate" }
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+serde_json = "1"
+dashmap = "6"
+async-trait = "0.1"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
