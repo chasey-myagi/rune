@@ -10,6 +10,7 @@ members = [
     "runtime/rune-schema",
     "runtime/rune-cli",
     "sdks/rust",
+    "examples/rust-caster",
 ]
 
 [workspace.dependencies]

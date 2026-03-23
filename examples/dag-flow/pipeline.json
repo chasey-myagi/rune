@@ -1,0 +1,30 @@
+{
+  "name": "etl-pipeline",
+  "steps": [
+    {
+      "name": "extract",
+      "rune": "extract",
+      "depends_on": []
+    },
+    {
+      "name": "analyze",
+      "rune": "analyze",
+      "depends_on": ["extract"]
+    },
+    {
+      "name": "translate",
+      "rune": "translate",
+      "depends_on": ["extract"]
+    },
+    {
+      "name": "merge",
+      "rune": "merge",
+      "depends_on": ["analyze", "translate"],
+      "input_mapping": {
+        "analysis": "analyze",
+        "translation": "translate"
+      }
+    }
+  ],
+  "gate_path": "/pipeline/etl"
+}

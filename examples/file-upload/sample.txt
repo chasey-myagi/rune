@@ -1,0 +1,3 @@
+Hello from Rune!
+This is a sample file for the file-upload example.
+It demonstrates multipart upload and download via the Rune Gate HTTP API.

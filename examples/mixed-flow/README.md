@@ -8,7 +8,7 @@ Demonstrates a sequential flow pipeline with mixed local (Rust) and remote (Pyth
 step_a (Python) → step_b (Rust, local) → step_c (Python)
 ```
 
-Each step adds a field to the JSON input.
+Each step adds a field to the JSON input, producing a combined result.
 
 ## How to Run
 
@@ -29,29 +29,45 @@ cd sdks/python && pip install -e .
 python examples/python-caster/main.py
 ```
 
-This registers `step_a` and `step_c` as remote Python Runes.
+This registers `step_a` and `step_c` as remote Python Runes (along with other demo runes).
 
 ### 3. Execute the flow
 
-Sync:
+**Sync:**
 ```bash
 curl -X POST http://localhost:50060/api/v1/flows/pipeline/run \
   -H "Content-Type: application/json" \
   -d '{"input": "test"}'
 ```
 
-Expected: `{"output": {"input": "test", "step_a": true, "step_b": true, "step_c": true}, "steps_executed": 3}`
+Expected response:
+```json
+{
+  "output": {"input": "test", "step_a": true, "step_b": true, "step_c": true},
+  "steps_executed": 3
+}
+```
 
-Async:
+**Async:**
 ```bash
 curl -X POST "http://localhost:50060/api/v1/flows/pipeline/run?async=true" \
   -H "Content-Type: application/json" \
   -d '{"input": "test"}'
 ```
 
-Returns: `{"task_id": "...", "status": "running"}`
+Returns:
+```json
+{"task_id": "...", "flow": "pipeline", "status": "running"}
+```
 
-Poll result:
+**Poll result:**
 ```bash
 curl http://localhost:50060/api/v1/tasks/{task_id}
+```
+
+**Stream (SSE):**
+```bash
+curl -N "http://localhost:50060/api/v1/flows/pipeline/run?stream=true" \
+  -H "Content-Type: application/json" \
+  -d '{"input": "test"}'
 ```

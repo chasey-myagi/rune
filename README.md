@@ -1,84 +1,33 @@
 # Rune
 
-**协议优先的多语言函数执行框架。定义函数，获得路由 + 流式 + 异步 + 编排。**
+**协议优先的多语言函数执行框架。定义函数，获得路由、流式、异步、编排 -- 全部开箱即用。**
 
-## 30 秒理解
+## 特性
 
-### 方式 1：Rust 库模式
+- **三种调用模式** -- sync / stream (SSE) / async，同一函数自动获得三种调用方式
+- **DAG 工作流编排** -- 带条件分支、并行执行、input mapping 的有向无环图引擎
+- **三语言 SDK** -- Python / TypeScript / Rust Caster SDK，统一 Wire Protocol
+- **Schema 校验 + OpenAPI 生成** -- JSON Schema 输入输出校验，自动生成 OpenAPI 3.0 文档
+- **文件传输** -- multipart 上传 + FileBroker 内存中转 + 下载端点
+- **API Key 认证** -- Gate Key (HTTP) + Caster Key (gRPC)，两层隔离
+- **Rate Limiting** -- 基于滑动窗口的请求频率限制
+- **高级调度** -- round-robin / random / least-load / priority / label-based 五种策略
+- **CLI 工具** -- 单二进制管理 Runtime、调用 Rune、管理 Key 和 Flow
+- **SQLite 持久化** -- 异步任务、调用日志、API Key 全部持久化
 
-```rust
-let mut app = App::new();
-app.rune(
-    RuneConfig::new("translate")
-        .gate("/translate"),
-    translate_handler,
-);
-app.run().await;
-// POST /translate 已就绪
-```
+## 快速开始
 
-### 方式 2：Python Caster 模式
-
-```python
-from rune_sdk import Caster
-
-caster = Caster("localhost:50070")
-
-@caster.rune("translate", gate="/translate")
-async def translate(ctx, input):
-    result = do_translation(input)
-    return result
-
-caster.run()
-```
-
-启动后自动获得：
-
-```
-POST /translate              ← sync call
-POST /translate?stream=true  ← real SSE streaming
-POST /translate?async=true   ← async task
-GET  /health                 ← health check
-```
-
-## 核心概念
-
-| 名称 | 是什么 |
-|------|--------|
-| **Rune** | 一个函数。输入 bytes, 输出 bytes。任何语言实现。 |
-| **Caster** | 远程执行者。通过 gRPC 连接 Runtime，注册并执行 Rune。 |
-| **Gate** | HTTP 入口。根据 `gate.path` 声明自动生成真实业务路由。 |
-| **Relay** | 注册表 + 路由。记录所有 Rune 在哪，把请求中继过去。 |
-| **Flow** | 顺序链式编排。多个 Rune 组成的处理流水线。 |
-
-## 它替代了什么
-
-| 能力 | 传统方案 | Rune |
-|------|---------|------|
-| HTTP API | Gin / FastAPI / Express | 声明 `gate.path`，自动路由 |
-| 流式 SSE | 手写 SSE 逻辑 | `?stream=true`，真流式 |
-| 异步任务 | Celery / Asynq + Redis | `?async=true`，内存 task store |
-| 链式编排 | Temporal / Airflow | `rune-flow` 顺序 chain |
-| 分布式执行 | 自建 gRPC 服务 | Caster 协议，本地/远程统一 |
-| 多语言 | 各工具各自的 SDK | 统一 Wire Protocol，先从 Python 开始 |
-
-## 开始使用
-
-### Rust Runtime
+### 启动 Runtime
 
 ```bash
-# 克隆仓库
-git clone https://github.com/aspect-build/rune.git
-cd rune
+# 开发模式（跳过认证，绑定 127.0.0.1）
+rune start --dev
 
-# 构建
-cargo build
-
-# 运行示例
-cargo run --bin rune-server
+# 生产模式（使用 rune.toml 配置）
+rune start --config rune.toml
 ```
 
-### Python SDK
+### Python Caster 示例
 
 ```bash
 pip install rune-sdk
@@ -89,40 +38,257 @@ from rune_sdk import Caster
 
 caster = Caster("localhost:50070")
 
-@caster.rune("echo", gate="/echo")
-async def echo(ctx, input):
-    return input
+@caster.rune("translate", gate="/translate", input_schema={
+    "type": "object",
+    "properties": {"text": {"type": "string"}, "lang": {"type": "string"}},
+    "required": ["text", "lang"]
+})
+async def translate(ctx, input):
+    data = json.loads(input)
+    return json.dumps({"translated": do_translate(data["text"], data["lang"])})
 
-@caster.stream_rune("count", gate="/count")
-async def count(ctx, input, sender):
-    for i in range(10):
-        await sender.emit(str(i))
-    await sender.end()
+@caster.stream_rune("generate", gate="/generate")
+async def generate(ctx, input, sender):
+    for token in model.stream(input):
+        await sender.emit(token)
 
 caster.run()
 ```
 
-## 状态
+### TypeScript Caster 示例
 
-**v0.1.0** — 首个正式版本。
+```typescript
+import { Caster } from '@rune-sdk/caster';
 
-已交付：
-- Rust 参考 Runtime（rune-core / rune-gate / rune-flow / rune-server）
-- 官方 Python Caster SDK（rune-sdk）
-- sync / real stream / async 三种调用模式
-- `gate.path` 真实业务路由
-- 最小顺序 Flow chain（支持 local + remote 混合）
-- 完整协议保证（见 [Protocol Guarantees](docs/protocol-guarantees.md)）
+const caster = new Caster({ key: 'rk_xxx' });
 
-未纳入 v0.1.0：
-- Schema 校验 / OpenAPI 生成
-- 完整 DAG 工作流
-- Durable execution
-- Go / TypeScript / Rust SDK
+caster.rune({ name: 'greet', gate: { path: '/greet' } }, async (ctx, input) => {
+  return { message: `Hello, ${input.name}!` };
+});
+
+caster.streamRune({ name: 'count', gate: { path: '/count' } }, async (ctx, input, stream) => {
+  for (let i = 0; i < 10; i++) {
+    stream.emit(Buffer.from(String(i)));
+  }
+});
+
+await caster.run();
+```
+
+### CLI 调用
+
+```bash
+# 列出在线 Rune
+rune list
+
+# 同步调用
+rune call translate '{"text": "hello", "lang": "zh"}'
+
+# 流式调用
+rune call generate '{"prompt": "write a poem"}' --stream
+
+# 异步调用
+rune call translate '{"text": "hello", "lang": "zh"}' --async
+# 查询异步任务
+rune task <task-id>
+```
+
+## 架构
+
+```
+Client ---> HTTP API ---> Gate ---> Relay ---> Invoker ---> Caster
+                           |                                  |
+                      Auth + Rate Limit              gRPC (Wire Protocol)
+                      Schema Validation
+                      File Broker                 Python / TypeScript / Rust
+```
+
+```
+Runtime (Rust)
+├── rune-core    -- 核心抽象（Relay, Resolver, Session, Auth）
+├── rune-gate    -- HTTP 网关（Axum, 路由, 中间件）
+├── rune-flow    -- DAG 工作流引擎
+├── rune-schema  -- JSON Schema 校验 + OpenAPI 生成
+├── rune-store   -- SQLite 持久化（任务, 日志, Key）
+├── rune-proto   -- gRPC protobuf 定义
+├── rune-cli     -- CLI 工具
+└── rune-server  -- 入口二进制
+```
+
+## SDK
+
+### Python (`rune-sdk`)
+
+```bash
+pip install rune-sdk
+```
+
+- `Caster` -- 连接 Runtime，注册 handler
+- `@caster.rune()` -- 注册 unary handler（支持 schema, gate, priority, files）
+- `@caster.stream_rune()` -- 注册 streaming handler
+- `StreamSender` -- 流式发送器（支持 bytes/str/dict/list）
+- 自动重连 + 指数退避
+- 完整协议参与（attach, heartbeat, execute, cancel, reconnect）
+
+### TypeScript (`@rune-sdk/caster`)
+
+```bash
+npm install @rune-sdk/caster
+```
+
+- `Caster` -- 连接 Runtime，注册 handler
+- `caster.rune()` -- 注册 unary handler（支持 schema, gate, priority, files）
+- `caster.streamRune()` -- 注册 streaming handler
+- `StreamSender` -- 流式发送器
+- `AbortSignal` 取消感知
+- 自动重连 + 指数退避
+
+### Rust (`rune-sdk`)
+
+```toml
+[dependencies]
+rune-sdk = { path = "sdks/rust" }
+```
+
+- `Caster` -- 连接 Runtime，注册 handler
+- `caster.rune()` / `caster.rune_with_files()` -- 注册 unary handler
+- `caster.stream_rune()` / `caster.stream_rune_with_files()` -- 注册 streaming handler
+- `StreamSender` -- 流式发送器
+- `CancellationToken` 取消感知
+- 自动重连 + 指数退避
+
+## CLI
+
+```bash
+rune start [--dev] [--config <path>]   # 启动 Runtime
+rune stop                               # 停止 Runtime
+rune status                             # 查看 Runtime 状态
+rune list                               # 列出在线 Rune
+rune call <name> [input] [--stream] [--async]  # 调用 Rune
+rune task <id>                          # 查询异步任务
+rune key create --type <gate|caster> --label <label>  # 创建 API Key
+rune key list                           # 列出 API Key
+rune key revoke <id>                    # 吊销 API Key
+rune flow register <file>               # 注册 Flow
+rune flow list                          # 列出 Flow
+rune flow run <name> [input]            # 执行 Flow
+rune flow delete <name>                 # 删除 Flow
+rune logs [--rune <name>] [--limit N]   # 查看调用日志
+rune stats                              # 查看调用统计
+rune config init                        # 生成默认配置
+rune config show                        # 显示当前配置
+```
+
+## API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/health` | 健康检查 |
+| GET | `/api/v1/runes` | 列出在线 Rune |
+| POST | `/api/v1/runes/:name/run` | 调用 Rune（debug 端点） |
+| GET | `/api/v1/tasks/:id` | 查询异步任务 |
+| DELETE | `/api/v1/tasks/:id` | 取消异步任务 |
+| GET | `/api/v1/status` | Runtime 状态 |
+| GET | `/api/v1/casters` | 在线 Caster 列表 |
+| GET | `/api/v1/stats` | 调用统计 |
+| GET | `/api/v1/logs` | 调用日志 |
+| POST | `/api/v1/keys` | 创建 API Key |
+| GET | `/api/v1/keys` | 列出 API Key |
+| DELETE | `/api/v1/keys/:id` | 吊销 API Key |
+| GET | `/api/v1/openapi.json` | OpenAPI 3.0 文档 |
+| GET | `/api/v1/files/:id` | 下载文件 |
+| POST | `/api/v1/flows` | 创建 Flow |
+| GET | `/api/v1/flows` | 列出 Flow |
+| GET | `/api/v1/flows/:name` | 获取 Flow 详情 |
+| DELETE | `/api/v1/flows/:name` | 删除 Flow |
+| POST | `/api/v1/flows/:name/run` | 执行 Flow |
+| * | `/{gate_path}` | 动态业务路由（由 Rune 的 gate.path 声明） |
+
+完整 API 参考见 [docs/api-reference.md](docs/api-reference.md)。
+
+## 配置
+
+Runtime 通过 `rune.toml` 配置，支持环境变量覆盖。
+
+```toml
+[server]
+http_port = 50060
+grpc_port = 50070
+dev_mode = false
+drain_timeout_secs = 15
+
+[auth]
+enabled = true
+exempt_routes = ["/health"]
+
+[store]
+db_path = "rune.db"
+log_retention_days = 30
+
+[session]
+heartbeat_interval_secs = 10
+heartbeat_timeout_secs = 35
+max_request_timeout_secs = 30
+
+[gate]
+cors_origins = []
+max_upload_size_mb = 10
+
+[resolver]
+strategy = "round_robin"  # round_robin | random | least_load | priority
+
+[rate_limit]
+requests_per_minute = 600
+
+[log]
+level = "info"
+```
+
+完整配置参考见 [docs/configuration.md](docs/configuration.md)。
+
+## Protocol Guarantees
+
+Rune 定义了 18 条行为保证契约，任何违反都是 bug。涵盖：
+
+- **执行语义** (1-3) -- 统一调用、三种模式、真流式
+- **状态收敛** (4-7) -- 超时/取消/断连后状态完全清理
+- **背压** (8) -- 严格 max_concurrent 信号量
+- **路由** (9-11) -- 真实业务路由、无隐式暴露、路由冲突硬错误
+- **Flow** (12) -- Flow 使用同一 Invoker
+- **SDK** (13) -- 完整协议参与
+- **Schema** (14) -- 有 schema 必校验，无 schema 不拦截
+- **文件** (15) -- multipart 有大小上限
+- **标签路由** (16) -- 标签不匹配返回 503
+- **Flow 隔离** (17) -- 单步失败不污染其他分支已完成的结果
+- **优雅停机** (18) -- drain 期间拒绝新请求，等待在飞请求完成
+
+完整列表见 [docs/protocol-guarantees.md](docs/protocol-guarantees.md)。
+
+## 路线图
+
+| 版本 | 状态 | 主要交付 |
+|------|------|----------|
+| v0.1 | 已完成 | 核心 Runtime + Python SDK + 三种调用模式 + 顺序 Flow |
+| v0.2 | 已完成 | API Key 认证 + SQLite 持久化 + 调用日志 |
+| v0.3 | 已完成 | JSON Schema 校验 + OpenAPI 生成 + 文件传输 |
+| v0.4 | 已完成 | DAG 工作流引擎（并行执行、条件分支、input mapping） |
+| v0.5 | 已完成 | TypeScript SDK + CLI 工具 |
+| v0.6 | 已完成 | 高级调度 + Rate Limiting + 优雅停机 + Rust SDK |
+| v0.7 | 已完成 | 文档全面更新 + 稳定化 |
+| v1.0 | 即将发布 | 正式稳定版本 |
 
 ## 文档
 
 | 文档 | 说明 |
 |------|------|
-| [Protocol Guarantees](docs/protocol-guarantees.md) | v0.1.0 行为保证契约 |
-| [v0.1.0 Scope](docs/scope/v0.1.0.md) | 版本范围与交付计划 |
+| [Protocol Guarantees](docs/protocol-guarantees.md) | 18 条行为保证契约 |
+| [API Reference](docs/api-reference.md) | HTTP 端点完整参考 |
+| [Configuration](docs/configuration.md) | rune.toml 配置参考 |
+| [CLI](docs/cli.md) | CLI 命令用法参考 |
+| [Python SDK](sdks/python/README.md) | Python Caster SDK |
+| [TypeScript SDK](sdks/typescript/README.md) | TypeScript Caster SDK |
+| [Rust SDK](sdks/rust/README.md) | Rust Caster SDK |
+
+## License
+
+Private project.
