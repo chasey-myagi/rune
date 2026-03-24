@@ -32,13 +32,11 @@ interface RegisteredRune {
 // Proto loading helpers
 // ---------------------------------------------------------------------------
 
+// Proto file is bundled inside the SDK package at proto/rune.proto.
+// Source of truth: repo root proto/rune/wire/v1/rune.proto — copy when proto changes.
 const PROTO_PATH = path.resolve(
-  // import.meta.url points to src/caster.ts (dev) or dist/caster.js (built)
-  // Go 3 levels up to reach the repo root (rune/):
-  //   src/ or dist/ -> sdks/typescript/ -> sdks/ -> rune/
-  // Then navigate to proto/rune/wire/v1/rune.proto
   path.dirname(new URL(import.meta.url).pathname),
-  '../../../proto/rune/wire/v1/rune.proto',
+  '../proto/rune.proto',
 );
 
 function loadProto(): {
@@ -225,15 +223,7 @@ export class Caster {
     this._activeStream = stream;
 
     // Build and send CasterAttach
-    const declarations = this._buildDeclarations();
-    stream.write({
-      attach: {
-        caster_id: this.casterId,
-        runes: declarations,
-        labels: this.labels,
-        max_concurrent: this.maxConcurrent,
-      },
-    });
+    stream.write(this._buildAttachMessage());
 
     // Heartbeat timer
     const heartbeatTimer = setInterval(() => {
@@ -277,6 +267,26 @@ export class Caster {
         resolve();
       });
     });
+  }
+
+  // -----------------------------------------------------------------------
+  // Attach message builder
+  // -----------------------------------------------------------------------
+
+  /**
+   * Build the CasterAttach message object.
+   * Extracted for testability — mirrors Rust SDK's build_attach_message().
+   */
+  private _buildAttachMessage(): Record<string, unknown> {
+    return {
+      attach: {
+        caster_id: this.casterId,
+        runes: this._buildDeclarations(),
+        labels: this.labels,
+        max_concurrent: this.maxConcurrent,
+        key: this.key || '',
+      },
+    };
   }
 
   // -----------------------------------------------------------------------

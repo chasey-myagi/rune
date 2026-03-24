@@ -29,6 +29,14 @@ impl KeyVerifier for StoreKeyVerifier {
             .flatten()
             .is_some()
     }
+    async fn verify_admin_key(&self, raw_key: &str) -> bool {
+        self.store
+            .verify_key(raw_key, KeyType::Admin)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    }
 }
 #[cfg(test)]
 mod tests {

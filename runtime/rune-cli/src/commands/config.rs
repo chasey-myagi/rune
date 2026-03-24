@@ -3,8 +3,12 @@ use anyhow::{Context, Result};
 const DEFAULT_CONFIG: &str = r#"# Rune Runtime Configuration
 
 [server]
-# Listen address
-addr = "0.0.0.0:50060"
+# HTTP listen address
+http_host = "0.0.0.0"
+http_port = 50060
+# gRPC listen address
+grpc_host = "0.0.0.0"
+grpc_port = 50070
 
 [auth]
 # Enable API key authentication
@@ -60,4 +64,34 @@ pub async fn show() -> Result<()> {
     println!("# {}", config_path.display());
     println!("{}", content);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S10 regression: DEFAULT_CONFIG must be valid TOML parseable by AppConfig's schema.
+    /// Since rune-cli doesn't depend on rune-core, we verify the TOML structure directly.
+    #[test]
+    fn test_default_config_is_valid_toml() {
+        let parsed: toml::Value =
+            toml::from_str(DEFAULT_CONFIG).expect("DEFAULT_CONFIG must be valid TOML");
+
+        // [server] section must have http_port / grpc_port, NOT "addr"
+        let server = parsed.get("server").expect("must have [server] section");
+        assert!(
+            server.get("http_port").is_some(),
+            "server must have 'http_port', found keys: {:?}",
+            server
+        );
+        assert!(
+            server.get("grpc_port").is_some(),
+            "server must have 'grpc_port', found keys: {:?}",
+            server
+        );
+        assert!(
+            server.get("addr").is_none(),
+            "server must NOT have legacy 'addr' field"
+        );
+    }
 }

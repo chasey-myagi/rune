@@ -161,6 +161,42 @@ class Caster:
             logger.info("reconnecting to %s ...", self._addr)
 
     # ------------------------------------------------------------------
+    # Attach message builder
+    # ------------------------------------------------------------------
+
+    def _build_attach_message(self) -> rune_pb2.SessionMessage:
+        """Build the CasterAttach session message."""
+        declarations = []
+        for registered in self._runes.values():
+            decl = rune_pb2.RuneDeclaration(
+                name=registered.config.name,
+                version=registered.config.version,
+                description=registered.config.description,
+                supports_stream=registered.config.supports_stream,
+                input_schema=json.dumps(registered.config.input_schema) if registered.config.input_schema else "",
+                output_schema=json.dumps(registered.config.output_schema) if registered.config.output_schema else "",
+                priority=registered.config.priority,
+            )
+            if registered.config.gate:
+                decl.gate.CopyFrom(
+                    rune_pb2.GateConfig(
+                        path=registered.config.gate,
+                        method=registered.config.gate_method,
+                    )
+                )
+            declarations.append(decl)
+
+        return rune_pb2.SessionMessage(
+            attach=rune_pb2.CasterAttach(
+                caster_id=self._caster_id,
+                runes=declarations,
+                labels=self._labels,
+                max_concurrent=self._max_concurrent,
+                key=self._api_key or "",
+            )
+        )
+
+    # ------------------------------------------------------------------
     # Session
     # ------------------------------------------------------------------
 
@@ -181,34 +217,8 @@ class Caster:
 
             call = stub.Session(outbound_iter())
 
-            # Build attach message
-            declarations = []
-            for registered in self._runes.values():
-                decl = rune_pb2.RuneDeclaration(
-                    name=registered.config.name,
-                    version=registered.config.version,
-                    description=registered.config.description,
-                    supports_stream=registered.config.supports_stream,
-                    input_schema=json.dumps(registered.config.input_schema) if registered.config.input_schema else "",
-                    output_schema=json.dumps(registered.config.output_schema) if registered.config.output_schema else "",
-                    priority=registered.config.priority,
-                )
-                if registered.config.gate:
-                    decl.gate.CopyFrom(
-                        rune_pb2.GateConfig(
-                            path=registered.config.gate,
-                            method=registered.config.gate_method,
-                        )
-                    )
-                declarations.append(decl)
-
-            attach_msg = rune_pb2.SessionMessage(
-                attach=rune_pb2.CasterAttach(
-                    caster_id=self._caster_id,
-                    runes=declarations,
-                    max_concurrent=self._max_concurrent,
-                )
-            )
+            # Build and send attach message
+            attach_msg = self._build_attach_message()
             await outbound_queue.put(attach_msg)
 
             # Start heartbeat task

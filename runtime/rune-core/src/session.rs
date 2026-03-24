@@ -49,10 +49,13 @@ pub(crate) struct CasterState {
     pub(crate) outbound: mpsc::Sender<SessionMessage>,
     pub(crate) pending: Arc<DashMap<String, PendingRequest>>,
     pub(crate) semaphore: Arc<Semaphore>,
+    pub(crate) connected_at: Instant,
 }
 
 impl SessionManager {
-    pub fn new(heartbeat_interval: Duration, heartbeat_timeout: Duration) -> Self {
+    /// Test-only constructor with dev_mode=true and no auth.
+    /// Production code should use `with_auth()`.
+    pub fn new_dev(heartbeat_interval: Duration, heartbeat_timeout: Duration) -> Self {
         Self {
             sessions: DashMap::new(),
             heartbeat_interval,
@@ -107,6 +110,22 @@ impl SessionManager {
         self.sessions.get(caster_id)
             .map(|s| s.semaphore.available_permits())
             .unwrap_or(0)
+    }
+
+    /// Return the `Instant` when a caster connected, or `None` if not found.
+    pub fn connected_at(&self, caster_id: &str) -> Option<Instant> {
+        self.sessions.get(caster_id).map(|s| s.connected_at)
+    }
+
+    /// Insert a dummy caster for integration tests in downstream crates.
+    pub fn insert_test_caster(&self, caster_id: &str, max_concurrent: usize) {
+        let (tx, _rx) = mpsc::channel(16);
+        self.sessions.insert(caster_id.to_string(), CasterState {
+            outbound: tx,
+            pending: Arc::new(DashMap::new()),
+            semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            connected_at: Instant::now(),
+        });
     }
 
     pub async fn handle_session(
@@ -215,6 +234,7 @@ impl SessionManager {
                         outbound: outbound_tx.clone(),
                         pending: Arc::clone(&pending),
                         semaphore: Arc::clone(&semaphore),
+                        connected_at: Instant::now(),
                     });
 
                     let mut configs = Vec::new();
@@ -448,7 +468,7 @@ mod tests {
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
     fn default_session_manager() -> Arc<SessionManager> {
-        Arc::new(SessionManager::new(
+        Arc::new(SessionManager::new_dev(
             Duration::from_secs(10),
             Duration::from_secs(35),
         ))
@@ -472,6 +492,7 @@ mod tests {
             outbound: tx,
             pending: Arc::clone(&pending),
             semaphore: Arc::clone(&semaphore),
+            connected_at: Instant::now(),
         });
 
         (mgr, caster_id, semaphore, pending, rx)
@@ -625,11 +646,13 @@ mod tests {
             outbound: tx.clone(),
             pending: Arc::new(DashMap::new()),
             semaphore: Arc::new(Semaphore::new(1)),
+            connected_at: Instant::now(),
         });
         mgr.sessions.insert("caster-2".to_string(), CasterState {
             outbound: tx,
             pending: Arc::new(DashMap::new()),
             semaphore: Arc::new(Semaphore::new(1)),
+            connected_at: Instant::now(),
         });
 
         assert_eq!(mgr.caster_count(), 2);
@@ -689,6 +712,7 @@ mod tests {
             outbound: tx1,
             pending: Arc::clone(&pending1),
             semaphore: Arc::clone(&sem1),
+            connected_at: Instant::now(),
         });
 
         let (tx2, _rx2) = mpsc::channel(16);
@@ -698,6 +722,7 @@ mod tests {
             outbound: tx2,
             pending: Arc::clone(&pending2),
             semaphore: Arc::clone(&sem2),
+            connected_at: Instant::now(),
         });
 
         // Launch a request on caster-A
@@ -791,7 +816,7 @@ mod tests {
     fn test_heartbeat_config_propagation() {
         let hb_interval = Duration::from_secs(5);
         let hb_timeout = Duration::from_secs(15);
-        let mgr = SessionManager::new(hb_interval, hb_timeout);
+        let mgr = SessionManager::new_dev(hb_interval, hb_timeout);
 
         assert_eq!(mgr.heartbeat_interval, hb_interval);
         assert_eq!(mgr.heartbeat_timeout, hb_timeout);
@@ -933,6 +958,7 @@ mod tests {
                 outbound: tx,
                 pending: Arc::clone(&pending),
                 semaphore: Arc::clone(&sem),
+                connected_at: Instant::now(),
             });
             pending_maps.push(pending);
             sems.push(sem);
@@ -1032,6 +1058,7 @@ mod tests {
             outbound: tx1,
             pending: Arc::clone(&pending1),
             semaphore: Arc::clone(&sem1),
+            connected_at: Instant::now(),
         });
 
         assert!(mgr.is_available("reconnect-caster"));
@@ -1050,6 +1077,7 @@ mod tests {
             outbound: tx2,
             pending: Arc::clone(&pending2),
             semaphore: Arc::clone(&sem2),
+            connected_at: Instant::now(),
         });
 
         // Should be available again with new capacity
@@ -1074,6 +1102,7 @@ mod tests {
             outbound: tx,
             pending: Arc::new(DashMap::new()),
             semaphore: Arc::clone(&sem),
+            connected_at: Instant::now(),
         });
 
         assert!(mgr.is_available("one-permit"));
@@ -1313,6 +1342,7 @@ mod tests {
                 outbound: tx,
                 pending: Arc::new(DashMap::new()),
                 semaphore: Arc::new(Semaphore::new(10)),
+                connected_at: Instant::now(),
             });
         }
 
@@ -1339,6 +1369,7 @@ mod tests {
             outbound: tx,
             pending: Arc::new(DashMap::new()),
             semaphore: Arc::clone(&sem),
+            connected_at: Instant::now(),
         });
 
         assert_eq!(mgr.available_permits("caster-q"), 7);
@@ -1361,6 +1392,7 @@ mod tests {
             outbound: tx,
             pending: Arc::clone(&pending),
             semaphore: Arc::clone(&semaphore),
+            connected_at: Instant::now(),
         });
 
         // Drop the receiver to close the channel
@@ -1390,6 +1422,7 @@ mod tests {
             outbound: tx,
             pending: Arc::clone(&pending),
             semaphore: Arc::clone(&semaphore),
+            connected_at: Instant::now(),
         });
 
         drop(rx);
@@ -1555,5 +1588,41 @@ mod tests {
             }
         }
         let _ = handle.await.unwrap().unwrap();
+    }
+
+    // ---- S8 回归测试：with_auth 是唯一的生产构造路径 ----
+
+    #[test]
+    fn test_new_dev_has_dev_mode_true() {
+        // new_dev() (test-only constructor) defaults to dev_mode=true
+        let mgr = SessionManager::new_dev(
+            Duration::from_secs(10),
+            Duration::from_secs(35),
+        );
+        assert!(mgr.dev_mode, "new_dev() should have dev_mode=true");
+    }
+
+    #[test]
+    fn test_with_auth_respects_dev_mode_false() {
+        let verifier = Arc::new(crate::auth::NoopVerifier);
+        let mgr = SessionManager::with_auth(
+            Duration::from_secs(10),
+            Duration::from_secs(35),
+            verifier,
+            false,
+        );
+        assert!(!mgr.dev_mode, "with_auth(dev_mode=false) should have dev_mode=false");
+    }
+
+    #[test]
+    fn test_with_auth_respects_dev_mode_true() {
+        let verifier = Arc::new(crate::auth::NoopVerifier);
+        let mgr = SessionManager::with_auth(
+            Duration::from_secs(10),
+            Duration::from_secs(35),
+            verifier,
+            true,
+        );
+        assert!(mgr.dev_mode, "with_auth(dev_mode=true) should have dev_mode=true");
     }
 }

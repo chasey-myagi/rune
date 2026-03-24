@@ -439,9 +439,9 @@ pub fn evaluate_condition(
         return result;
     }
 
-    // 无法解析时默认 true（执行 step），但打 warn 让用户知道条件没生效
-    tracing::warn!(condition = trimmed, "condition expression could not be parsed, defaulting to true — operators must be separated by spaces (e.g. 'x == 5')");
-    true
+    // 无法解析时默认 false（不执行 step）——安全侧：条件未生效时不应静默执行
+    tracing::warn!(condition = trimmed, "condition expression could not be parsed, defaulting to false (skip step) — operators must be separated by spaces (e.g. 'x == 5')");
+    false
 }
 
 /// Evaluate a comparison expression. Exported for testing; not part of stable API.

@@ -31,6 +31,8 @@ pub enum DagError {
     DuplicateStep(String),
     #[error("multi-upstream step '{step}' must declare input_mapping")]
     MissingInputMapping { step: String },
+    #[error("step '{step}' has unparseable condition: '{condition}' — use 'true', 'false', or a comparison with spaces around the operator (e.g. 'x == 5')")]
+    InvalidCondition { step: String, condition: String },
 }
 
 /// 验证 FlowDefinition，检查 DAG 有效性
@@ -115,6 +117,26 @@ pub fn validate_dag(flow: &FlowDefinition) -> Result<(), DagError> {
             return Err(DagError::MissingInputMapping {
                 step: s.name.clone(),
             });
+        }
+    }
+
+    // 5. 条件表达式预检：如果 condition 不是 "true"/"false" 且无法解析出操作符，注册时就报错
+    let operators = ["==", "!=", ">=", "<=", ">", "<"];
+    for s in steps {
+        if let Some(condition) = &s.condition {
+            let trimmed = condition.trim();
+            if trimmed.is_empty() || trimmed == "true" || trimmed == "false" {
+                continue;
+            }
+            // 检查是否能找到独立的操作符 token
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            let has_operator = operators.iter().any(|op| tokens.contains(op));
+            if !has_operator {
+                return Err(DagError::InvalidCondition {
+                    step: s.name.clone(),
+                    condition: condition.clone(),
+                });
+            }
         }
     }
 

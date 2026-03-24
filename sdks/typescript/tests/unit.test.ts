@@ -583,3 +583,72 @@ describe('1.8 StreamSender Edge Cases', () => {
     expect(JSON.parse(chunks[0].toString())).toEqual(nested);
   });
 });
+
+// ===========================================================================
+// 2.0 CasterAttach Message (C-01 ~ C-02)
+// ===========================================================================
+describe('2.0 CasterAttach Message', () => {
+  it('C-01: attach message includes key', () => {
+    const caster = new Caster({ key: 'rk_secret_key_123' });
+    caster.rune({ name: 'echo' }, async (_ctx, input) => input);
+
+    const msg = (caster as any)._buildAttachMessage();
+    expect(msg.attach.key).toBe('rk_secret_key_123');
+  });
+
+  it('C-01b: attach message key defaults to empty string for empty key', () => {
+    const caster = new Caster({ key: '' });
+    caster.rune({ name: 'echo' }, async (_ctx, input) => input);
+
+    const msg = (caster as any)._buildAttachMessage();
+    expect(msg.attach.key).toBe('');
+  });
+
+  it('C-02: attach message includes labels', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      labels: { env: 'prod', region: 'us-west' },
+    });
+    caster.rune({ name: 'echo' }, async (_ctx, input) => input);
+
+    const msg = (caster as any)._buildAttachMessage();
+    expect(msg.attach.labels).toEqual({ env: 'prod', region: 'us-west' });
+  });
+
+  it('C-02b: attach message labels defaults to empty object', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'echo' }, async (_ctx, input) => input);
+
+    const msg = (caster as any)._buildAttachMessage();
+    expect(msg.attach.labels).toEqual({});
+  });
+});
+
+// ===========================================================================
+// S6 Regression: Proto file bundled inside SDK package
+// ===========================================================================
+describe('S6 Proto file bundled in SDK', () => {
+  it('S6-01: proto file exists relative to caster.ts source', async () => {
+    const { existsSync } = await import('fs');
+    const { resolve, dirname } = await import('path');
+    const { fileURLToPath } = await import('url');
+
+    // Simulate the resolution logic from caster.ts:
+    // From src/caster.ts, the proto should be at ../proto/rune.proto
+    const casterDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const protoPath = resolve(casterDir, '../proto/rune.proto');
+    expect(existsSync(protoPath)).toBe(true);
+  });
+
+  it('S6-02: proto file contains RuneService definition', async () => {
+    const { readFileSync } = await import('fs');
+    const { resolve, dirname } = await import('path');
+    const { fileURLToPath } = await import('url');
+
+    const casterDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const protoPath = resolve(casterDir, '../proto/rune.proto');
+    const content = readFileSync(protoPath, 'utf-8');
+    expect(content).toContain('service RuneService');
+    expect(content).toContain('rpc Session');
+  });
+});

@@ -1036,7 +1036,7 @@ mod tests {
     #[test]
     fn test_least_load_resolver_picks_least_loaded() {
         // Create a SessionManager, register two casters with different loads
-        let session_mgr = Arc::new(crate::session::SessionManager::new(
+        let session_mgr = Arc::new(crate::session::SessionManager::new_dev(
             Duration::from_secs(10),
             Duration::from_secs(35),
         ));
@@ -1067,7 +1067,7 @@ mod tests {
 
     #[test]
     fn test_least_load_resolver_no_candidates() {
-        let session_mgr = Arc::new(crate::session::SessionManager::new(
+        let session_mgr = Arc::new(crate::session::SessionManager::new_dev(
             Duration::from_secs(10),
             Duration::from_secs(35),
         ));
@@ -1078,7 +1078,7 @@ mod tests {
 
     #[test]
     fn test_least_load_resolver_single_candidate() {
-        let session_mgr = Arc::new(crate::session::SessionManager::new(
+        let session_mgr = Arc::new(crate::session::SessionManager::new_dev(
             Duration::from_secs(10),
             Duration::from_secs(35),
         ));
@@ -1120,7 +1120,7 @@ mod tests {
 
         let rr = RoundRobinResolver::new();
         let rand = RandomResolver::new();
-        let session_mgr = Arc::new(crate::session::SessionManager::new(
+        let session_mgr = Arc::new(crate::session::SessionManager::new_dev(
             Duration::from_secs(10),
             Duration::from_secs(35),
         ));
@@ -1139,7 +1139,7 @@ mod tests {
 
         let rr = RoundRobinResolver::new();
         let rand = RandomResolver::new();
-        let session_mgr = Arc::new(crate::session::SessionManager::new(
+        let session_mgr = Arc::new(crate::session::SessionManager::new_dev(
             Duration::from_secs(10),
             Duration::from_secs(35),
         ));
@@ -1644,7 +1644,7 @@ mod tests {
         // PriorityResolver wrapping LeastLoadResolver:
         // 1) filters to highest priority tier
         // 2) delegates to LeastLoad among that tier
-        let session_mgr = Arc::new(crate::session::SessionManager::new(
+        let session_mgr = Arc::new(crate::session::SessionManager::new_dev(
             Duration::from_secs(10),
             Duration::from_secs(35),
         ));

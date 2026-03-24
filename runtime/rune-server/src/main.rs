@@ -59,49 +59,52 @@ async fn main() -> anyhow::Result<()> {
     // ── App + Runes ──
     let mut app = App::with_config_and_auth(config.clone(), key_verifier.clone());
 
-    // hello: static response
-    app.rune(
-        RuneConfig {
-            name: "hello".into(),
-            version: String::new(),
-            description: "local hello".into(),
-            supports_stream: false,
-            gate: Some(GateConfig {
-                path: "/hello".into(),
-                method: "POST".into(),
+    // Demo runes — only registered in dev mode
+    if config.server.dev_mode {
+        // hello: static response
+        app.rune(
+            RuneConfig {
+                name: "hello".into(),
+                version: String::new(),
+                description: "local hello".into(),
+                supports_stream: false,
+                gate: Some(GateConfig {
+                    path: "/hello".into(),
+                    method: "POST".into(),
+                }),
+                input_schema: None,
+                output_schema: None,
+                priority: 0, labels: Default::default(),
+            },
+            make_handler(|_ctx, _input| async {
+                Ok(Bytes::from(r#"{"message":"hello from local rune!"}"#))
             }),
-            input_schema: None,
-            output_schema: None,
-            priority: 0, labels: Default::default(),
-        },
-        make_handler(|_ctx, _input| async {
-            Ok(Bytes::from(r#"{"message":"hello from local rune!"}"#))
-        }),
-    );
+        );
 
-    // step_b: local Rust step (adds step_b field to JSON)
-    app.rune(
-        RuneConfig {
-            name: "step_b".into(),
-            version: String::new(),
-            description: "local step_b".into(),
-            supports_stream: false,
-            gate: None,
-            input_schema: None,
-            output_schema: None,
-            priority: 0, labels: Default::default(),
-        },
-        make_handler(|_ctx, input| async move {
-            let mut v: serde_json::Value =
-                serde_json::from_slice(&input).map_err(|e| RuneError::InvalidInput(e.to_string()))?;
-            v.as_object_mut()
-                .unwrap()
-                .insert("step_b".into(), true.into());
-            Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
-        }),
-    );
+        // step_b: local Rust step (adds step_b field to JSON)
+        app.rune(
+            RuneConfig {
+                name: "step_b".into(),
+                version: String::new(),
+                description: "local step_b".into(),
+                supports_stream: false,
+                gate: None,
+                input_schema: None,
+                output_schema: None,
+                priority: 0, labels: Default::default(),
+            },
+            make_handler(|_ctx, input| async move {
+                let mut v: serde_json::Value =
+                    serde_json::from_slice(&input).map_err(|e| RuneError::InvalidInput(e.to_string()))?;
+                v.as_object_mut()
+                    .unwrap()
+                    .insert("step_b".into(), true.into());
+                Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
+            }),
+        );
 
-    tracing::info!("registered local runes: hello, step_b");
+        tracing::info!("registered demo runes: hello, step_b");
+    }
 
     // ── Build app components ──
     let running = app.build();
@@ -138,30 +141,33 @@ async fn main() -> anyhow::Result<()> {
         config.default_timeout(),
     );
 
-    let _ = flow_engine.register(FlowDefinition {
-        name: "pipeline".to_string(),
-        steps: vec![
-            StepDefinition { name: "s_a".into(), rune: "step_a".into(), depends_on: vec![], condition: None, input_mapping: None },
-            StepDefinition { name: "s_b".into(), rune: "step_b".into(), depends_on: vec!["s_a".into()], condition: None, input_mapping: None },
-            StepDefinition { name: "s_c".into(), rune: "step_c".into(), depends_on: vec!["s_b".into()], condition: None, input_mapping: None },
-        ],
-        gate_path: None,
-    });
+    // Demo flows — only registered in dev mode
+    if config.server.dev_mode {
+        let _ = flow_engine.register(FlowDefinition {
+            name: "pipeline".to_string(),
+            steps: vec![
+                StepDefinition { name: "s_a".into(), rune: "step_a".into(), depends_on: vec![], condition: None, input_mapping: None },
+                StepDefinition { name: "s_b".into(), rune: "step_b".into(), depends_on: vec!["s_a".into()], condition: None, input_mapping: None },
+                StepDefinition { name: "s_c".into(), rune: "step_c".into(), depends_on: vec!["s_b".into()], condition: None, input_mapping: None },
+            ],
+            gate_path: None,
+        });
 
-    let _ = flow_engine.register(FlowDefinition {
-        name: "single".to_string(),
-        steps: vec![
-            StepDefinition { name: "s_a".into(), rune: "step_a".into(), depends_on: vec![], condition: None, input_mapping: None },
-        ],
-        gate_path: None,
-    });
-    let _ = flow_engine.register(FlowDefinition {
-        name: "empty".to_string(),
-        steps: vec![],
-        gate_path: None,
-    });
+        let _ = flow_engine.register(FlowDefinition {
+            name: "single".to_string(),
+            steps: vec![
+                StepDefinition { name: "s_a".into(), rune: "step_a".into(), depends_on: vec![], condition: None, input_mapping: None },
+            ],
+            gate_path: None,
+        });
+        let _ = flow_engine.register(FlowDefinition {
+            name: "empty".to_string(),
+            steps: vec![],
+            gate_path: None,
+        });
 
-    tracing::info!("registered flows: pipeline, single, empty");
+        tracing::info!("registered demo flows: pipeline, single, empty");
+    }
 
     // ── HTTP Gate ──
     let flow_engine = Arc::new(tokio::sync::RwLock::new(flow_engine));

@@ -283,7 +283,7 @@ fn build_guarantee_state() -> (GateState, Arc<Relay>, Arc<RuneStore>) {
         resolver,
         store: store.clone(),
         key_verifier,
-        session_mgr: Arc::new(SessionManager::new(
+        session_mgr: Arc::new(SessionManager::new_dev(
             Duration::from_secs(10),
             Duration::from_secs(35),
         )),

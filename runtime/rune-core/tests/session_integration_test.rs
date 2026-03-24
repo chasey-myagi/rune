@@ -180,7 +180,7 @@ fn fast_heartbeat_config() -> AppConfig {
 async fn attach_success_returns_ack_accepted() {
     let config = default_session_config();
     let relay = Arc::new(Relay::new());
-    let session_mgr = Arc::new(SessionManager::new(
+    let session_mgr = Arc::new(SessionManager::new_dev(
         config.heartbeat_interval(),
         config.heartbeat_timeout(),
     ));
@@ -229,7 +229,7 @@ async fn attach_success_returns_ack_accepted() {
 async fn attach_then_execute_unary_returns_result() {
     let config = default_session_config();
     let relay = Arc::new(Relay::new());
-    let session_mgr = Arc::new(SessionManager::new(
+    let session_mgr = Arc::new(SessionManager::new_dev(
         config.heartbeat_interval(),
         config.heartbeat_timeout(),
     ));
@@ -299,7 +299,7 @@ async fn attach_then_execute_unary_returns_result() {
 async fn attach_then_stream_execute_returns_chunks() {
     let config = default_session_config();
     let relay = Arc::new(Relay::new());
-    let session_mgr = Arc::new(SessionManager::new(
+    let session_mgr = Arc::new(SessionManager::new_dev(
         config.heartbeat_interval(),
         config.heartbeat_timeout(),
     ));
@@ -380,7 +380,7 @@ async fn heartbeat_exchange() {
     config.session.heartbeat_interval_secs = 1;
     config.session.heartbeat_timeout_secs = 60;
     let relay = Arc::new(Relay::new());
-    let session_mgr = Arc::new(SessionManager::new(
+    let session_mgr = Arc::new(SessionManager::new_dev(
         config.heartbeat_interval(),
         config.heartbeat_timeout(),
     ));
@@ -428,7 +428,7 @@ async fn heartbeat_exchange() {
 async fn detach_cleans_up_session() {
     let config = default_session_config();
     let relay = Arc::new(Relay::new());
-    let session_mgr = Arc::new(SessionManager::new(
+    let session_mgr = Arc::new(SessionManager::new_dev(
         config.heartbeat_interval(),
         config.heartbeat_timeout(),
     ));
@@ -474,7 +474,7 @@ async fn detach_cleans_up_session() {
 async fn heartbeat_timeout_disconnects() {
     let config = fast_heartbeat_config();
     let relay = Arc::new(Relay::new());
-    let session_mgr = Arc::new(SessionManager::new(
+    let session_mgr = Arc::new(SessionManager::new_dev(
         config.heartbeat_interval(),
         config.heartbeat_timeout(),
     ));
@@ -511,7 +511,7 @@ async fn heartbeat_timeout_disconnects() {
 async fn cancel_request_cancels_pending() {
     let config = default_session_config();
     let relay = Arc::new(Relay::new());
-    let session_mgr = Arc::new(SessionManager::new(
+    let session_mgr = Arc::new(SessionManager::new_dev(
         config.heartbeat_interval(),
         config.heartbeat_timeout(),
     ));
@@ -594,7 +594,7 @@ async fn cancel_request_cancels_pending() {
 async fn connection_drop_cleans_up_session() {
     let config = default_session_config();
     let relay = Arc::new(Relay::new());
-    let session_mgr = Arc::new(SessionManager::new(
+    let session_mgr = Arc::new(SessionManager::new_dev(
         config.heartbeat_interval(),
         config.heartbeat_timeout(),
     ));
@@ -639,7 +639,7 @@ async fn connection_drop_cleans_up_session() {
 async fn disconnect_with_pending_requests_sends_errors() {
     let config = default_session_config();
     let relay = Arc::new(Relay::new());
-    let session_mgr = Arc::new(SessionManager::new(
+    let session_mgr = Arc::new(SessionManager::new_dev(
         config.heartbeat_interval(),
         config.heartbeat_timeout(),
     ));
@@ -702,7 +702,7 @@ async fn disconnect_with_pending_requests_sends_errors() {
 async fn attach_registers_multiple_runes() {
     let config = default_session_config();
     let relay = Arc::new(Relay::new());
-    let session_mgr = Arc::new(SessionManager::new(
+    let session_mgr = Arc::new(SessionManager::new_dev(
         config.heartbeat_interval(),
         config.heartbeat_timeout(),
     ));

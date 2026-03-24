@@ -112,7 +112,7 @@ pub async fn dynamic_rune_handler(
 
     let params: RunParams = serde_urlencoded::from_str(&query).unwrap_or_default();
 
-    execute_rune(&state, &rune_name, params, Bytes::from(body.to_vec()), &content_type, &labels).await
+    execute_rune(&state, &rune_name, params, body, &content_type, &labels).await
 }
 
 /// Parse X-Rune-Labels header value into a HashMap.
@@ -164,30 +164,24 @@ pub async fn execute_rune(
         }
     };
 
-    // Get RuneConfig for schema validation
-    let (input_schema, output_schema) = if let Some(entries) = state.relay.find(rune_name) {
+    // Get RuneConfig for schema validation and stream support (single lookup)
+    let (input_schema, output_schema, supports_stream) = if let Some(entries) = state.relay.find(rune_name) {
         if let Some(first) = entries.value().first() {
-            (first.config.input_schema.clone(), first.config.output_schema.clone())
+            (first.config.input_schema.clone(), first.config.output_schema.clone(), first.config.supports_stream)
         } else {
-            (None, None)
+            (None, None, false)
         }
     } else {
-        (None, None)
+        (None, None, false)
     };
 
     // Check supports_stream
-    if params.stream.unwrap_or(false) {
-        if let Some(entries) = state.relay.find(rune_name) {
-            if let Some(first) = entries.value().first() {
-                if !first.config.supports_stream {
-                    return error_response(
-                        StatusCode::BAD_REQUEST,
-                        "STREAM_NOT_SUPPORTED",
-                        &format!("rune '{}' does not support streaming", rune_name),
-                    );
-                }
-            }
-        }
+    if params.stream.unwrap_or(false) && !supports_stream {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "STREAM_NOT_SUPPORTED",
+            &format!("rune '{}' does not support streaming", rune_name),
+        );
     }
 
     let request_id = unique_request_id();

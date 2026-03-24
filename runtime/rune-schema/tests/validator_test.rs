@@ -439,3 +439,50 @@ fn test_cache_works_for_output_validation_too() {
     let r2 = validate_input(Some(schema), br#"{"result": "ok"}"#);
     assert!(r2.is_ok());
 }
+
+// =============================================================================
+// S7 回归测试：不同 schema 不会因 hash 碰撞而混淆
+// =============================================================================
+
+#[test]
+fn test_no_hash_collision_between_distinct_schemas() {
+    // Two schemas that are semantically very different but might have similar hashes
+    // if using a weak key. The cache must distinguish them correctly.
+    clear_validator_cache();
+
+    let schema_strict = r#"{
+        "type": "object",
+        "required": ["id"],
+        "properties": { "id": { "type": "integer", "minimum": 1 } },
+        "additionalProperties": false
+    }"#;
+
+    let schema_permissive = r#"{
+        "type": "object",
+        "properties": { "id": { "type": "string" } }
+    }"#;
+
+    // Load schema_strict into cache
+    let r1 = validate_input(Some(schema_strict), br#"{"id": 42}"#);
+    assert!(r1.is_ok(), "strict schema should accept integer id");
+
+    // Load schema_permissive into cache
+    let r2 = validate_input(Some(schema_permissive), br#"{"id": "abc"}"#);
+    assert!(r2.is_ok(), "permissive schema should accept string id");
+
+    // Verify strict schema still rejects string id (not confused with permissive)
+    let r3 = validate_input(Some(schema_strict), br#"{"id": "abc"}"#);
+    assert!(r3.is_err(), "strict schema must reject string id — cache must not confuse schemas");
+
+    // Verify permissive schema still accepts string id
+    let r4 = validate_input(Some(schema_permissive), br#"{"id": "abc"}"#);
+    assert!(r4.is_ok(), "permissive schema should still accept string id");
+
+    // Verify strict schema rejects extra properties
+    let r5 = validate_input(Some(schema_strict), br#"{"id": 1, "extra": true}"#);
+    assert!(r5.is_err(), "strict schema must reject additional properties");
+
+    // Verify permissive schema allows extra properties
+    let r6 = validate_input(Some(schema_permissive), br#"{"id": "x", "extra": true}"#);
+    assert!(r6.is_ok(), "permissive schema should allow extra properties");
+}

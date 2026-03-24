@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17rune/wire/v1/rune.proto\x12\x0crune.wire.v1\"\xc5\x03\n\x0eSessionMessage\x12,\n\x06\x61ttach\x18\n \x01(\x0b\x32\x1a.rune.wire.v1.CasterAttachH\x00\x12,\n\x06\x64\x65tach\x18\x0b \x01(\x0b\x32\x1a.rune.wire.v1.CasterDetachH\x00\x12-\n\x06result\x18\x0c \x01(\x0b\x32\x1b.rune.wire.v1.ExecuteResultH\x00\x12\x31\n\x0cstream_event\x18\r \x01(\x0b\x32\x19.rune.wire.v1.StreamEventH\x00\x12-\n\nstream_end\x18\x0e \x01(\x0b\x32\x17.rune.wire.v1.StreamEndH\x00\x12-\n\nattach_ack\x18\x14 \x01(\x0b\x32\x17.rune.wire.v1.AttachAckH\x00\x12/\n\x07\x65xecute\x18\x15 \x01(\x0b\x32\x1c.rune.wire.v1.ExecuteRequestH\x00\x12-\n\x06\x63\x61ncel\x18\x16 \x01(\x0b\x32\x1b.rune.wire.v1.CancelRequestH\x00\x12,\n\theartbeat\x18\x1e \x01(\x0b\x32\x17.rune.wire.v1.HeartbeatH\x00\x42\t\n\x07payload\"\xce\x01\n\x0c\x43\x61sterAttach\x12\x11\n\tcaster_id\x18\x01 \x01(\t\x12,\n\x05runes\x18\x02 \x03(\x0b\x32\x1d.rune.wire.v1.RuneDeclaration\x12\x36\n\x06labels\x18\x03 \x03(\x0b\x32&.rune.wire.v1.CasterAttach.LabelsEntry\x12\x16\n\x0emax_concurrent\x18\x04 \x01(\r\x1a-\n\x0bLabelsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"I\n\tAttachAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x1a\n\x12supported_features\x18\x03 \x03(\t\"\x1e\n\x0c\x43\x61sterDetach\x12\x0e\n\x06reason\x18\x01 \x01(\t\"\xc5\x01\n\x0fRuneDeclaration\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x03 \x01(\t\x12\x14\n\x0cinput_schema\x18\x04 \x01(\t\x12\x15\n\routput_schema\x18\x05 \x01(\t\x12\x17\n\x0fsupports_stream\x18\x06 \x01(\x08\x12&\n\x04gate\x18\x07 \x01(\x0b\x32\x18.rune.wire.v1.GateConfig\x12\x10\n\x08priority\x18\x08 \x01(\x05\"*\n\nGateConfig\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0e\n\x06method\x18\x02 \x01(\t\"C\n\x0e\x46ileAttachment\x12\x10\n\x08\x66ilename\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x11\n\tmime_type\x18\x03 \x01(\t\"\xf9\x01\n\x0e\x45xecuteRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x11\n\trune_name\x18\x02 \x01(\t\x12\r\n\x05input\x18\x03 \x01(\x0c\x12:\n\x07\x63ontext\x18\x04 \x03(\x0b\x32).rune.wire.v1.ExecuteRequest.ContextEntry\x12\x12\n\ntimeout_ms\x18\x05 \x01(\r\x12\x31\n\x0b\x61ttachments\x18\x06 \x03(\x0b\x32\x1c.rune.wire.v1.FileAttachment\x1a.\n\x0c\x43ontextEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"3\n\rCancelRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"\xb6\x01\n\rExecuteResult\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12$\n\x06status\x18\x02 \x01(\x0e\x32\x14.rune.wire.v1.Status\x12\x0e\n\x06output\x18\x03 \x01(\x0c\x12(\n\x05\x65rror\x18\x04 \x01(\x0b\x32\x19.rune.wire.v1.ErrorDetail\x12\x31\n\x0b\x61ttachments\x18\x05 \x03(\x0b\x32\x1c.rune.wire.v1.FileAttachment\"C\n\x0bStreamEvent\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x12\n\nevent_type\x18\x03 \x01(\t\"o\n\tStreamEnd\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12$\n\x06status\x18\x02 \x01(\x0e\x32\x14.rune.wire.v1.Status\x12(\n\x05\x65rror\x18\x03 \x01(\x0b\x32\x19.rune.wire.v1.ErrorDetail\"!\n\tHeartbeat\x12\x14\n\x0ctimestamp_ms\x18\x01 \x01(\x04\"=\n\x0b\x45rrorDetail\x12\x0c\n\x04\x63ode\x18\x01 \x01(\t\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x0f\n\x07\x64\x65tails\x18\x03 \x01(\x0c*_\n\x06Status\x12\x16\n\x12STATUS_UNSPECIFIED\x10\x00\x12\x14\n\x10STATUS_COMPLETED\x10\x01\x12\x11\n\rSTATUS_FAILED\x10\x02\x12\x14\n\x10STATUS_CANCELLED\x10\x03\x32X\n\x0bRuneService\x12I\n\x07Session\x12\x1c.rune.wire.v1.SessionMessage\x1a\x1c.rune.wire.v1.SessionMessage(\x01\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17rune/wire/v1/rune.proto\x12\x0crune.wire.v1\"\xc5\x03\n\x0eSessionMessage\x12,\n\x06\x61ttach\x18\n \x01(\x0b\x32\x1a.rune.wire.v1.CasterAttachH\x00\x12,\n\x06\x64\x65tach\x18\x0b \x01(\x0b\x32\x1a.rune.wire.v1.CasterDetachH\x00\x12-\n\x06result\x18\x0c \x01(\x0b\x32\x1b.rune.wire.v1.ExecuteResultH\x00\x12\x31\n\x0cstream_event\x18\r \x01(\x0b\x32\x19.rune.wire.v1.StreamEventH\x00\x12-\n\nstream_end\x18\x0e \x01(\x0b\x32\x17.rune.wire.v1.StreamEndH\x00\x12-\n\nattach_ack\x18\x14 \x01(\x0b\x32\x17.rune.wire.v1.AttachAckH\x00\x12/\n\x07\x65xecute\x18\x15 \x01(\x0b\x32\x1c.rune.wire.v1.ExecuteRequestH\x00\x12-\n\x06\x63\x61ncel\x18\x16 \x01(\x0b\x32\x1b.rune.wire.v1.CancelRequestH\x00\x12,\n\theartbeat\x18\x1e \x01(\x0b\x32\x17.rune.wire.v1.HeartbeatH\x00\x42\t\n\x07payload\"\xdb\x01\n\x0c\x43\x61sterAttach\x12\x11\n\tcaster_id\x18\x01 \x01(\t\x12,\n\x05runes\x18\x02 \x03(\x0b\x32\x1d.rune.wire.v1.RuneDeclaration\x12\x36\n\x06labels\x18\x03 \x03(\x0b\x32&.rune.wire.v1.CasterAttach.LabelsEntry\x12\x16\n\x0emax_concurrent\x18\x04 \x01(\r\x12\x0b\n\x03key\x18\x05 \x01(\t\x1a-\n\x0bLabelsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"I\n\tAttachAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x1a\n\x12supported_features\x18\x03 \x03(\t\"\x1e\n\x0c\x43\x61sterDetach\x12\x0e\n\x06reason\x18\x01 \x01(\t\"\xc5\x01\n\x0fRuneDeclaration\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x03 \x01(\t\x12\x14\n\x0cinput_schema\x18\x04 \x01(\t\x12\x15\n\routput_schema\x18\x05 \x01(\t\x12\x17\n\x0fsupports_stream\x18\x06 \x01(\x08\x12&\n\x04gate\x18\x07 \x01(\x0b\x32\x18.rune.wire.v1.GateConfig\x12\x10\n\x08priority\x18\x08 \x01(\x05\"*\n\nGateConfig\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0e\n\x06method\x18\x02 \x01(\t\"C\n\x0e\x46ileAttachment\x12\x10\n\x08\x66ilename\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x11\n\tmime_type\x18\x03 \x01(\t\"\xf9\x01\n\x0e\x45xecuteRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x11\n\trune_name\x18\x02 \x01(\t\x12\r\n\x05input\x18\x03 \x01(\x0c\x12:\n\x07\x63ontext\x18\x04 \x03(\x0b\x32).rune.wire.v1.ExecuteRequest.ContextEntry\x12\x12\n\ntimeout_ms\x18\x05 \x01(\r\x12\x31\n\x0b\x61ttachments\x18\x06 \x03(\x0b\x32\x1c.rune.wire.v1.FileAttachment\x1a.\n\x0c\x43ontextEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"3\n\rCancelRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"\xb6\x01\n\rExecuteResult\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12$\n\x06status\x18\x02 \x01(\x0e\x32\x14.rune.wire.v1.Status\x12\x0e\n\x06output\x18\x03 \x01(\x0c\x12(\n\x05\x65rror\x18\x04 \x01(\x0b\x32\x19.rune.wire.v1.ErrorDetail\x12\x31\n\x0b\x61ttachments\x18\x05 \x03(\x0b\x32\x1c.rune.wire.v1.FileAttachment\"C\n\x0bStreamEvent\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x12\n\nevent_type\x18\x03 \x01(\t\"o\n\tStreamEnd\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12$\n\x06status\x18\x02 \x01(\x0e\x32\x14.rune.wire.v1.Status\x12(\n\x05\x65rror\x18\x03 \x01(\x0b\x32\x19.rune.wire.v1.ErrorDetail\"!\n\tHeartbeat\x12\x14\n\x0ctimestamp_ms\x18\x01 \x01(\x04\"=\n\x0b\x45rrorDetail\x12\x0c\n\x04\x63ode\x18\x01 \x01(\t\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x0f\n\x07\x64\x65tails\x18\x03 \x01(\x0c*_\n\x06Status\x12\x16\n\x12STATUS_UNSPECIFIED\x10\x00\x12\x14\n\x10STATUS_COMPLETED\x10\x01\x12\x11\n\rSTATUS_FAILED\x10\x02\x12\x14\n\x10STATUS_CANCELLED\x10\x03\x32X\n\x0bRuneService\x12I\n\x07Session\x12\x1c.rune.wire.v1.SessionMessage\x1a\x1c.rune.wire.v1.SessionMessage(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,40 +35,40 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CASTERATTACH_LABELSENTRY']._serialized_options = b'8\001'
   _globals['_EXECUTEREQUEST_CONTEXTENTRY']._loaded_options = None
   _globals['_EXECUTEREQUEST_CONTEXTENTRY']._serialized_options = b'8\001'
-  _globals['_STATUS']._serialized_start=1896
-  _globals['_STATUS']._serialized_end=1991
+  _globals['_STATUS']._serialized_start=1909
+  _globals['_STATUS']._serialized_end=2004
   _globals['_SESSIONMESSAGE']._serialized_start=42
   _globals['_SESSIONMESSAGE']._serialized_end=495
   _globals['_CASTERATTACH']._serialized_start=498
-  _globals['_CASTERATTACH']._serialized_end=704
-  _globals['_CASTERATTACH_LABELSENTRY']._serialized_start=659
-  _globals['_CASTERATTACH_LABELSENTRY']._serialized_end=704
-  _globals['_ATTACHACK']._serialized_start=706
-  _globals['_ATTACHACK']._serialized_end=779
-  _globals['_CASTERDETACH']._serialized_start=781
-  _globals['_CASTERDETACH']._serialized_end=811
-  _globals['_RUNEDECLARATION']._serialized_start=814
-  _globals['_RUNEDECLARATION']._serialized_end=1011
-  _globals['_GATECONFIG']._serialized_start=1013
-  _globals['_GATECONFIG']._serialized_end=1055
-  _globals['_FILEATTACHMENT']._serialized_start=1057
-  _globals['_FILEATTACHMENT']._serialized_end=1124
-  _globals['_EXECUTEREQUEST']._serialized_start=1127
-  _globals['_EXECUTEREQUEST']._serialized_end=1376
-  _globals['_EXECUTEREQUEST_CONTEXTENTRY']._serialized_start=1330
-  _globals['_EXECUTEREQUEST_CONTEXTENTRY']._serialized_end=1376
-  _globals['_CANCELREQUEST']._serialized_start=1378
-  _globals['_CANCELREQUEST']._serialized_end=1429
-  _globals['_EXECUTERESULT']._serialized_start=1432
-  _globals['_EXECUTERESULT']._serialized_end=1614
-  _globals['_STREAMEVENT']._serialized_start=1616
-  _globals['_STREAMEVENT']._serialized_end=1683
-  _globals['_STREAMEND']._serialized_start=1685
-  _globals['_STREAMEND']._serialized_end=1796
-  _globals['_HEARTBEAT']._serialized_start=1798
-  _globals['_HEARTBEAT']._serialized_end=1831
-  _globals['_ERRORDETAIL']._serialized_start=1833
-  _globals['_ERRORDETAIL']._serialized_end=1894
-  _globals['_RUNESERVICE']._serialized_start=1993
-  _globals['_RUNESERVICE']._serialized_end=2081
+  _globals['_CASTERATTACH']._serialized_end=717
+  _globals['_CASTERATTACH_LABELSENTRY']._serialized_start=672
+  _globals['_CASTERATTACH_LABELSENTRY']._serialized_end=717
+  _globals['_ATTACHACK']._serialized_start=719
+  _globals['_ATTACHACK']._serialized_end=792
+  _globals['_CASTERDETACH']._serialized_start=794
+  _globals['_CASTERDETACH']._serialized_end=824
+  _globals['_RUNEDECLARATION']._serialized_start=827
+  _globals['_RUNEDECLARATION']._serialized_end=1024
+  _globals['_GATECONFIG']._serialized_start=1026
+  _globals['_GATECONFIG']._serialized_end=1068
+  _globals['_FILEATTACHMENT']._serialized_start=1070
+  _globals['_FILEATTACHMENT']._serialized_end=1137
+  _globals['_EXECUTEREQUEST']._serialized_start=1140
+  _globals['_EXECUTEREQUEST']._serialized_end=1389
+  _globals['_EXECUTEREQUEST_CONTEXTENTRY']._serialized_start=1343
+  _globals['_EXECUTEREQUEST_CONTEXTENTRY']._serialized_end=1389
+  _globals['_CANCELREQUEST']._serialized_start=1391
+  _globals['_CANCELREQUEST']._serialized_end=1442
+  _globals['_EXECUTERESULT']._serialized_start=1445
+  _globals['_EXECUTERESULT']._serialized_end=1627
+  _globals['_STREAMEVENT']._serialized_start=1629
+  _globals['_STREAMEVENT']._serialized_end=1696
+  _globals['_STREAMEND']._serialized_start=1698
+  _globals['_STREAMEND']._serialized_end=1809
+  _globals['_HEARTBEAT']._serialized_start=1811
+  _globals['_HEARTBEAT']._serialized_end=1844
+  _globals['_ERRORDETAIL']._serialized_start=1846
+  _globals['_ERRORDETAIL']._serialized_end=1907
+  _globals['_RUNESERVICE']._serialized_start=2006
+  _globals['_RUNESERVICE']._serialized_end=2094
 # @@protoc_insertion_point(module_scope)

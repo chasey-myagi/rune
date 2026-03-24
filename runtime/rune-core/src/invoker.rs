@@ -380,7 +380,7 @@ mod tests {
         use tokio::sync::Semaphore;
         use crate::session::{CasterState, PendingRequest, PendingResponse};
 
-        let mgr = Arc::new(SessionManager::new(
+        let mgr = Arc::new(SessionManager::new_dev(
             Duration::from_secs(10), Duration::from_secs(35),
         ));
         let (tx, _rx) = mpsc::channel(16);
@@ -391,6 +391,7 @@ mod tests {
             outbound: tx,
             pending: Arc::clone(&pending),
             semaphore: Arc::clone(&semaphore),
+            connected_at: std::time::Instant::now(),
         });
 
         let invoker = RemoteInvoker {
@@ -435,7 +436,7 @@ mod tests {
     async fn remote_invoker_invoke_once_nonexistent_caster() {
         use crate::session::SessionManager;
 
-        let mgr = Arc::new(SessionManager::new(
+        let mgr = Arc::new(SessionManager::new_dev(
             Duration::from_secs(10), Duration::from_secs(35),
         ));
         let invoker = RemoteInvoker {
@@ -453,7 +454,7 @@ mod tests {
         use tokio::sync::Semaphore;
         use crate::session::{CasterState, PendingRequest, PendingResponse};
 
-        let mgr = Arc::new(SessionManager::new(
+        let mgr = Arc::new(SessionManager::new_dev(
             Duration::from_secs(10), Duration::from_secs(35),
         ));
         let (tx, _rx) = mpsc::channel(16);
@@ -464,6 +465,7 @@ mod tests {
             outbound: tx,
             pending: Arc::clone(&pending),
             semaphore: Arc::clone(&semaphore),
+            connected_at: std::time::Instant::now(),
         });
 
         let invoker = RemoteInvoker {

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock, OnceLock};
 
 #[derive(Debug, thiserror::Error)]
@@ -11,10 +10,10 @@ pub enum SchemaError {
 }
 
 // ---------------------------------------------------------------------------
-// Validator cache: keyed by hash of schema string
+// Validator cache: keyed by schema string (collision-safe)
 // ---------------------------------------------------------------------------
 
-type ValidatorCache = RwLock<HashMap<u64, Arc<jsonschema::Validator>>>;
+type ValidatorCache = RwLock<HashMap<String, Arc<jsonschema::Validator>>>;
 
 static VALIDATOR_CACHE: OnceLock<ValidatorCache> = OnceLock::new();
 
@@ -22,19 +21,11 @@ fn cache() -> &'static ValidatorCache {
     VALIDATOR_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn hash_schema(s: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
-}
-
 fn get_or_compile(schema_str: &str) -> Result<Arc<jsonschema::Validator>, SchemaError> {
-    let key = hash_schema(schema_str);
-
     // Fast path: read lock
     {
         let cache = cache().read().unwrap();
-        if let Some(v) = cache.get(&key) {
+        if let Some(v) = cache.get(schema_str) {
             return Ok(Arc::clone(v));
         }
     }
@@ -47,7 +38,7 @@ fn get_or_compile(schema_str: &str) -> Result<Arc<jsonschema::Validator>, Schema
     let v = Arc::new(validator);
 
     let mut cache = cache().write().unwrap();
-    cache.insert(key, Arc::clone(&v));
+    cache.insert(schema_str.to_string(), Arc::clone(&v));
     Ok(v)
 }
 

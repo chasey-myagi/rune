@@ -56,7 +56,7 @@ fn make_state(auth_enabled: bool) -> GateState {
         resolver,
         store,
         key_verifier,
-        session_mgr: Arc::new(SessionManager::new(
+        session_mgr: Arc::new(SessionManager::new_dev(
             std::time::Duration::from_secs(10),
             std::time::Duration::from_secs(35),
         )),
@@ -794,7 +794,7 @@ async fn test_mixed_sync_and_stream_runes() {
         resolver,
         store,
         key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
-        session_mgr: Arc::new(SessionManager::new(
+        session_mgr: Arc::new(SessionManager::new_dev(
             std::time::Duration::from_secs(10),
             std::time::Duration::from_secs(35),
         )),
@@ -926,7 +926,7 @@ async fn test_stats_accumulate_across_runes() {
         resolver,
         store,
         key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
-        session_mgr: Arc::new(SessionManager::new(
+        session_mgr: Arc::new(SessionManager::new_dev(
             std::time::Duration::from_secs(10),
             std::time::Duration::from_secs(35),
         )),
@@ -1004,4 +1004,109 @@ async fn test_stats_accumulate_across_runes() {
         .find(|s| s["rune_name"] == "rune_b")
         .expect("should have rune_b stats");
     assert_eq!(b_stat["count"], 2);
+}
+
+// ===========================================================================
+// S9 Regression: Gate key cannot call key management endpoints (privilege escalation)
+// ===========================================================================
+
+#[tokio::test]
+async fn test_gate_key_cannot_create_keys() {
+    let state = make_state(true); // auth enabled, dev_mode=false
+    let gate_key = state.store.create_key(KeyType::Gate, "normal user").await.unwrap();
+
+    let app = gate::build_router(state, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/keys")
+                .header("authorization", format!("Bearer {}", gate_key.raw_key))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"key_type":"gate","label":"escalated"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        403,
+        "gate key should NOT be able to create new keys (privilege escalation)"
+    );
+}
+
+#[tokio::test]
+async fn test_gate_key_cannot_revoke_keys() {
+    let state = make_state(true);
+    let gate_key = state.store.create_key(KeyType::Gate, "normal user").await.unwrap();
+    let target_key = state.store.create_key(KeyType::Gate, "target").await.unwrap();
+
+    let app = gate::build_router(state, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/keys/{}", target_key.api_key.id))
+                .header("authorization", format!("Bearer {}", gate_key.raw_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        403,
+        "gate key should NOT be able to revoke keys (privilege escalation)"
+    );
+}
+
+#[tokio::test]
+async fn test_gate_key_cannot_list_keys() {
+    let state = make_state(true);
+    let gate_key = state.store.create_key(KeyType::Gate, "normal user").await.unwrap();
+
+    let app = gate::build_router(state, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/keys")
+                .header("authorization", format!("Bearer {}", gate_key.raw_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        403,
+        "gate key should NOT be able to list keys"
+    );
+}
+
+#[tokio::test]
+async fn test_dev_mode_key_management_still_works() {
+    let state = make_state(false); // dev mode, auth disabled
+
+    let app = gate::build_router(state, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/keys")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"key_type":"gate","label":"dev key"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        201,
+        "dev mode should allow key management without auth"
+    );
 }

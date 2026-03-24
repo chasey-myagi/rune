@@ -4,6 +4,10 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "proto"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run"

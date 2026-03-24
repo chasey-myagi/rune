@@ -715,3 +715,57 @@ async def test_u56_new_stream_signature_ctx_input_files_stream():
     att = FileAttachment(filename="a.txt", data=b"aaa", mime_type="text/plain")
     await c._runes["new_stream"].handler(ctx, b"", [att], sender)
     assert emitted == [b"got 1 files"]
+
+
+# ============================================================
+# 2.0 CasterAttach Message  (C-01 ~ C-02)
+# ============================================================
+
+
+def test_c01_attach_message_contains_key():
+    """C-01: CasterAttach message includes api_key when provided."""
+    c = Caster("localhost:50070", caster_id="test", api_key="sk-secret-123")
+
+    @c.rune("echo")
+    async def echo(ctx, input):
+        return input
+
+    msg = c._build_attach_message()
+    assert msg.attach.key == "sk-secret-123"
+
+
+def test_c01b_attach_message_key_defaults_empty():
+    """C-01b: CasterAttach message key defaults to empty string when no api_key."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("echo")
+    async def echo(ctx, input):
+        return input
+
+    msg = c._build_attach_message()
+    assert msg.attach.key == ""
+
+
+def test_c02_attach_message_contains_labels():
+    """C-02: CasterAttach message includes labels when provided."""
+    labels = {"env": "prod", "region": "us-east-1"}
+    c = Caster("localhost:50070", caster_id="test", labels=labels)
+
+    @c.rune("echo")
+    async def echo(ctx, input):
+        return input
+
+    msg = c._build_attach_message()
+    assert dict(msg.attach.labels) == labels
+
+
+def test_c02b_attach_message_labels_defaults_empty():
+    """C-02b: CasterAttach message labels defaults to empty when no labels."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("echo")
+    async def echo(ctx, input):
+        return input
+
+    msg = c._build_attach_message()
+    assert dict(msg.attach.labels) == {}

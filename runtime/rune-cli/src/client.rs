@@ -214,7 +214,7 @@ impl RuneClient {
     pub async fn create_key(&self, key_type: &str, label: &str) -> Result<Value> {
         let req = self
             .request(reqwest::Method::POST, "/api/v1/keys")
-            .json(&json!({ "type": key_type, "label": label }));
+            .json(&json!({ "key_type": key_type, "label": label }));
         self.send_json(req).await
     }
 
@@ -281,5 +281,34 @@ impl RuneClient {
     pub async fn get_stats(&self) -> Result<Value> {
         let req = self.request(reqwest::Method::GET, "/api/v1/stats");
         self.send_json(req).await
+    }
+
+    /// Build the JSON body for create_key (exposed for testing).
+    #[cfg(test)]
+    fn create_key_body(key_type: &str, label: &str) -> Value {
+        json!({ "key_type": key_type, "label": label })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// C3 regression: create_key must send "key_type", not "type".
+    #[test]
+    fn test_create_key_body_uses_key_type_field() {
+        let body = RuneClient::create_key_body("gate", "my-key");
+        assert!(
+            body.get("key_type").is_some(),
+            "body must contain 'key_type' field, got: {}",
+            body
+        );
+        assert!(
+            body.get("type").is_none(),
+            "body must NOT contain 'type' field, got: {}",
+            body
+        );
+        assert_eq!(body["key_type"], "gate");
+        assert_eq!(body["label"], "my-key");
     }
 }

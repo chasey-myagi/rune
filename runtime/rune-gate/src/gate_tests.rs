@@ -83,7 +83,7 @@ mod tests {
             resolver,
             store,
             key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(35),
             )),
@@ -608,7 +608,7 @@ mod tests {
                     .uri("/api/v1/keys")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"key_type":"admin","label":"bad type"}"#,
+                        r#"{"key_type":"invalid_type","label":"bad type"}"#,
                     ))
                     .unwrap(),
             )
@@ -999,7 +999,7 @@ mod tests {
             resolver,
             store,
             key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(35),
             )),
@@ -1340,7 +1340,7 @@ mod tests {
             resolver,
             store,
             key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(35),
             )),
@@ -1875,7 +1875,7 @@ mod tests {
             resolver,
             store,
             key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(35),
             )),
@@ -1971,7 +1971,7 @@ mod tests {
             resolver,
             store,
             key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(35),
             )),
@@ -2054,7 +2054,7 @@ mod tests {
             resolver,
             store,
             key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(35),
             )),
@@ -3868,7 +3868,7 @@ mod tests {
             resolver,
             store,
             key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(35),
             )),
@@ -5745,7 +5745,7 @@ mod tests {
             resolver,
             store,
             key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(35),
             )),
@@ -6115,7 +6115,7 @@ mod tests {
 
         let state = GateState {
             relay, resolver, store, key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(35),
             )),
@@ -6193,7 +6193,7 @@ mod tests {
 
         let state = GateState {
             relay, resolver, store, key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(35),
             )),
@@ -6643,7 +6643,7 @@ mod tests {
 
         let state = GateState {
             relay, resolver, store, key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new(
+            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(35),
             )),
@@ -7345,6 +7345,95 @@ mod tests {
             broker.entry_count(),
             1,
             "expired entry should have been evicted when interval is 0"
+        );
+    }
+
+    // ====================================================================
+    // Regression: S11 — Content-Disposition filename with quotes escaped
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_download_file_filename_with_quotes_escaped() {
+        let state = test_state();
+
+        // Store a file whose name contains a double-quote character
+        let file_id = state.file_broker.store(
+            r#"evil"name.txt"#.to_string(),
+            "application/octet-stream".to_string(),
+            bytes::Bytes::from_static(b"data"),
+            "req-esc",
+        );
+
+        let app = build_router(state, None);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/v1/files/{}", file_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cd = resp
+            .headers()
+            .get("content-disposition")
+            .expect("should have content-disposition")
+            .to_str()
+            .unwrap();
+
+        // The quote inside the filename must be escaped as \"
+        assert!(
+            cd.contains(r#"evil\"name.txt"#),
+            "double-quote in filename must be escaped, got: {}",
+            cd
+        );
+        // The header must still be well-formed (balanced outer quotes)
+        assert!(
+            cd.starts_with("attachment; filename=\"") && cd.ends_with('"'),
+            "content-disposition must have balanced quotes, got: {}",
+            cd
+        );
+    }
+
+    // ====================================================================
+    // Regression: S12 — connected_since reflects caster connect time, not server uptime
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_connected_since_reflects_caster_connect_time() {
+        // Create a state whose started_at is far in the past
+        let mut state = test_state();
+        // Simulate server running for a long time by setting started_at 1000s ago
+        state.started_at = std::time::Instant::now() - std::time::Duration::from_secs(1000);
+
+        // Insert a caster that connected "now" via the public test helper
+        state.session_mgr.insert_test_caster("test-caster-1", 5);
+
+        let app = build_router(state, None);
+        let resp = app
+            .oneshot(
+                Request::get("/api/v1/casters")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let casters = json["casters"].as_array().expect("should have casters");
+        assert_eq!(casters.len(), 1);
+
+        let connected_since = casters[0]["connected_since"].as_u64().unwrap();
+        // The caster just connected, so connected_since should be small (< 5 seconds),
+        // NOT the server uptime of ~1000 seconds.
+        assert!(
+            connected_since < 5,
+            "connected_since should reflect caster connect time (< 5s), not server uptime. Got: {}s",
+            connected_since
         );
     }
 }

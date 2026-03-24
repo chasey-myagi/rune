@@ -22,7 +22,10 @@ pub async fn download_file(
                 ),
                 (
                     axum::http::header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{}\"", stored.filename),
+                    format!(
+                        "attachment; filename=\"{}\"",
+                        stored.filename.replace('\\', "\\\\").replace('"', "\\\"")
+                    ),
                 ),
             ];
             (StatusCode::OK, headers, stored.data.to_vec()).into_response()

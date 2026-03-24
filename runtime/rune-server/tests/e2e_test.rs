@@ -168,7 +168,7 @@ fn build_test_state(auth_enabled: bool) -> (GateState, Arc<RuneStore>) {
         resolver,
         store: store.clone(),
         key_verifier,
-        session_mgr: Arc::new(SessionManager::new(
+        session_mgr: Arc::new(SessionManager::new_dev(
             Duration::from_secs(10),
             Duration::from_secs(35),
         )),
@@ -1456,7 +1456,7 @@ async fn e2e_on_caster_attach_callback_no_panic() {
     // main.rs works correctly without block_in_place / block_on.
     // We directly test that tokio::spawn inside a sync callback works.
     let store = Arc::new(RuneStore::open_in_memory().unwrap());
-    let session_mgr = Arc::new(SessionManager::new(
+    let session_mgr = Arc::new(SessionManager::new_dev(
         Duration::from_secs(10),
         Duration::from_secs(35),
     ));

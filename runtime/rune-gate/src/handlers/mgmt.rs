@@ -1,12 +1,51 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 
 use crate::error::error_response;
 use crate::state::{CreateKeyRequest, GateState, LogQuery};
+
+/// Extract the Bearer token from the Authorization header.
+fn extract_bearer(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+}
+
+/// Check that the caller holds an admin key. Skipped in dev mode (auth disabled).
+/// Returns Some(error_response) if the caller is NOT an admin, None if OK.
+async fn require_admin(state: &GateState, headers: &HeaderMap) -> Option<axum::response::Response> {
+    // In dev mode, auth is disabled entirely — allow everything.
+    if state.dev_mode {
+        return None;
+    }
+
+    let raw_key = match extract_bearer(headers) {
+        Some(k) => k,
+        None => {
+            return Some(error_response(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "missing authorization header",
+            ))
+        }
+    };
+
+    if state.key_verifier.verify_admin_key(&raw_key).await {
+        None
+    } else {
+        Some(error_response(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "admin key required for key management operations",
+        ))
+    }
+}
 
 pub async fn health(State(state): State<GateState>) -> axum::response::Response {
     if state.shutdown.is_draining() {
@@ -60,7 +99,9 @@ pub async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
                 "caster_id": cid,
                 "runes": runes,
                 "current_load": current_load,
-                "connected_since": state.started_at.elapsed().as_secs(),
+                "connected_since": state.session_mgr.connected_at(cid)
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0),
             })
         })
         .collect();
@@ -111,16 +152,22 @@ pub async fn mgmt_logs(
 
 pub async fn mgmt_create_key(
     State(state): State<GateState>,
+    headers: HeaderMap,
     Json(req): Json<CreateKeyRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Some(denied) = require_admin(&state, &headers).await {
+        return denied;
+    }
+
     let key_type = match req.key_type.as_str() {
         "gate" => rune_store::KeyType::Gate,
         "caster" => rune_store::KeyType::Caster,
+        "admin" => rune_store::KeyType::Admin,
         _ => {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
-                "key_type must be 'gate' or 'caster'",
+                "key_type must be 'gate', 'caster', or 'admin'",
             )
         }
     };
@@ -140,7 +187,14 @@ pub async fn mgmt_create_key(
     }
 }
 
-pub async fn mgmt_list_keys(State(state): State<GateState>) -> impl IntoResponse {
+pub async fn mgmt_list_keys(
+    State(state): State<GateState>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(denied) = require_admin(&state, &headers).await {
+        return denied;
+    }
+
     match state.store.list_keys().await {
         Ok(keys) => Json(serde_json::json!({"keys": keys})).into_response(),
         Err(e) => {
@@ -151,8 +205,13 @@ pub async fn mgmt_list_keys(State(state): State<GateState>) -> impl IntoResponse
 
 pub async fn mgmt_revoke_key(
     State(state): State<GateState>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Some(denied) = require_admin(&state, &headers).await {
+        return denied;
+    }
+
     match state.store.revoke_key(id).await {
         Ok(()) => Json(serde_json::json!({"status": "revoked", "id": id})).into_response(),
         Err(e) => {

@@ -20,6 +20,7 @@ pub struct ApiKey {
 pub enum KeyType {
     Caster,
     Gate,
+    Admin,
 }
 
 impl KeyType {
@@ -27,6 +28,7 @@ impl KeyType {
         match self {
             KeyType::Caster => "caster",
             KeyType::Gate => "gate",
+            KeyType::Admin => "admin",
         }
     }
 
@@ -34,6 +36,7 @@ impl KeyType {
         match s {
             "caster" => Some(KeyType::Caster),
             "gate" => Some(KeyType::Gate),
+            "admin" => Some(KeyType::Admin),
             _ => None,
         }
     }

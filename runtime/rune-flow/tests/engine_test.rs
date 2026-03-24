@@ -1398,18 +1398,30 @@ fn test_condition_with_boolean_and_or() {
 
 #[test]
 fn test_condition_empty_expression() {
-    // 空表达式不应 panic，应默认 true
-    assert!(eval_cond(""));
-    assert!(eval_cond("   "));
+    // 空表达式不应 panic，默认 false（安全侧：无法解析 = 不执行）
+    assert!(!eval_cond(""));
+    assert!(!eval_cond("   "));
 }
 
 #[test]
 fn test_condition_invalid_expression() {
     // 无效表达式不应 panic
-    // evaluate_comparison 返回 None，evaluate_condition 默认 true
-    assert!(eval_cond("gibberish"));
-    assert!(eval_cond("no_operator_here"));
+    // evaluate_comparison 返回 None，evaluate_condition 默认 false（安全侧）
+    assert!(!eval_cond("gibberish"));
+    assert!(!eval_cond("no_operator_here"));
     assert_eq!(eval_comp("no_operator_here"), None);
+}
+
+#[test]
+fn test_condition_unparseable_returns_false() {
+    // "x==5" (无空格) 无法被 token 解析器识别为比较表达式，应返回 false
+    assert!(!eval_cond("x==5"));
+}
+
+#[test]
+fn test_condition_garbage_returns_false() {
+    // 完全无意义的字符串应返回 false
+    assert!(!eval_cond("asdfgh"));
 }
 
 #[test]

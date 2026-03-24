@@ -30,7 +30,7 @@ impl App {
         Self {
             relay: Arc::new(Relay::new()),
             resolver: Arc::new(RoundRobinResolver::new()),
-            session_mgr: Arc::new(SessionManager::new(
+            session_mgr: Arc::new(SessionManager::new_dev(
                 config.heartbeat_interval(),
                 config.heartbeat_timeout(),
             )),
@@ -42,7 +42,7 @@ impl App {
         Self {
             relay: Arc::new(Relay::new()),
             resolver: Arc::new(RoundRobinResolver::new()),
-            session_mgr: Arc::new(SessionManager::new(
+            session_mgr: Arc::new(SessionManager::new_dev(
                 config.heartbeat_interval(),
                 config.heartbeat_timeout(),
             )),

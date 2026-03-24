@@ -88,6 +88,9 @@ impl KeyVerifier for StaticKeyVerifier {
     async fn verify_caster_key(&self, raw_key: &str) -> bool {
         raw_key == self.valid_key
     }
+    async fn verify_admin_key(&self, raw_key: &str) -> bool {
+        raw_key == self.valid_key
+    }
 }
 
 async fn start_auth_server(
