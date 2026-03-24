@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     Json,
@@ -96,18 +96,7 @@ pub async fn dynamic_rune_handler(
         }
     };
 
-    let rune_name = {
-        let mut found = None;
-        for (name, gate_path) in state.relay.list() {
-            if let Some(gp) = gate_path {
-                if gp == path {
-                    found = Some(name);
-                    break;
-                }
-            }
-        }
-        found
-    };
+    let rune_name = state.relay.resolve_by_gate_path(&path);
 
     let rune_name = match rune_name {
         Some(name) => name,
@@ -258,6 +247,7 @@ pub async fn execute_rune(
     let rune_name_owned = rune_name.to_string();
     let req_id = request_id.clone();
 
+    let has_files = file_metadata.is_some();
     let response = if let Some(files) = file_metadata {
         sync_execute_multipart(invoker, ctx, rune_input, output_schema, files, &file_ids, state).await
     } else {
@@ -279,6 +269,17 @@ pub async fn execute_rune(
         output_size: 0, // not easily available after response is built
         timestamp: rune_store::now_iso8601(),
     }).await;
+
+    // Schedule deferred file cleanup: give clients 60s to download, then clean up.
+    // TTL (5 min) in FileBroker acts as a safety net if this task is dropped.
+    if has_files {
+        let broker = state.file_broker.clone();
+        let rid = request_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            broker.complete_request(&rid);
+        });
+    }
 
     response
 }

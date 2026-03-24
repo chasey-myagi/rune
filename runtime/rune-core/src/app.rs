@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use crate::auth::KeyVerifier;
 use crate::rune::{RuneConfig, RuneHandler, StreamRuneHandler};
 use crate::relay::Relay;
 use crate::resolver::{Resolver, RoundRobinResolver};
@@ -44,6 +45,24 @@ impl App {
             session_mgr: Arc::new(SessionManager::new(
                 config.heartbeat_interval(),
                 config.heartbeat_timeout(),
+            )),
+            config,
+        }
+    }
+
+    pub fn with_config_and_auth(
+        config: AppConfig,
+        key_verifier: Arc<dyn KeyVerifier>,
+    ) -> Self {
+        let dev_mode = config.server.dev_mode;
+        Self {
+            relay: Arc::new(Relay::new()),
+            resolver: Arc::new(RoundRobinResolver::new()),
+            session_mgr: Arc::new(SessionManager::with_auth(
+                config.heartbeat_interval(),
+                config.heartbeat_timeout(),
+                key_verifier,
+                dev_mode,
             )),
             config,
         }

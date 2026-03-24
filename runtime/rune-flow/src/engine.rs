@@ -416,7 +416,8 @@ fn resolve_json_path(value: &serde_json::Value, path: &str) -> serde_json::Value
 }
 
 /// 评估条件表达式
-fn evaluate_condition(
+/// Evaluate a condition expression. Exported for testing; not part of stable API.
+pub fn evaluate_condition(
     condition: &str,
     step_statuses: &HashMap<String, StepStatus>,
     step_outputs: &HashMap<String, Option<Bytes>>,
@@ -438,26 +439,40 @@ fn evaluate_condition(
         return result;
     }
 
-    // 无法解析时默认 true（执行 step）
+    // 无法解析时默认 true（执行 step），但打 warn 让用户知道条件没生效
+    tracing::warn!(condition = trimmed, "condition expression could not be parsed, defaulting to true — operators must be separated by spaces (e.g. 'x == 5')");
     true
 }
 
-fn evaluate_comparison(
+/// Evaluate a comparison expression. Exported for testing; not part of stable API.
+pub fn evaluate_comparison(
     expr: &str,
     _step_statuses: &HashMap<String, StepStatus>,
     step_outputs: &HashMap<String, Option<Bytes>>,
     flow_input_json: &Option<serde_json::Value>,
 ) -> Option<bool> {
-    // 尝试匹配 "lhs == rhs", "lhs != rhs", "lhs > rhs", "lhs < rhs", "lhs >= rhs", "lhs <= rhs"
+    // Token-based 解析：按空白 split 成 tokens，查找操作符 token
+    // 这避免了 lhs/rhs 中包含操作符字符（如 steps.a>b.output.val）时的误匹配
     let operators = ["==", "!=", ">=", "<=", ">", "<"];
 
-    for op in &operators {
-        if let Some(pos) = expr.find(op) {
-            let lhs = expr[..pos].trim();
-            let rhs = expr[pos + op.len()..].trim();
+    let tokens: Vec<&str> = expr.split_whitespace().collect();
 
-            let lhs_val = resolve_condition_value(lhs, step_outputs, flow_input_json);
-            let rhs_val = parse_literal(rhs);
+    // 在 tokens 中查找操作符 token
+    for op in &operators {
+        if let Some(op_idx) = tokens.iter().position(|t| *t == *op) {
+            if op_idx == 0 || op_idx >= tokens.len() - 1 {
+                // 操作符在开头或末尾，无效
+                continue;
+            }
+            let lhs = tokens[..op_idx].join(" ");
+            let rhs = tokens[op_idx + 1..].join(" ");
+
+            if lhs.is_empty() || rhs.is_empty() {
+                continue;
+            }
+
+            let lhs_val = resolve_condition_value(&lhs, step_outputs, flow_input_json);
+            let rhs_val = parse_literal(&rhs);
 
             return Some(compare_values(&lhs_val, &rhs_val, op));
         }

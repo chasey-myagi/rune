@@ -58,6 +58,7 @@ mod tests {
                 }],
                 labels: [("env".to_string(), "prod".to_string())].into_iter().collect(),
                 max_concurrent: 10,
+                key: "rk_test_key".into(),
             })),
         };
 

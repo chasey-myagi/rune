@@ -33,6 +33,7 @@ message CasterAttach {
     repeated RuneDeclaration runes = 2;
     map<string, string> labels = 3;
     uint32 max_concurrent = 4;
+    string key = 5;              // Caster 认证密钥（dev 模式下可省略）
 }
 
 message AttachAck {

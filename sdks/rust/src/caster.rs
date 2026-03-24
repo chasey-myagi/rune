@@ -327,6 +327,7 @@ impl Caster {
                 runes: declarations,
                 labels: self.config.labels.clone(),
                 max_concurrent: self.config.max_concurrent,
+                key: self.config.key.clone().unwrap_or_default(),
             })),
         }
     }

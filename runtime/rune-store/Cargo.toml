@@ -3,6 +3,9 @@ name = "rune-store"
 version = "0.6.0"
 edition = "2021"
 
+[features]
+test-helpers = []
+
 [dependencies]
 rune-core = { path = "../rune-core" }
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -17,5 +20,6 @@ async-trait = { workspace = true }
 tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
+rune-store = { path = ".", features = ["test-helpers"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }

@@ -45,8 +45,20 @@ impl RuneStore {
         Ok(store)
     }
 
+    /// Deliberately poison the internal Mutex (test-only).
+    #[cfg(feature = "test-helpers")]
+    pub fn poison_mutex(&self) {
+        let mutex = self.conn.clone();
+        let handle = std::thread::spawn(move || {
+            let _guard = mutex.lock().unwrap();
+            panic!("intentional panic to poison the mutex");
+        });
+        // The thread panicked while holding the lock → Mutex is now poisoned.
+        let _ = handle.join();
+    }
+
     fn run_migrations(&self) -> StoreResult<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS api_keys (

@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // ── App + Runes ──
-    let mut app = App::with_config(config.clone());
+    let mut app = App::with_config_and_auth(config.clone(), key_verifier.clone());
 
     // hello: static response
     app.rune(
@@ -107,9 +107,12 @@ async fn main() -> anyhow::Result<()> {
     let running = app.build();
 
     // Set up snapshot recording on caster attach
+    // Issue #7 fix: use tokio::spawn instead of block_in_place + block_on
+    // to avoid panics on current-thread runtime and improve scheduling efficiency.
     let store_for_attach = store.clone();
     running.session_mgr.set_on_caster_attach(Arc::new(move |_caster_id, configs| {
         for config in configs {
+            let store = store_for_attach.clone();
             let snapshot = RuneSnapshot {
                 rune_name: config.name.clone(),
                 version: config.version.clone(),
@@ -119,9 +122,12 @@ async fn main() -> anyhow::Result<()> {
                 gate_method: config.gate.as_ref().map(|g| g.method.clone()).unwrap_or("POST".into()),
                 last_seen: String::new(), // filled by upsert_snapshot
             };
-            if let Err(e) = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(store_for_attach.upsert_snapshot(&snapshot))) {
-                tracing::warn!(rune = %config.name, error = %e, "failed to record snapshot");
-            }
+            let rune_name = config.name.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.upsert_snapshot(&snapshot).await {
+                    tracing::warn!(rune = %rune_name, error = %e, "failed to record snapshot");
+                }
+            });
         }
     }));
 
@@ -190,8 +196,22 @@ async fn main() -> anyhow::Result<()> {
     let http_listener = tokio::net::TcpListener::bind(running.config.http_addr()).await?;
     tracing::info!("gate listening on {}", running.config.http_addr());
 
+    // Issue #4 fix: use watch channel to coordinate graceful shutdown signals
+    // for both HTTP and gRPC servers.
+    let (shutdown_tx, mut http_shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut grpc_shutdown_rx = shutdown_tx.subscribe();
+
     let http_handle = tokio::spawn(async move {
-        axum::serve(http_listener, http_router).await.unwrap();
+        axum::serve(http_listener, http_router)
+            .with_graceful_shutdown(async move {
+                while !*http_shutdown_rx.borrow_and_update() {
+                    if http_shutdown_rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
     });
 
     // ── gRPC ──
@@ -205,29 +225,37 @@ async fn main() -> anyhow::Result<()> {
     let grpc_handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(RuneServiceServer::new(grpc_service))
-            .serve(running.config.grpc_addr())
+            .serve_with_shutdown(running.config.grpc_addr(), async move {
+                while !*grpc_shutdown_rx.borrow_and_update() {
+                    if grpc_shutdown_rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
             .await
             .unwrap();
     });
 
     // ── Wait for shutdown signal ──
-    tokio::select! {
-        _ = http_handle => tracing::info!("http server stopped"),
-        _ = grpc_handle => tracing::info!("grpc server stopped"),
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("received SIGINT, starting graceful shutdown");
+    tokio::signal::ctrl_c().await?;
+    tracing::info!("received SIGINT, starting graceful shutdown");
 
-            // 1. Signal drain mode — new requests will be rejected with 503
-            shutdown.start_drain();
-            tracing::info!(drain_timeout_secs, "draining in-flight requests");
+    // 1. Signal drain mode — new requests will be rejected with 503
+    shutdown.start_drain();
+    tracing::info!(drain_timeout_secs, "draining in-flight requests");
 
-            // 2. Wait for drain timeout to let in-flight requests complete
-            tokio::time::sleep(std::time::Duration::from_secs(drain_timeout_secs)).await;
+    // 2. Signal both servers to stop accepting new connections
+    //    and finish in-flight requests gracefully
+    let _ = shutdown_tx.send(true);
 
-            // 3. Shutdown complete — server tasks will be dropped
-            tracing::info!("drain complete, shutting down");
-        }
-    }
+    // 3. Wait for both servers to finish (with drain timeout as deadline)
+    let deadline = std::time::Duration::from_secs(drain_timeout_secs);
+    let _ = tokio::time::timeout(deadline, async {
+        let _ = http_handle.await;
+        let _ = grpc_handle.await;
+    }).await;
+
+    tracing::info!("drain complete, shutting down");
 
     Ok(())
 }

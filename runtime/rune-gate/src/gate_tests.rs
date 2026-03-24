@@ -7073,4 +7073,197 @@ mod tests {
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
+
+    // =======================================================================
+    // Issue #3: FileBroker cleanup after successful multipart request
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_filebroker_cleanup_after_successful_request() {
+        let state = test_state();
+
+        // Manually store a file in the broker as if uploaded via multipart
+        let request_id = "test-req-cleanup";
+        let _file_id = state.file_broker.store(
+            "test.txt".into(),
+            "text/plain".into(),
+            Bytes::from("file content"),
+            request_id,
+        );
+
+        // Verify file is stored
+        assert_eq!(state.file_broker.files.len(), 1);
+
+        // Call complete_request to clean up
+        state.file_broker.complete_request(request_id);
+
+        // Verify file is removed
+        assert_eq!(state.file_broker.files.len(), 0, "FileBroker should have no files after complete_request");
+    }
+
+    // =======================================================================
+    // Issue #5: Reverse index maintained on register / unregister
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_reverse_index_maintained_on_register() {
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        relay
+            .register(
+                RuneConfig {
+                    name: "idx_rune".into(),
+                    version: "1.0.0".into(),
+                    description: "test".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/idx_path".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(rune_core::invoker::LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
+
+        // Reverse index should map /idx_path → idx_rune
+        let resolved = relay.resolve_by_gate_path("/idx_path");
+        assert_eq!(resolved, Some("idx_rune".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_reverse_index_removed_on_unregister() {
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        relay
+            .register(
+                RuneConfig {
+                    name: "rm_rune".into(),
+                    version: "1.0.0".into(),
+                    description: "test".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/rm_path".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(rune_core::invoker::LocalInvoker::new(handler)),
+                Some("caster-1".into()),
+            )
+            .unwrap();
+
+        // Index should exist before removal
+        assert_eq!(relay.resolve_by_gate_path("/rm_path"), Some("rm_rune".to_string()));
+
+        // Remove the caster
+        relay.remove_caster("caster-1");
+
+        // Index should be gone
+        assert_eq!(relay.resolve_by_gate_path("/rm_path"), None);
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_route_lookup_uses_index() {
+        // Build a state with a rune that has a gate_path, then verify
+        // the dynamic route resolves correctly (implicitly via the index).
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+
+        // /echo is registered with gate_path="/echo" — verify reverse index
+        let resolved = state.relay.resolve_by_gate_path("/echo");
+        assert_eq!(resolved, Some("echo".to_string()), "reverse index should map /echo → echo");
+
+        // Also verify the HTTP route still works via the fallback handler
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"idx":"test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // =======================================================================
+    // Issue #6: Rate limiter expired entries cleaned up
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_rate_limit_expired_entries_cleaned() {
+        // Use a 1-second window so we can sleep past it quickly
+        let rl = RateLimitState::new(10, 1); // 10 req/s, 1s window
+
+        // Generate requests from many unique keys
+        for i in 0..100 {
+            let key = format!("key-{}", i);
+            let _ = rl.check(&key);
+        }
+
+        // All 100 keys should be tracked
+        assert_eq!(rl.entry_count(), 100);
+
+        // Sleep past the window so all entries expire
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        // Trigger cleanup by calling check with a new key
+        let _ = rl.check("trigger-cleanup");
+
+        // Expired entries should have been evicted; only the trigger key remains
+        assert!(rl.entry_count() <= 1, "expired entries should be cleaned, got {}", rl.entry_count());
+    }
+
+    // =======================================================================
+    // Issue #8: Shutdown check runs before auth (no DB query during drain)
+    // =======================================================================
+
+    #[tokio::test]
+    async fn test_shutdown_check_before_auth() {
+        // Enable auth so auth_middleware would normally do a DB lookup.
+        // Start drain so shutdown_middleware should reject with 503 first.
+        let mut state = test_state();
+        state.auth_enabled = true;
+        state.dev_mode = false;
+        state.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.store.clone()));
+
+        // Start drain BEFORE building the router
+        state.shutdown.start_drain();
+
+        let app = build_router(state, None);
+
+        // Send a request WITHOUT a valid Bearer token.
+        // If shutdown runs first → 503 SERVICE_UNAVAILABLE.
+        // If auth runs first → 401 UNAUTHORIZED (the bug).
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "drain should return 503 before auth checks (expected 503, got {})",
+            response.status()
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "SERVICE_UNAVAILABLE");
+    }
 }

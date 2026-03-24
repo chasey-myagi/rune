@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time;
 use tonic::Streaming;
 use rune_proto::*;
+use crate::auth::KeyVerifier;
 use crate::rune::{RuneConfig, RuneError};
 use crate::relay::Relay;
 use crate::invoker::RemoteInvoker;
@@ -40,6 +41,8 @@ pub struct SessionManager {
     pub(crate) heartbeat_interval: Duration,
     pub(crate) heartbeat_timeout: Duration,
     on_caster_attach: OnceLock<OnCasterAttach>,
+    key_verifier: Arc<dyn KeyVerifier>,
+    dev_mode: bool,
 }
 
 pub(crate) struct CasterState {
@@ -55,6 +58,24 @@ impl SessionManager {
             heartbeat_interval,
             heartbeat_timeout,
             on_caster_attach: OnceLock::new(),
+            key_verifier: Arc::new(crate::auth::NoopVerifier),
+            dev_mode: true,
+        }
+    }
+
+    pub fn with_auth(
+        heartbeat_interval: Duration,
+        heartbeat_timeout: Duration,
+        key_verifier: Arc<dyn KeyVerifier>,
+        dev_mode: bool,
+    ) -> Self {
+        Self {
+            sessions: DashMap::new(),
+            heartbeat_interval,
+            heartbeat_timeout,
+            on_caster_attach: OnceLock::new(),
+            key_verifier,
+            dev_mode,
         }
     }
 
@@ -95,7 +116,7 @@ impl SessionManager {
         outbound_tx: mpsc::Sender<SessionMessage>,
     ) {
         let mut caster_id: Option<String> = None;
-        let mut _state = SessionState::Attaching;
+        let mut state = SessionState::Attaching;
         let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
         let last_heartbeat_ms = Arc::new(AtomicU64::new(now_ms()));
         let semaphore = Arc::new(Semaphore::new(0)); // Attach adds permits
@@ -167,6 +188,24 @@ impl SessionManager {
                 Some(session_message::Payload::Attach(attach)) => {
                     let id = attach.caster_id.clone();
                     let max_conc = attach.max_concurrent;
+
+                    // ── Auth check ──
+                    if !self.dev_mode {
+                        let key_valid = self.key_verifier.verify_caster_key(&attach.key).await;
+                        if !key_valid {
+                            tracing::warn!(caster_id = %id, "caster attach rejected: invalid key");
+                            let ack = SessionMessage {
+                                payload: Some(session_message::Payload::AttachAck(AttachAck {
+                                    accepted: false,
+                                    reason: "invalid or missing caster key".into(),
+                                    supported_features: Vec::new(),
+                                })),
+                            };
+                            let _ = outbound_tx.send(ack).await;
+                            break;
+                        }
+                    }
+
                     tracing::info!(caster_id = %id, runes = attach.runes.len(), max_concurrent = max_conc, "caster attached");
 
                     let permits = if max_conc > 0 { max_conc as usize } else { usize::MAX >> 1 };
@@ -216,11 +255,11 @@ impl SessionManager {
                         })),
                     };
                     let _ = outbound_tx.send(ack).await;
-                    _state = SessionState::Active;
+                    state = SessionState::Active;
                     caster_id = Some(id);
                 }
 
-                Some(session_message::Payload::Result(result)) => {
+                Some(session_message::Payload::Result(result)) if state == SessionState::Active => {
                     let req_id = result.request_id.clone();
                     if let Some((_, p)) = pending.remove(&req_id) {
                         // permit auto-returned when PendingRequest is dropped
@@ -238,7 +277,7 @@ impl SessionManager {
                     }
                 }
 
-                Some(session_message::Payload::StreamEvent(event)) => {
+                Some(session_message::Payload::StreamEvent(event)) if state == SessionState::Active => {
                     let req_id = event.request_id.clone();
                     if let Some(p) = pending.get(&req_id) {
                         if let PendingResponse::Stream(ref tx) = p.tx {
@@ -247,7 +286,7 @@ impl SessionManager {
                     }
                 }
 
-                Some(session_message::Payload::StreamEnd(end)) => {
+                Some(session_message::Payload::StreamEnd(end)) if state == SessionState::Active => {
                     let req_id = end.request_id.clone();
                     if let Some((_, p)) = pending.remove(&req_id) {
                         // permit auto-returned when PendingRequest is dropped
@@ -277,7 +316,7 @@ impl SessionManager {
 
         hb_handle.abort();
         timeout_handle.abort();
-        _state = SessionState::Disconnected;
+        let _ = state; // state is now Disconnected conceptually
         if let Some(id) = &caster_id {
             tracing::info!(caster_id = %id, "cleaning up disconnected caster");
             self.sessions.remove(id);

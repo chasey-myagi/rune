@@ -1222,3 +1222,223 @@ async fn condition_with_mapping_combined() {
         Some(StepStatus::Completed { .. })
     ));
 }
+
+// ============================================================
+// 条件表达式解析器回归测试
+// ============================================================
+
+use rune_flow::engine::{evaluate_condition, evaluate_comparison};
+
+/// Helper: 创建带 step output 的上下文来测试条件表达式
+fn eval_cond(expr: &str) -> bool {
+    let statuses = HashMap::new();
+    let outputs = HashMap::new();
+    let input: Option<serde_json::Value> = None;
+    evaluate_condition(expr, &statuses, &outputs, &input)
+}
+
+/// Helper: 带 step outputs 和 flow input 的条件评估
+fn eval_cond_with_context(
+    expr: &str,
+    step_outputs: &HashMap<String, Option<Bytes>>,
+    flow_input_json: &Option<serde_json::Value>,
+) -> bool {
+    let statuses = HashMap::new();
+    evaluate_condition(expr, &statuses, step_outputs, flow_input_json)
+}
+
+/// Helper: 直接测试 evaluate_comparison 返回值
+fn eval_comp(expr: &str) -> Option<bool> {
+    let statuses = HashMap::new();
+    let outputs = HashMap::new();
+    let input: Option<serde_json::Value> = None;
+    evaluate_comparison(expr, &statuses, &outputs, &input)
+}
+
+fn eval_comp_with_context(
+    expr: &str,
+    step_outputs: &HashMap<String, Option<Bytes>>,
+    flow_input_json: &Option<serde_json::Value>,
+) -> Option<bool> {
+    let statuses = HashMap::new();
+    evaluate_comparison(expr, &statuses, step_outputs, flow_input_json)
+}
+
+#[test]
+fn test_condition_with_simple_equals() {
+    // "steps.A.output.count == 5" 应正确解析：lhs=steps.A.output.count, op===, rhs=5
+    let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"count":5}"#)),
+    );
+    let input = None;
+    let result = eval_cond_with_context("steps.A.output.count == 5", &outputs, &input);
+    assert!(result, "steps.A.output.count == 5 should be true when count is 5");
+}
+
+#[test]
+fn test_condition_with_gte() {
+    // "steps.A.output.value >= 10" 正确解析
+    let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"value":15}"#)),
+    );
+    let input = None;
+    assert!(eval_cond_with_context("steps.A.output.value >= 10", &outputs, &input));
+
+    // 边界：等于
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"value":10}"#)),
+    );
+    assert!(eval_cond_with_context("steps.A.output.value >= 10", &outputs, &input));
+
+    // 小于时不满足
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"value":9}"#)),
+    );
+    assert!(!eval_cond_with_context("steps.A.output.value >= 10", &outputs, &input));
+}
+
+#[test]
+fn test_condition_with_lte() {
+    // "steps.A.output.value <= 0" 正确解析
+    let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"value":-1}"#)),
+    );
+    let input = None;
+    assert!(eval_cond_with_context("steps.A.output.value <= 0", &outputs, &input));
+
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"value":0}"#)),
+    );
+    assert!(eval_cond_with_context("steps.A.output.value <= 0", &outputs, &input));
+
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"value":1}"#)),
+    );
+    assert!(!eval_cond_with_context("steps.A.output.value <= 0", &outputs, &input));
+}
+
+#[test]
+fn test_condition_with_not_equals() {
+    // "steps.A.output.status != error" 正确解析
+    let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"status":"ok"}"#)),
+    );
+    let input = None;
+    assert!(eval_cond_with_context("steps.A.output.status != error", &outputs, &input));
+
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"status":"error"}"#)),
+    );
+    assert!(!eval_cond_with_context("steps.A.output.status != error", &outputs, &input));
+}
+
+#[test]
+fn test_condition_with_string_comparison() {
+    // "steps.A.output.name == hello" 正确比较字符串
+    let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"name":"hello"}"#)),
+    );
+    let input = None;
+    assert!(eval_cond_with_context("steps.A.output.name == hello", &outputs, &input));
+
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"name":"world"}"#)),
+    );
+    assert!(!eval_cond_with_context("steps.A.output.name == hello", &outputs, &input));
+}
+
+#[test]
+fn test_condition_with_special_chars_in_path() {
+    // 路径中包含 > 或 < 等字符时不应干扰操作符解析
+    // 例如 step 名为 "a>b" （虽然不推荐，但解析器不应 panic）
+    // 这里模拟：lhs 中包含 > 字符的情况
+    // "5 == 5" 应该正常工作（简单字面量比较）
+    assert_eq!(eval_comp("5 == 5"), Some(true));
+    assert_eq!(eval_comp("5 == 6"), Some(false));
+    assert_eq!(eval_comp("5 > 3"), Some(true));
+    assert_eq!(eval_comp("3 < 5"), Some(true));
+}
+
+#[test]
+fn test_condition_with_spaces_around_operator() {
+    // "steps.A.output.x  ==  5" 带多余空格
+    let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+    outputs.insert(
+        "A".to_string(),
+        Some(Bytes::from(r#"{"x":5}"#)),
+    );
+    let input = None;
+    assert!(eval_cond_with_context("steps.A.output.x  ==  5", &outputs, &input));
+    assert!(eval_cond_with_context("  steps.A.output.x == 5  ", &outputs, &input));
+}
+
+#[test]
+fn test_condition_with_boolean_and_or() {
+    // 当前实现不支持 AND/OR 复合表达式
+    // 不 panic 即可，不对结果做具体断言
+    let _ = eval_cond("true AND true");
+    let _ = eval_cond("5 == 5 AND 3 == 3");
+}
+
+#[test]
+fn test_condition_empty_expression() {
+    // 空表达式不应 panic，应默认 true
+    assert!(eval_cond(""));
+    assert!(eval_cond("   "));
+}
+
+#[test]
+fn test_condition_invalid_expression() {
+    // 无效表达式不应 panic
+    // evaluate_comparison 返回 None，evaluate_condition 默认 true
+    assert!(eval_cond("gibberish"));
+    assert!(eval_cond("no_operator_here"));
+    assert_eq!(eval_comp("no_operator_here"), None);
+}
+
+#[test]
+fn test_condition_operator_in_step_name() {
+    // 核心回归测试：step 路径中包含操作符字符
+    // "steps.a>b.output.val == 5" 不应错误匹配路径中的 >
+    // 用 token 方式解析时，操作符应该是独立 token "=="
+    let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+    // 注意：step 名中带 > 在实际使用中不推荐，但解析器应该正确处理
+    // 关键是操作符两边有空格，token 解析不会被 lhs 中的 > 干扰
+    outputs.insert(
+        "a>b".to_string(),
+        Some(Bytes::from(r#"{"val":5}"#)),
+    );
+    let input = None;
+    let result = eval_comp_with_context("steps.a>b.output.val == 5", &outputs, &input);
+    assert_eq!(result, Some(true), "should correctly parse == as operator, not > in path");
+}
+
+#[test]
+fn test_condition_gt_in_step_name_with_gt_operator() {
+    // step 路径包含 > 且操作符也是 >
+    // "steps.a>b.output.val > 3" — 操作符 > 是独立 token
+    let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+    outputs.insert(
+        "a>b".to_string(),
+        Some(Bytes::from(r#"{"val":5}"#)),
+    );
+    let input = None;
+    let result = eval_comp_with_context("steps.a>b.output.val > 3", &outputs, &input);
+    assert_eq!(result, Some(true), "should find standalone > operator, not the one in path");
+}

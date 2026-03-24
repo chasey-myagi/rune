@@ -15,12 +15,15 @@ pub struct RuneEntry {
 /// Relay = 注册表
 pub struct Relay {
     entries: DashMap<String, Vec<RuneEntry>>,
+    /// Reverse index: gate_path → rune_name for O(1) dynamic route lookup
+    gate_path_index: DashMap<String, String>,
 }
 
 impl Relay {
     pub fn new() -> Self {
         Self {
             entries: DashMap::new(),
+            gate_path_index: DashMap::new(),
         }
     }
 
@@ -55,6 +58,11 @@ impl Relay {
             }
         }
 
+        // Maintain gate_path reverse index
+        if let Some(ref gate) = config.gate {
+            self.gate_path_index.insert(gate.path.clone(), config.name.clone());
+        }
+
         let name = config.name.clone();
         self.entries.entry(name).or_default().push(RuneEntry { config, invoker, caster_id });
         Ok(())
@@ -62,6 +70,18 @@ impl Relay {
 
     /// 移除某个 Caster 的所有 Rune
     pub fn remove_caster(&self, caster_id: &str) {
+        // Collect gate_paths to remove from index before mutating entries
+        let mut paths_to_remove = Vec::new();
+        for entry in self.entries.iter() {
+            for e in entry.value() {
+                if e.caster_id.as_deref() == Some(caster_id) {
+                    if let Some(ref gate) = e.config.gate {
+                        paths_to_remove.push(gate.path.clone());
+                    }
+                }
+            }
+        }
+
         for mut entry in self.entries.iter_mut() {
             entry.value_mut().retain(|e| {
                 e.caster_id.as_deref() != Some(caster_id)
@@ -69,6 +89,18 @@ impl Relay {
         }
         // 清理空条目
         self.entries.retain(|_, v| !v.is_empty());
+
+        // Clean up gate_path_index: only remove if no remaining entry uses this path
+        for path in paths_to_remove {
+            let still_exists = self.entries.iter().any(|entry| {
+                entry.value().iter().any(|e| {
+                    e.config.gate.as_ref().map(|g| g.path.as_str()) == Some(&path)
+                })
+            });
+            if !still_exists {
+                self.gate_path_index.remove(&path);
+            }
+        }
     }
 
     /// Find all candidates for a rune name
@@ -109,6 +141,11 @@ impl Relay {
         if filtered.is_empty() { return None; }
         let picked = resolver.pick(rune_name, &filtered)?;
         Some(Arc::clone(&picked.invoker))
+    }
+
+    /// O(1) lookup: gate_path → rune_name via reverse index
+    pub fn resolve_by_gate_path(&self, gate_path: &str) -> Option<String> {
+        self.gate_path_index.get(gate_path).map(|r| r.value().clone())
     }
 
     /// 列出所有已注册 Rune 的名称和 gate path

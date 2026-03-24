@@ -2105,6 +2105,7 @@ dependencies = [
  "hex",
  "rand 0.9.2",
  "rune-core",
+ "rune-store",
  "rusqlite",
  "serde",
  "serde_json",

@@ -13,14 +13,33 @@ impl RuneStore {
         let conn = self.conn.clone();
         let label = label.to_string();
         tokio::task::spawn_blocking(move || {
-            let raw_key = generate_raw_key(); let key_prefix = format!("rk_{}", &raw_key[3..11]);
-            let key_hash = hash_key(&raw_key); let now = now_iso8601();
-            let conn = conn.lock().unwrap();
-            conn.execute("INSERT INTO api_keys (key_prefix, key_hash, key_type, label, created_at) VALUES (?1, ?2, ?3, ?4, ?5)", rusqlite::params![key_prefix, key_hash, key_type.as_str(), label, now])?;
+            let raw_key = generate_raw_key();
+            let key_prefix = format!("rk_{}", &raw_key[3..11]);
+            let key_hash = hash_key(&raw_key);
+            let now = now_iso8601();
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.execute(
+                "INSERT INTO api_keys (key_prefix, key_hash, key_type, label, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![key_prefix, key_hash, key_type.as_str(), label, now],
+            )?;
             let id = conn.last_insert_rowid();
-            Ok(CreateKeyResult { raw_key: raw_key.clone(), api_key: ApiKey { id, key_prefix, key_hash: Some(key_hash), key_type, label, created_at: now, revoked_at: None } })
-        }).await?
+            Ok(CreateKeyResult {
+                raw_key: raw_key.clone(),
+                api_key: ApiKey {
+                    id,
+                    key_prefix,
+                    key_hash: Some(key_hash),
+                    key_type,
+                    label,
+                    created_at: now,
+                    revoked_at: None,
+                },
+            })
+        })
+        .await?
     }
+
     pub async fn verify_key(
         &self,
         raw_key: &str,
@@ -32,26 +51,71 @@ impl RuneStore {
         let conn = self.conn.clone();
         let key_hash = hash_key(raw_key);
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
-            let mut stmt = conn.prepare("SELECT id, key_prefix, key_hash, key_type, label, created_at, revoked_at FROM api_keys WHERE key_hash = ?1")?;
-            let result = stmt.query_row(rusqlite::params![key_hash], |row| Ok(ApiKey { id: row.get(0)?, key_prefix: row.get(1)?, key_hash: row.get::<_, String>(2).ok(), key_type: KeyType::from_str(&row.get::<_, String>(3)?).unwrap_or(KeyType::Gate), label: row.get(4)?, created_at: row.get(5)?, revoked_at: row.get(6)? }));
-            match result { Ok(key) => { if key.revoked_at.is_some() { return Ok(None); } if key.key_type != expected_type { return Ok(None); } Ok(Some(key)) } Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None), Err(e) => Err(e.into()) }
-        }).await?
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let mut stmt = conn.prepare(
+                "SELECT id, key_prefix, key_hash, key_type, label, created_at, revoked_at \
+                 FROM api_keys WHERE key_hash = ?1",
+            )?;
+            let result = stmt.query_row(rusqlite::params![key_hash], |row| {
+                Ok(ApiKey {
+                    id: row.get(0)?,
+                    key_prefix: row.get(1)?,
+                    key_hash: row.get::<_, String>(2).ok(),
+                    key_type: KeyType::from_str(&row.get::<_, String>(3)?).unwrap_or(KeyType::Gate),
+                    label: row.get(4)?,
+                    created_at: row.get(5)?,
+                    revoked_at: row.get(6)?,
+                })
+            });
+            match result {
+                Ok(key) => {
+                    if key.revoked_at.is_some() {
+                        return Ok(None);
+                    }
+                    if key.key_type != expected_type {
+                        return Ok(None);
+                    }
+                    Ok(Some(key))
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await?
     }
+
     pub async fn list_keys(&self) -> StoreResult<Vec<ApiKey>> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
-            let mut stmt = conn.prepare("SELECT id, key_prefix, key_type, label, created_at, revoked_at FROM api_keys ORDER BY id")?;
-            let keys = stmt.query_map([], |row| Ok(ApiKey { id: row.get(0)?, key_prefix: row.get(1)?, key_hash: None, key_type: KeyType::from_str(&row.get::<_, String>(2)?).unwrap_or(KeyType::Gate), label: row.get(3)?, created_at: row.get(4)?, revoked_at: row.get(5)? }))?.collect::<Result<Vec<_>, _>>()?;
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let mut stmt = conn.prepare(
+                "SELECT id, key_prefix, key_type, label, created_at, revoked_at \
+                 FROM api_keys ORDER BY id",
+            )?;
+            let keys = stmt
+                .query_map([], |row| {
+                    Ok(ApiKey {
+                        id: row.get(0)?,
+                        key_prefix: row.get(1)?,
+                        key_hash: None,
+                        key_type: KeyType::from_str(&row.get::<_, String>(2)?)
+                            .unwrap_or(KeyType::Gate),
+                        label: row.get(3)?,
+                        created_at: row.get(4)?,
+                        revoked_at: row.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(keys)
-        }).await?
+        })
+        .await?
     }
+
     pub async fn revoke_key(&self, key_id: i64) -> StoreResult<()> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let now = now_iso8601();
-            let conn = conn.lock().unwrap();
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.execute(
                 "UPDATE api_keys SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
                 rusqlite::params![now, key_id],
@@ -61,17 +125,20 @@ impl RuneStore {
         .await?
     }
 }
+
 fn generate_raw_key() -> String {
     let mut rng = rand::rng();
     let mut bytes = [0u8; 16];
     rng.fill(&mut bytes);
     format!("rk_{}", hex::encode(bytes))
 }
+
 fn hash_key(raw_key: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(raw_key.as_bytes());
     hex::encode(hasher.finalize())
 }
+
 pub fn now_iso8601() -> String {
     use std::time::SystemTime;
     let dur = SystemTime::now()
@@ -89,6 +156,7 @@ pub fn now_iso8601() -> String {
         year, month, day, hours, minutes, seconds
     )
 }
+
 pub(crate) fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     days += 719468;
     let era = days / 146097;
@@ -102,4 +170,5 @@ pub(crate) fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }
+
 pub(crate) use now_iso8601 as timestamp_now;

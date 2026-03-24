@@ -49,11 +49,14 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
             .allow_headers(Any)
     };
 
+    // Axum onion model: last-added layer executes first (outermost).
+    // Desired execution order: CORS → shutdown → auth → rate_limit → handler
+    // So we add them in reverse: rate_limit, auth, shutdown, cors.
     router
         .fallback(handlers::rune::dynamic_rune_handler)
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
-        .layer(middleware::from_fn_with_state(state.clone(), shutdown_middleware))
-        .layer(middleware::from_fn_with_state(state, auth_middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(middleware::from_fn_with_state(state, shutdown_middleware))
         .layer(cors)
 }

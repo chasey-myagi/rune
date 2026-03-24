@@ -1,7 +1,6 @@
 use rune_store::models::*;
 use rune_store::RuneStore;
 use std::sync::Arc;
-use std::thread;
 
 fn new_store() -> RuneStore {
     RuneStore::open_in_memory().expect("failed to open in-memory store")
@@ -2006,15 +2005,32 @@ async fn test_call_stats_enhanced_correctness() {
     assert_eq!(stats.len(), 3, "number of runes");
 
     // Find each rune's stats (name, count, avg_latency, success_rate, p95)
-    let rune_a = stats.iter().find(|s| s.0 == "rune_a").expect("rune_a missing");
-    let rune_b = stats.iter().find(|s| s.0 == "rune_b").expect("rune_b missing");
-    let rune_c = stats.iter().find(|s| s.0 == "rune_c").expect("rune_c missing");
+    let rune_a = stats
+        .iter()
+        .find(|s| s.0 == "rune_a")
+        .expect("rune_a missing");
+    let rune_b = stats
+        .iter()
+        .find(|s| s.0 == "rune_b")
+        .expect("rune_b missing");
+    let rune_c = stats
+        .iter()
+        .find(|s| s.0 == "rune_c")
+        .expect("rune_c missing");
 
     // rune_a: count=4, avg=25, success_rate=1.0, p95=40
     assert_eq!(rune_a.1, 4, "rune_a count");
     assert_eq!(rune_a.2, 25, "rune_a avg_latency"); // (10+20+30+40)/4 = 25
-    assert!((rune_a.3 - 1.0).abs() < 0.001, "rune_a success_rate should be 1.0, got {}", rune_a.3);
-    assert!((rune_a.4 - 40.0).abs() < 0.001, "rune_a p95 should be 40.0, got {}", rune_a.4);
+    assert!(
+        (rune_a.3 - 1.0).abs() < 0.001,
+        "rune_a success_rate should be 1.0, got {}",
+        rune_a.3
+    );
+    assert!(
+        (rune_a.4 - 40.0).abs() < 0.001,
+        "rune_a p95 should be 40.0, got {}",
+        rune_a.4
+    );
 
     // rune_b: count=3, avg=15, success_rate=2/3, p95=25
     assert_eq!(rune_b.1, 3, "rune_b count");
@@ -2025,7 +2041,11 @@ async fn test_call_stats_enhanced_correctness() {
         "rune_b success_rate should be ~0.667, got {}",
         rune_b.3
     );
-    assert!((rune_b.4 - 25.0).abs() < 0.001, "rune_b p95 should be 25.0, got {}", rune_b.4);
+    assert!(
+        (rune_b.4 - 25.0).abs() < 0.001,
+        "rune_b p95 should be 25.0, got {}",
+        rune_b.4
+    );
 
     // rune_c: count=1, avg=100, success_rate=1.0, p95=100
     assert_eq!(rune_c.1, 1, "rune_c count");
@@ -2069,11 +2089,20 @@ async fn test_call_stats_enhanced_many_runes() {
 
     // Each rune should have 40 calls
     for stat in &stats {
-        assert_eq!(stat.1, 40, "each rune should have 40 calls, {} has {}", stat.0, stat.1);
+        assert_eq!(
+            stat.1, 40,
+            "each rune should have 40 calls, {} has {}",
+            stat.0, stat.1
+        );
         // success_rate: i%20==0 gives status 500, each rune gets different distributions
         // rune_0 (i%5==0): 10 failures (i=0,20,40,...,180), rate=30/40=0.75
         // rune_1..4: fewer failures since i%20==0 AND i%5==k requires i%lcm(20,5)==k%5
-        assert!(stat.3 > 0.5, "success rate should be > 50%, {} got {}", stat.0, stat.3);
+        assert!(
+            stat.3 > 0.5,
+            "success rate should be > 50%, {} got {}",
+            stat.0,
+            stat.3
+        );
         assert!(stat.3 <= 1.0, "success rate should be <= 1.0");
         // p95 should be > 0
         assert!(stat.4 > 0.0, "p95 should be > 0");
@@ -2113,4 +2142,165 @@ async fn test_store_operations_dont_block_async_runtime() {
 
     let fast_result = fast_handle.await.unwrap();
     assert_eq!(fast_result, 42);
+}
+
+// ============================================================
+// B8: Mutex poisoning resilience
+// ============================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_store_survives_poisoned_mutex() {
+    // Simulate a panic inside a spawn_blocking closure that holds the Mutex.
+    // After the panic, the Mutex becomes poisoned. Subsequent operations on
+    // the same store should still succeed (not propagate the poison panic).
+    let store = Arc::new(new_store());
+
+    // Insert a task before the poison event
+    store
+        .insert_task("before-poison", "rune_a", None)
+        .await
+        .unwrap();
+
+    // Poison the mutex by panicking while holding the lock
+    store.poison_mutex();
+
+    // Now the Mutex is poisoned. Verify that subsequent operations still work.
+    let task = store.get_task("before-poison").await.unwrap();
+    assert!(
+        task.is_some(),
+        "Should be able to read from store after mutex poisoning"
+    );
+    assert_eq!(task.unwrap().task_id, "before-poison");
+
+    // Insert a new task after poisoning
+    let insert_result = store
+        .insert_task("after-poison", "rune_b", Some("{}"))
+        .await;
+    assert!(
+        insert_result.is_ok(),
+        "Should be able to insert after mutex poisoning"
+    );
+
+    // Verify the new task is readable
+    let task2 = store.get_task("after-poison").await.unwrap();
+    assert!(task2.is_some());
+    assert_eq!(task2.unwrap().rune_name, "rune_b");
+
+    // Verify other operations also work
+    let logs_result = store.query_logs(None, 10).await;
+    assert!(
+        logs_result.is_ok(),
+        "query_logs should work after mutex poisoning"
+    );
+
+    let keys_result = store.list_keys().await;
+    assert!(
+        keys_result.is_ok(),
+        "list_keys should work after mutex poisoning"
+    );
+
+    let snapshots_result = store.list_snapshots().await;
+    assert!(
+        snapshots_result.is_ok(),
+        "list_snapshots should work after mutex poisoning"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_store_operations() {
+    // Verify that many concurrent operations across different modules
+    // do not deadlock or panic.
+    let store = Arc::new(new_store());
+
+    let mut handles = vec![];
+
+    // Spawn 10 task inserters
+    for i in 0..10 {
+        let s = Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            s.insert_task(&format!("conc-task-{}", i), "rune_a", Some("{}"))
+                .await
+                .unwrap();
+        }));
+    }
+
+    // Spawn 10 log inserters
+    for i in 0..10 {
+        let s = Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            let log = CallLog {
+                id: 0,
+                request_id: format!("conc-req-{}", i),
+                rune_name: "rune_a".to_string(),
+                mode: "sync".to_string(),
+                caster_id: None,
+                latency_ms: 10 + i as i64,
+                status_code: 200,
+                input_size: 50,
+                output_size: 100,
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+            };
+            s.insert_log(&log).await.unwrap();
+        }));
+    }
+
+    // Spawn 5 snapshot upserters
+    for i in 0..5 {
+        let s = Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            let snap = RuneSnapshot {
+                rune_name: format!("conc-rune-{}", i),
+                version: "0.1.0".to_string(),
+                description: "concurrent test".to_string(),
+                supports_stream: false,
+                gate_path: format!("/rune/conc-{}", i),
+                gate_method: "POST".to_string(),
+                last_seen: String::new(),
+            };
+            s.upsert_snapshot(&snap).await.unwrap();
+        }));
+    }
+
+    // Spawn 5 key creators
+    for i in 0..5 {
+        let s = Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            s.create_key(KeyType::Gate, &format!("conc-key-{}", i))
+                .await
+                .unwrap();
+        }));
+    }
+
+    // Spawn 5 readers in parallel with writers
+    for _ in 0..5 {
+        let s = Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            let _ = s.list_tasks(None, None, 100, 0).await.unwrap();
+            let _ = s.query_logs(None, 100).await.unwrap();
+            let _ = s.list_snapshots().await.unwrap();
+            let _ = s.list_keys().await.unwrap();
+        }));
+    }
+
+    // Wait for all handles — any deadlock would cause a timeout, any panic would surface here
+    for h in handles {
+        h.await.expect("task should not panic or deadlock");
+    }
+
+    // Verify final state is consistent
+    let tasks = store.list_tasks(None, None, 100, 0).await.unwrap();
+    assert_eq!(tasks.len(), 10, "All 10 tasks should have been inserted");
+
+    let logs = store.query_logs(None, 100).await.unwrap();
+    assert_eq!(logs.len(), 10, "All 10 logs should have been inserted");
+
+    let snapshots = store.list_snapshots().await.unwrap();
+    assert_eq!(
+        snapshots.len(),
+        5,
+        "All 5 snapshots should have been upserted"
+    );
+
+    let keys = store.list_keys().await.unwrap();
+    assert_eq!(keys.len(), 5, "All 5 keys should have been created");
 }

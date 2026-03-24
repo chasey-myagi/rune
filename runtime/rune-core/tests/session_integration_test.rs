@@ -63,12 +63,17 @@ async fn connect_client(addr: SocketAddr) -> RuneServiceClient<Channel> {
 }
 
 fn make_attach_msg(caster_id: &str, runes: Vec<RuneDeclaration>, max_concurrent: u32) -> SessionMessage {
+    make_attach_msg_with_key(caster_id, runes, max_concurrent, "")
+}
+
+fn make_attach_msg_with_key(caster_id: &str, runes: Vec<RuneDeclaration>, max_concurrent: u32, key: &str) -> SessionMessage {
     SessionMessage {
         payload: Some(session_message::Payload::Attach(CasterAttach {
             caster_id: caster_id.into(),
             runes,
             labels: Default::default(),
             max_concurrent,
+            key: key.into(),
         })),
     }
 }
