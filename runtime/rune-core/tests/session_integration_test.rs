@@ -576,15 +576,9 @@ async fn cancel_request_cancels_pending() {
         other => panic!("expected CancelRequest, got {:?}", other),
     }
 
-    // The invoke should fail with CANCELLED
+    // The invoke should fail with Cancelled
     let result = invoke_handle.await.unwrap();
-    match result {
-        Err(RuneError::ExecutionFailed { code, message }) => {
-            assert_eq!(code, "CANCELLED");
-            assert_eq!(message, "test cancel");
-        }
-        other => panic!("expected ExecutionFailed/CANCELLED, got {:?}", other),
-    }
+    assert!(matches!(result, Err(RuneError::Cancelled)), "expected Cancelled, got {:?}", result);
 
     tx.send(make_detach_msg("done")).await.unwrap();
 }

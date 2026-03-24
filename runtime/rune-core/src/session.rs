@@ -251,7 +251,7 @@ impl SessionManager {
                             input_schema: if decl.input_schema.is_empty() { None } else { Some(decl.input_schema.clone()) },
                             output_schema: if decl.output_schema.is_empty() { None } else { Some(decl.output_schema.clone()) },
                             priority: decl.priority,
-                            labels: Default::default(),
+                            labels: attach.labels.clone(),
                         };
                         configs.push(config.clone());
                         let invoker = Arc::new(RemoteInvoker {
@@ -438,7 +438,7 @@ impl SessionManager {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
         if let Some((_, p)) = session.pending.remove(request_id) {
             // permit auto-returned when PendingRequest is dropped
-            let err = Err(RuneError::ExecutionFailed { code: "CANCELLED".into(), message: reason.to_string() });
+            let err = Err(RuneError::Cancelled);
             match p.tx {
                 PendingResponse::Once(tx) => { let _ = tx.send(err); }
                 PendingResponse::Stream(tx) => { let _ = tx.send(err).await; }
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(sem.available_permits(), 2, "cancel must return permit");
 
         let result = handle.await.unwrap();
-        assert!(matches!(result, Err(RuneError::ExecutionFailed { .. })));
+        assert!(matches!(result, Err(RuneError::Cancelled)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -742,11 +742,7 @@ mod tests {
 
         // Verify the request was resolved with an error
         let result = handle.await.unwrap();
-        assert!(matches!(result, Err(RuneError::ExecutionFailed { .. })));
-        if let Err(RuneError::ExecutionFailed { code, message }) = result {
-            assert_eq!(code, "CANCELLED");
-            assert_eq!(message, "user cancelled");
-        }
+        assert!(matches!(result, Err(RuneError::Cancelled)));
 
         // Permit should be returned
         assert_eq!(sem1.available_permits(), 5);
@@ -998,11 +994,7 @@ mod tests {
 
         // Verify the cancelled request's result
         let result1 = handles.remove(1).await.unwrap();
-        assert!(matches!(result1, Err(RuneError::ExecutionFailed { .. })));
-        if let Err(RuneError::ExecutionFailed { code, message }) = result1 {
-            assert_eq!(code, "CANCELLED");
-            assert_eq!(message, "cancelled by test");
-        }
+        assert!(matches!(result1, Err(RuneError::Cancelled)));
 
         // Complete remaining requests (permit auto-returned on PendingRequest drop)
         for i in [0, 2] {
@@ -1511,7 +1503,7 @@ mod tests {
         }
 
         let result = handle.await.unwrap();
-        assert!(matches!(result, Err(RuneError::ExecutionFailed { .. })));
+        assert!(matches!(result, Err(RuneError::Cancelled)));
     }
 
     // ---- execute preserves request ordering via outbound ----

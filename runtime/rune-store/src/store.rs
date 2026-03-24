@@ -65,7 +65,7 @@ impl RuneStore {
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 key_prefix  TEXT NOT NULL,
                 key_hash    TEXT NOT NULL UNIQUE,
-                key_type    TEXT NOT NULL CHECK(key_type IN ('caster', 'gate')),
+                key_type    TEXT NOT NULL CHECK(key_type IN ('caster', 'gate', 'admin')),
                 label       TEXT NOT NULL,
                 created_at  TEXT NOT NULL,
                 revoked_at  TEXT
