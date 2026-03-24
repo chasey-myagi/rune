@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use dashmap::DashMap;
 use crate::rune::RuneConfig;
 use crate::invoker::RuneInvoker;
@@ -17,6 +17,8 @@ pub struct Relay {
     entries: DashMap<String, Vec<RuneEntry>>,
     /// Reverse index: gate_path → rune_name for O(1) dynamic route lookup
     gate_path_index: DashMap<String, String>,
+    /// Serializes register/remove_caster to prevent race conditions on gate_path_index
+    write_lock: Mutex<()>,
 }
 
 impl Relay {
@@ -24,11 +26,14 @@ impl Relay {
         Self {
             entries: DashMap::new(),
             gate_path_index: DashMap::new(),
+            write_lock: Mutex::new(()),
         }
     }
 
     /// 注册一个 Rune（进程内或远程），检查 gate.path 冲突
     pub fn register(&self, config: RuneConfig, invoker: Arc<dyn RuneInvoker>, caster_id: Option<String>) -> Result<(), String> {
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+
         // Check gate.path conflict: different rune_name with same path+method is a hard error
         if let Some(ref gate) = config.gate {
             for entry in self.entries.iter() {
@@ -58,9 +63,10 @@ impl Relay {
             }
         }
 
-        // Maintain gate_path reverse index
+        // Maintain gate_path reverse index (key = "METHOD:path")
         if let Some(ref gate) = config.gate {
-            self.gate_path_index.insert(gate.path.clone(), config.name.clone());
+            let index_key = format!("{}:{}", gate.method, gate.path);
+            self.gate_path_index.insert(index_key, config.name.clone());
         }
 
         let name = config.name.clone();
@@ -70,13 +76,15 @@ impl Relay {
 
     /// 移除某个 Caster 的所有 Rune
     pub fn remove_caster(&self, caster_id: &str) {
-        // Collect gate_paths to remove from index before mutating entries
-        let mut paths_to_remove = Vec::new();
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Collect index keys ("METHOD:path") to remove from index before mutating entries
+        let mut keys_to_remove = Vec::new();
         for entry in self.entries.iter() {
             for e in entry.value() {
                 if e.caster_id.as_deref() == Some(caster_id) {
                     if let Some(ref gate) = e.config.gate {
-                        paths_to_remove.push(gate.path.clone());
+                        keys_to_remove.push(format!("{}:{}", gate.method, gate.path));
                     }
                 }
             }
@@ -90,15 +98,17 @@ impl Relay {
         // 清理空条目
         self.entries.retain(|_, v| !v.is_empty());
 
-        // Clean up gate_path_index: only remove if no remaining entry uses this path
-        for path in paths_to_remove {
+        // Clean up gate_path_index: only remove if no remaining entry uses this key
+        for key in keys_to_remove {
             let still_exists = self.entries.iter().any(|entry| {
                 entry.value().iter().any(|e| {
-                    e.config.gate.as_ref().map(|g| g.path.as_str()) == Some(&path)
+                    e.config.gate.as_ref()
+                        .map(|g| format!("{}:{}", g.method, g.path))
+                        .as_deref() == Some(&key)
                 })
             });
             if !still_exists {
-                self.gate_path_index.remove(&path);
+                self.gate_path_index.remove(&key);
             }
         }
     }
@@ -143,9 +153,10 @@ impl Relay {
         Some(Arc::clone(&picked.invoker))
     }
 
-    /// O(1) lookup: gate_path → rune_name via reverse index
-    pub fn resolve_by_gate_path(&self, gate_path: &str) -> Option<String> {
-        self.gate_path_index.get(gate_path).map(|r| r.value().clone())
+    /// O(1) lookup: (method, gate_path) → rune_name via reverse index
+    pub fn resolve_by_gate_path(&self, method: &str, gate_path: &str) -> Option<String> {
+        let key = format!("{}:{}", method, gate_path);
+        self.gate_path_index.get(&key).map(|r| r.value().clone())
     }
 
     /// 列出所有已注册 Rune 的名称和 gate path
@@ -1679,5 +1690,226 @@ mod tests {
             "should pick from high-priority tier, got {:?}",
             result
         );
+    }
+
+    // ---- P1 fix: gate_path_index must include HTTP method ----
+
+    #[test]
+    fn test_reverse_index_includes_method() {
+        // The gate_path_index key should include the HTTP method so that
+        // same-path-different-method runes don't overwrite each other.
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, input| async move { Ok(input) });
+
+        let config = RuneConfig {
+            name: "post_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/foo".into(),
+                method: "POST".into(),
+            }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0, labels: Default::default(),
+        };
+        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
+
+        // Should resolve with correct method
+        assert_eq!(
+            relay.resolve_by_gate_path("POST", "/api/foo"),
+            Some("post_rune".to_string()),
+        );
+        // Should NOT resolve with wrong method
+        assert_eq!(
+            relay.resolve_by_gate_path("GET", "/api/foo"),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_same_path_different_methods_both_routable() {
+        // Register POST /api/foo and GET /api/foo — both must be independently
+        // resolvable via the reverse index.
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, _input| async { Ok(Bytes::from("post")) });
+        let h2 = make_handler(|_ctx, _input| async { Ok(Bytes::from("get")) });
+
+        let config_post = RuneConfig {
+            name: "post_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/foo".into(),
+                method: "POST".into(),
+            }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0, labels: Default::default(),
+        };
+        let config_get = RuneConfig {
+            name: "get_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/foo".into(),
+                method: "GET".into(),
+            }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0, labels: Default::default(),
+        };
+
+        relay.register(config_post, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
+        relay.register(config_get, Arc::new(crate::invoker::LocalInvoker::new(h2)), None).unwrap();
+
+        // Both should resolve to their respective rune names
+        assert_eq!(
+            relay.resolve_by_gate_path("POST", "/api/foo"),
+            Some("post_rune".to_string()),
+        );
+        assert_eq!(
+            relay.resolve_by_gate_path("GET", "/api/foo"),
+            Some("get_rune".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_remove_caster_cleans_method_prefixed_index() {
+        // When a caster is removed, the method-prefixed index entry should also be cleaned.
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, input| async move { Ok(input) });
+        let h2 = make_handler(|_ctx, input| async move { Ok(input) });
+
+        let config_post = RuneConfig {
+            name: "post_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/bar".into(),
+                method: "POST".into(),
+            }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0, labels: Default::default(),
+        };
+        let config_get = RuneConfig {
+            name: "get_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/bar".into(),
+                method: "GET".into(),
+            }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0, labels: Default::default(),
+        };
+
+        relay.register(config_post, Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
+        relay.register(config_get, Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c2".into())).unwrap();
+
+        // Remove POST caster
+        relay.remove_caster("c1");
+
+        // POST should be gone, GET should remain
+        assert_eq!(relay.resolve_by_gate_path("POST", "/api/bar"), None);
+        assert_eq!(relay.resolve_by_gate_path("GET", "/api/bar"), Some("get_rune".to_string()));
+    }
+
+    // ====================================================================
+    // P2: Concurrent register / remove_caster race condition
+    // ====================================================================
+
+    #[test]
+    fn test_concurrent_register_and_remove_caster() {
+        // Regression test: verify that concurrent register and remove_caster
+        // do not corrupt the gate_path_index.
+        //
+        // Scenario: caster "old" registers a rune with gate_path "/api/shared".
+        // Then, in parallel, "old" is removed while caster "new" registers
+        // the same gate_path. After both complete, the gate_path_index must
+        // reflect the surviving entries — if "new" is still registered,
+        // resolve_by_gate_path must return Some.
+
+        use std::sync::Barrier;
+
+        let relay = Arc::new(Relay::new());
+
+        let make_cfg = || RuneConfig {
+            name: "shared_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/shared".into(),
+                method: "POST".into(),
+            }),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
+            labels: Default::default(),
+        };
+
+        // Run the race many times to increase the chance of hitting the window
+        for _ in 0..200 {
+            // Reset relay state
+            relay.remove_caster("old");
+            relay.remove_caster("new");
+
+            // Pre-register "old" caster
+            let h_old = make_handler(|_ctx, input| async move { Ok(input) });
+            relay.register(
+                make_cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(h_old)),
+                Some("old".into()),
+            ).unwrap();
+
+            let barrier = Arc::new(Barrier::new(2));
+
+            let relay2 = Arc::clone(&relay);
+            let barrier2 = barrier.clone();
+
+            // Thread 1: remove "old" caster
+            let t1 = std::thread::spawn(move || {
+                barrier2.wait();
+                relay2.remove_caster("old");
+            });
+
+            // Thread 2: register "new" caster with same gate_path
+            let relay3 = Arc::clone(&relay);
+            let barrier3 = barrier.clone();
+            let t2 = std::thread::spawn(move || {
+                barrier3.wait();
+                let h_new = make_handler(|_ctx, input| async move { Ok(input) });
+                relay3.register(
+                    make_cfg(),
+                    Arc::new(crate::invoker::LocalInvoker::new(h_new)),
+                    Some("new".into()),
+                ).unwrap();
+            });
+
+            t1.join().unwrap();
+            t2.join().unwrap();
+
+            // Invariant: gate_path_index must be consistent with entries.
+            // If any entry with gate_path "/api/shared" exists,
+            // resolve_by_gate_path must return Some.
+            let has_entry_with_path = relay.list().iter().any(|(_, gp)| {
+                gp.as_deref() == Some("/api/shared")
+            });
+            let index_has_path = relay.resolve_by_gate_path("POST", "/api/shared").is_some();
+
+            assert_eq!(
+                has_entry_with_path, index_has_path,
+                "gate_path_index inconsistency: entries has path={}, index has path={}",
+                has_entry_with_path, index_has_path
+            );
+        }
     }
 }

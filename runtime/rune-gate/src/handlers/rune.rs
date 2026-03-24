@@ -64,6 +64,7 @@ pub async fn dynamic_rune_handler(
     State(state): State<GateState>,
     req: axum::extract::Request,
 ) -> impl IntoResponse {
+    let method = req.method().to_string();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
     let content_type = req
@@ -96,7 +97,7 @@ pub async fn dynamic_rune_handler(
         }
     };
 
-    let rune_name = state.relay.resolve_by_gate_path(&path);
+    let rune_name = state.relay.resolve_by_gate_path(&method, &path);
 
     let rune_name = match rune_name {
         Some(name) => name,

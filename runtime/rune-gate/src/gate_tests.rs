@@ -943,9 +943,9 @@ mod tests {
             .await
             .unwrap();
 
-        // The dynamic fallback matches any method if the path matches.
-        // Echo with empty body → 200 OK with empty body.
-        assert_eq!(response.status(), StatusCode::OK);
+        // /echo is registered with method "POST" only. A GET request should
+        // NOT match and must return 404 (method-aware routing).
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     // =======================================================================
@@ -7130,8 +7130,8 @@ mod tests {
             )
             .unwrap();
 
-        // Reverse index should map /idx_path → idx_rune
-        let resolved = relay.resolve_by_gate_path("/idx_path");
+        // Reverse index should map POST:/idx_path → idx_rune
+        let resolved = relay.resolve_by_gate_path("POST", "/idx_path");
         assert_eq!(resolved, Some("idx_rune".to_string()));
     }
 
@@ -7161,13 +7161,13 @@ mod tests {
             .unwrap();
 
         // Index should exist before removal
-        assert_eq!(relay.resolve_by_gate_path("/rm_path"), Some("rm_rune".to_string()));
+        assert_eq!(relay.resolve_by_gate_path("POST", "/rm_path"), Some("rm_rune".to_string()));
 
         // Remove the caster
         relay.remove_caster("caster-1");
 
         // Index should be gone
-        assert_eq!(relay.resolve_by_gate_path("/rm_path"), None);
+        assert_eq!(relay.resolve_by_gate_path("POST", "/rm_path"), None);
     }
 
     #[tokio::test]
@@ -7177,9 +7177,9 @@ mod tests {
         let state = test_state();
         let app = build_router(state.clone(), None);
 
-        // /echo is registered with gate_path="/echo" — verify reverse index
-        let resolved = state.relay.resolve_by_gate_path("/echo");
-        assert_eq!(resolved, Some("echo".to_string()), "reverse index should map /echo → echo");
+        // /echo is registered with gate_path="/echo" method="POST" — verify reverse index
+        let resolved = state.relay.resolve_by_gate_path("POST", "/echo");
+        assert_eq!(resolved, Some("echo".to_string()), "reverse index should map POST:/echo → echo");
 
         // Also verify the HTTP route still works via the fallback handler
         let response = app
@@ -7265,5 +7265,86 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"]["code"], "SERVICE_UNAVAILABLE");
+    }
+
+    // ========================================================================
+    // Issue Fix: FileBroker evict_expired throttling
+    // ========================================================================
+
+    #[test]
+    fn test_filebroker_evict_throttled() {
+        // With a very long eviction interval, expired entries should NOT be cleaned
+        // by store() calls within the interval — proving eviction is throttled.
+        // TTL = 1s, evict_interval = 3600s (1 hour — effectively never during this test)
+        let broker = FileBroker::with_ttl(1, 3600);
+
+        // Store a file
+        let id1 = broker.store(
+            "a.txt".into(),
+            "text/plain".into(),
+            Bytes::from("aaa"),
+            "req-1",
+        );
+
+        // Wait for the file to expire
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // The first store() triggered eviction (last_eviction_secs was 0, epoch was just created).
+        // But now, the eviction interval hasn't elapsed yet (3600s), so subsequent store()
+        // calls should NOT trigger eviction.
+        let _id2 = broker.store(
+            "b.txt".into(),
+            "text/plain".into(),
+            Bytes::from("bbb"),
+            "req-2",
+        );
+
+        // The expired file (id1) should still be in the DashMap because eviction was throttled.
+        // entry_count includes both the expired entry and the new entry.
+        assert_eq!(
+            broker.entry_count(),
+            2,
+            "eviction should be throttled — expired entry should still be in DashMap"
+        );
+
+        // However, get() should still return None for expired files (per-entry O(1) TTL check)
+        assert!(
+            broker.get(&id1).is_none(),
+            "get() should still filter expired files via per-entry TTL check"
+        );
+    }
+
+    #[test]
+    fn test_filebroker_evict_runs_when_interval_elapsed() {
+        // With a very short eviction interval, expired entries SHOULD be cleaned up.
+        // TTL = 1s, evict_interval = 0s (always evict)
+        let broker = FileBroker::with_ttl(1, 0);
+
+        // Store a file
+        let _id1 = broker.store(
+            "a.txt".into(),
+            "text/plain".into(),
+            Bytes::from("aaa"),
+            "req-1",
+        );
+        assert_eq!(broker.entry_count(), 1);
+
+        // Wait for it to expire
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Next store() should trigger eviction because interval is 0
+        let _id2 = broker.store(
+            "b.txt".into(),
+            "text/plain".into(),
+            Bytes::from("bbb"),
+            "req-2",
+        );
+
+        // Expired entry should have been evicted
+        assert_eq!(
+            broker.entry_count(),
+            1,
+            "expired entry should have been evicted when interval is 0"
+        );
     }
 }
