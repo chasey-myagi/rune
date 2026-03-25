@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as u64
 }
 
@@ -18,7 +18,7 @@ pub fn now_ms() -> u64 {
 pub fn now_iso8601() -> String {
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap();
+        .unwrap_or_default();
     let secs = dur.as_secs();
     let days = secs / 86400;
     let time_secs = secs % 86400;
@@ -77,5 +77,15 @@ mod tests {
         let a = now_ms();
         let b = now_ms();
         assert!(b >= a);
+    }
+
+    // I-3 回归测试: now_ms 和 now_iso8601 不应该 panic
+    // （防御性改进，使用 unwrap_or_default 替换 unwrap）
+    #[test]
+    fn test_fix_now_ms_does_not_panic() {
+        let ms = now_ms();
+        assert!(ms > 0);
+        let iso = now_iso8601();
+        assert!(!iso.is_empty());
     }
 }

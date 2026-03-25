@@ -131,7 +131,9 @@ impl Resolver for PriorityResolver {
             // Safe index lookup: find which element in top_tier was picked.
             // picked's lifetime is tied to top_tier; ptr::eq works because both
             // references point into the same Vec allocation.
-            let inner_idx = top_tier.iter().position(|e| std::ptr::eq(e, picked)).unwrap_or(0);
+            let inner_idx = top_tier.iter().position(|e| {
+                e.config.name == picked.config.name && e.caster_id == picked.caster_id
+            }).unwrap_or(0);
             Some(&candidates[top_indices[inner_idx]])
         }
     }
@@ -285,5 +287,37 @@ mod tests {
         assert_eq!(names[1], "high_b");
         assert_eq!(names[2], "high_c");
         assert_eq!(names[3], "high_a");
+    }
+
+    // I-1 回归测试: ptr::eq 在 clone 后的 top_tier Vec 上会匹配失败，
+    // 导致 unwrap_or(0) 静默回退到第一个候选。
+    // 需要混合优先级才会触发 top_tier clone 路径。
+    #[test]
+    fn test_fix_priority_resolver_value_match_not_ptr_match() {
+        let inner = Arc::new(RoundRobinResolver::new());
+        let resolver = PriorityResolver::new(inner);
+
+        // 混合优先级: low(0), high_a(10), high_b(10)
+        // 这会触发 top_tier clone 路径
+        let candidates = vec![
+            make_entry("low", 0),
+            make_entry("high_a", 10),
+            make_entry("high_b", 10),
+        ];
+
+        // 第一次 pick 应该是 high_a
+        let first = resolver.pick("test_i1", &candidates).unwrap();
+        assert_eq!(first.config.name, "high_a");
+
+        // 第二次 pick 应该是 high_b（round-robin 在 top_tier 中前进）
+        let second = resolver.pick("test_i1", &candidates).unwrap();
+        assert_eq!(second.config.name, "high_b",
+            "second pick should be high_b, not high_a; ptr::eq fallback to index 0 is the bug");
+
+        // 验证返回的引用指向原始 candidates 切片
+        let second_ptr = second as *const RuneEntry;
+        let original_ptr = &candidates[2] as *const RuneEntry;
+        assert_eq!(second_ptr, original_ptr,
+            "returned reference must point to original candidate slice, not a clone");
     }
 }

@@ -183,26 +183,17 @@ impl RuneStore {
                 WHERE rn = CAST((cnt * 95 + 99) / 100 AS INTEGER)
                 ORDER BY rune_name",
             )?;
-            let p95_map: Vec<(String, f64)> = p95_stmt
+            let p95_map: std::collections::HashMap<String, f64> = p95_stmt
                 .query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as f64))
                 })?
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
 
-            // Combine aggregation + P95 (both are sorted by rune_name)
-            let mut p95_iter = p95_map.into_iter().peekable();
+            // Combine aggregation + P95 by name lookup (not positional)
             let results: Vec<(String, i64, i64, f64, f64)> = aggs
                 .into_iter()
                 .map(|a| {
-                    let p95 = if let Some(entry) = p95_iter.peek() {
-                        if entry.0 == a.name {
-                            p95_iter.next().unwrap().1
-                        } else {
-                            0.0
-                        }
-                    } else {
-                        0.0
-                    };
+                    let p95 = p95_map.get(&a.name).copied().unwrap_or(0.0);
                     (a.name, a.count, a.avg_latency, a.success_rate, p95)
                 })
                 .collect();
@@ -329,5 +320,61 @@ mod tests {
         let slow = results.iter().find(|r| r.0 == "slow").unwrap();
         assert!((fast.4 - 19.0).abs() < 2.0, "fast p95 should be ~19, got {}", fast.4);
         assert!((slow.4 - 196.0).abs() < 6.0, "slow p95 should be ~196, got {}", slow.4);
+    }
+
+    /// I-2 回归测试: P95 合并应按名称匹配，不依赖隐式排序位置
+    #[tokio::test]
+    async fn test_fix_p95_join_by_name_not_position() {
+        use crate::models::CallLog;
+        let store = RuneStore::open_in_memory().unwrap();
+
+        // 插入 3 个不同 rune 的日志，名字故意选择不同排序特征
+        for (name, latencies) in [
+            ("zeta_rune", vec![100, 200, 300]),
+            ("alpha_rune", vec![10, 20, 30]),
+            ("middle_rune", vec![50, 60, 70]),
+        ] {
+            for (i, lat) in latencies.iter().enumerate() {
+                let log = CallLog {
+                    id: 0,
+                    request_id: format!("r_{}_{}", name, i),
+                    rune_name: name.into(),
+                    mode: "sync".into(),
+                    caster_id: None,
+                    latency_ms: *lat,
+                    status_code: 200,
+                    input_size: 10,
+                    output_size: 20,
+                    timestamp: "2025-01-01T00:00:00Z".into(),
+                };
+                store.insert_log(&log).await.unwrap();
+            }
+        }
+
+        let (total, results) = store.call_stats_enhanced().await.unwrap();
+        assert_eq!(total, 9);
+        assert_eq!(results.len(), 3);
+
+        // 验证每个 rune 的 P95 对应正确（不依赖位置）
+        let alpha = results.iter().find(|r| r.0 == "alpha_rune").unwrap();
+        let middle = results.iter().find(|r| r.0 == "middle_rune").unwrap();
+        let zeta = results.iter().find(|r| r.0 == "zeta_rune").unwrap();
+
+        // P95 of 3 values: ceil(3*0.95) = 3, so P95 = max value
+        assert!(
+            (alpha.4 - 30.0).abs() < 1.0,
+            "alpha P95 should be ~30, got {}",
+            alpha.4
+        );
+        assert!(
+            (middle.4 - 70.0).abs() < 1.0,
+            "middle P95 should be ~70, got {}",
+            middle.4
+        );
+        assert!(
+            (zeta.4 - 300.0).abs() < 1.0,
+            "zeta P95 should be ~300, got {}",
+            zeta.4
+        );
     }
 }

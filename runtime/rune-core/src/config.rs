@@ -200,12 +200,12 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Load configuration from a TOML file.
+    /// Load configuration from a TOML file (accepts any path type).
     ///
     /// If the file does not exist, returns default configuration.
     /// If the file exists but contains invalid TOML, returns an error.
-    pub fn from_file(path: &str) -> anyhow::Result<Self> {
-        match std::fs::read_to_string(path) {
+    pub fn from_path(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+        match std::fs::read_to_string(path.as_ref()) {
             Ok(content) => {
                 let config: AppConfig = toml::from_str(&content)?;
                 Ok(config)
@@ -213,6 +213,13 @@ impl AppConfig {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Load configuration from a TOML file path string.
+    ///
+    /// Convenience wrapper around [`from_path`](Self::from_path).
+    pub fn from_file(path: &str) -> anyhow::Result<Self> {
+        Self::from_path(path)
     }
 
     /// Load configuration with default file search.
@@ -232,7 +239,7 @@ impl AppConfig {
         if let Some(config_dir) = dirs::config_dir() {
             let user_config = config_dir.join("rune").join("rune.toml");
             if user_config.exists() {
-                return Self::from_file(user_config.to_str().unwrap_or_default());
+                return Self::from_path(&user_config);
             }
         }
 
@@ -424,5 +431,35 @@ mod tests {
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.tls.cert_path.is_some());
         assert!(config.tls.key_path.is_none());
+    }
+
+    #[test]
+    fn test_fix_from_path_with_pathbuf() {
+        // Regression test for M-5: from_path must accept PathBuf directly
+        // without going through to_str() which can fail on non-UTF-8 paths.
+        let dir = std::env::temp_dir().join("rune_test_m5");
+        let _ = std::fs::create_dir_all(&dir);
+        let config_path = dir.join("test.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[server]
+http_port = 19999
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::from_path(&config_path).unwrap();
+        assert_eq!(config.server.http_port, 19999);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_fix_from_path_missing_file_returns_default() {
+        let config =
+            AppConfig::from_path("/tmp/rune_test_m5_nonexistent/does_not_exist.toml").unwrap();
+        assert_eq!(config.server.http_port, 50060); // default
     }
 }

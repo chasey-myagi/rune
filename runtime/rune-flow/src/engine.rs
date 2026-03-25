@@ -35,6 +35,8 @@ pub enum FlowError {
     DagError(#[from] DagError),
     #[error("no terminal step found")]
     NoTerminalStep,
+    #[error("serialization failed: {0}")]
+    SerializationFailed(String),
 }
 
 /// Default step timeout when not configured.
@@ -228,7 +230,7 @@ impl FlowRunner {
                     &input,
                     &step_outputs,
                     &flow_input_json,
-                );
+                )?;
 
                 // Resolve rune invoker
                 let invoker = self.relay.resolve(&step_def.rune, self.resolver.as_ref());
@@ -327,7 +329,7 @@ impl FlowRunner {
         flow_input: &Bytes,
         step_outputs: &HashMap<String, Option<Bytes>>,
         flow_input_json: &Option<serde_json::Value>,
-    ) -> Bytes {
+    ) -> Result<Bytes, FlowError> {
         if let Some(mapping) = &step_def.input_mapping {
             // 有 input_mapping，构造 JSON
             let mut result = serde_json::Map::new();
@@ -335,18 +337,20 @@ impl FlowRunner {
                 let value = resolve_path(path, step_outputs, flow_input_json);
                 result.insert(key.clone(), value);
             }
-            Bytes::from(serde_json::to_vec(&serde_json::Value::Object(result)).unwrap())
+            let bytes = serde_json::to_vec(&serde_json::Value::Object(result))
+                .map_err(|e| FlowError::SerializationFailed(e.to_string()))?;
+            Ok(Bytes::from(bytes))
         } else if step_def.depends_on.len() == 1 {
             // 单上游，传递上游 output
             let dep = &step_def.depends_on[0];
-            match step_outputs.get(dep.as_str()) {
+            Ok(match step_outputs.get(dep.as_str()) {
                 Some(Some(output)) => output.clone(),
                 Some(None) => Bytes::from("null"),
                 None => flow_input.clone(),
-            }
+            })
         } else {
             // 无依赖，传递 flow 原始输入
-            flow_input.clone()
+            Ok(flow_input.clone())
         }
     }
 
@@ -630,4 +634,73 @@ fn uuid_simple() -> String {
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let ts = rune_core::time_utils::now_ms();
     format!("req-{:x}-{:x}", ts, seq)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use std::collections::HashMap;
+
+    /// I-4 回归测试: build_step_input 带 input_mapping 时序列化不 panic，返回 Result
+    #[test]
+    fn test_fix_flow_output_serialization_no_panic() {
+        let mut mapping = HashMap::new();
+        mapping.insert("key1".to_string(), "$input.field1".to_string());
+        mapping.insert("key2".to_string(), "$input.field2".to_string());
+
+        let step_def = crate::dag::StepDefinition {
+            name: "test_step".to_string(),
+            rune: "test_rune".to_string(),
+            depends_on: vec![],
+            condition: None,
+            input_mapping: Some(mapping),
+        };
+
+        let flow_input = Bytes::from(r#"{"field1": "hello", "field2": 42}"#);
+        let step_outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+        let flow_input_json: Option<serde_json::Value> =
+            serde_json::from_slice(&flow_input).ok();
+
+        // 修复前这里用 unwrap()，修复后返回 Result
+        let result = FlowRunner::build_step_input(
+            &step_def,
+            &flow_input,
+            &step_outputs,
+            &flow_input_json,
+        );
+        assert!(result.is_ok(), "build_step_input should return Ok");
+
+        let output = result.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(parsed["key1"], "hello");
+        assert_eq!(parsed["key2"], 42);
+    }
+
+    /// I-4 回归测试: build_step_input 无 mapping 时仍正常返回
+    #[test]
+    fn test_fix_build_step_input_no_mapping() {
+        let step_def = crate::dag::StepDefinition {
+            name: "passthrough".to_string(),
+            rune: "test_rune".to_string(),
+            depends_on: vec![],
+            condition: None,
+            input_mapping: None,
+        };
+
+        let flow_input = Bytes::from(r#"{"data": "test"}"#);
+        let step_outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+        let flow_input_json: Option<serde_json::Value> =
+            serde_json::from_slice(&flow_input).ok();
+
+        let result = FlowRunner::build_step_input(
+            &step_def,
+            &flow_input,
+            &step_outputs,
+            &flow_input_json,
+        );
+        assert!(result.is_ok());
+        // 无依赖无 mapping，应该 passthrough flow input
+        assert_eq!(result.unwrap(), flow_input);
+    }
 }

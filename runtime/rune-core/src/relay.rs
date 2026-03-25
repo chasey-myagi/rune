@@ -83,13 +83,14 @@ impl Relay {
     pub fn remove_caster(&self, caster_id: &str) {
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Collect index keys ("METHOD:path") to remove from index before mutating entries
-        let mut keys_to_remove = Vec::new();
+        // Collect (index_key, rune_name) pairs for gate paths owned by this caster
+        let mut keys_to_check: Vec<(String, String)> = Vec::new();
         for entry in self.entries.iter() {
+            let rune_name = entry.key().clone();
             for e in entry.value() {
                 if e.caster_id.as_deref() == Some(caster_id) {
                     if let Some(ref gate) = e.config.gate {
-                        keys_to_remove.push(format!("{}:{}", gate.method, gate.path));
+                        keys_to_check.push((format!("{}:{}", gate.method, gate.path), rune_name.clone()));
                     }
                 }
             }
@@ -103,15 +104,18 @@ impl Relay {
         // 清理空条目
         self.entries.retain(|_, v| !v.is_empty());
 
-        // Clean up gate_path_index: only remove if no remaining entry uses this key
-        for key in keys_to_remove {
-            let still_exists = self.entries.iter().any(|entry| {
-                entry.value().iter().any(|e| {
-                    e.config.gate.as_ref()
-                        .map(|g| format!("{}:{}", g.method, g.path))
-                        .as_deref() == Some(&key)
+        // Clean up gate_path_index: only check the specific rune_name's remaining
+        // entries instead of iterating all entries across all rune names.
+        for (key, rune_name) in keys_to_check {
+            let still_exists = self.entries.get(&rune_name)
+                .map(|entries| {
+                    entries.value().iter().any(|e| {
+                        e.config.gate.as_ref()
+                            .map(|g| format!("{}:{}", g.method, g.path))
+                            .as_deref() == Some(&key)
+                    })
                 })
-            });
+                .unwrap_or(false);
             if !still_exists {
                 self.gate_path_index.remove(&key);
             }
@@ -2075,5 +2079,45 @@ mod tests {
             ..Default::default()
         };
         assert!(relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).is_ok());
+    }
+
+    // M-3 回归测试: 两个 caster 注册同名 rune 和同 gate_path，
+    // 移除一个后 gate_path_index 应保留（还有另一个 caster 提供该路由）
+    #[test]
+    fn test_fix_remove_caster_preserves_shared_gate_path() {
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, input| async move { Ok(input) });
+        let h2 = make_handler(|_ctx, input| async move { Ok(input) });
+
+        let config = RuneConfig {
+            name: "shared".into(),
+            gate: Some(crate::rune::GateConfig {
+                path: "/shared".into(),
+                method: "POST".into(),
+            }),
+            ..Default::default()
+        };
+
+        relay.register(config.clone(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("caster_a".into())).unwrap();
+        relay.register(config.clone(), Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("caster_b".into())).unwrap();
+
+        // 移除 caster_a
+        relay.remove_caster("caster_a");
+
+        // gate_path 应该还在（caster_b 还在）
+        assert_eq!(
+            relay.resolve_by_gate_path("POST", "/shared"),
+            Some("shared".to_string()),
+            "gate_path should still exist after removing one of two casters"
+        );
+
+        // 移除 caster_b
+        relay.remove_caster("caster_b");
+
+        // 现在 gate_path 应该没了
+        assert!(
+            relay.resolve_by_gate_path("POST", "/shared").is_none(),
+            "gate_path should be removed after removing all casters"
+        );
     }
 }

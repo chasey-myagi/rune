@@ -40,6 +40,14 @@ async fn main() -> anyhow::Result<()> {
     // ── Telemetry (tracing + metrics) ──
     let _tracer_provider = init_telemetry(&config.telemetry);
 
+    if let Some(ref path) = config.log.file {
+        tracing::warn!(
+            path = %path,
+            "log.file is configured but file-based logging is not yet implemented; \
+             logs will continue to go to stderr"
+        );
+    }
+
     tracing::info!(dev_mode = config.server.dev_mode, "loading configuration");
 
     // ── Store ──
@@ -276,17 +284,19 @@ async fn main() -> anyhow::Result<()> {
             }
         });
         tokio::spawn(async move {
-            axum_server::bind_rustls(http_addr, rustls_config)
+            if let Err(e) = axum_server::bind_rustls(http_addr, rustls_config)
                 .handle(axum_server_handle)
                 .serve(http_router.into_make_service())
                 .await
-                .unwrap();
+            {
+                tracing::error!(error = %e, "HTTPS server error");
+            }
         })
     } else {
         let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
         tracing::info!("HTTP gate listening on {}", http_addr);
         tokio::spawn(async move {
-            axum::serve(http_listener, http_router)
+            if let Err(e) = axum::serve(http_listener, http_router)
                 .with_graceful_shutdown(async move {
                     while !*http_shutdown_rx.borrow_and_update() {
                         if http_shutdown_rx.changed().await.is_err() {
@@ -295,7 +305,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                 })
                 .await
-                .unwrap();
+            {
+                tracing::error!(error = %e, "HTTP server error");
+            }
         })
     };
 
@@ -314,9 +326,16 @@ async fn main() -> anyhow::Result<()> {
         let identity = tonic::transport::Identity::from_pem(cert, key);
         tracing::info!("gRPCS listening on {}", grpc_addr);
         tokio::spawn(async move {
-            tonic::transport::Server::builder()
+            let mut server = match tonic::transport::Server::builder()
                 .tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))
-                .expect("invalid TLS configuration for gRPC")
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "invalid TLS configuration for gRPC");
+                    return;
+                }
+            };
+            if let Err(e) = server
                 .add_service(RuneServiceServer::new(grpc_service))
                 .serve_with_shutdown(grpc_addr, async move {
                     while !*grpc_shutdown_rx.borrow_and_update() {
@@ -326,12 +345,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 })
                 .await
-                .unwrap();
+            {
+                tracing::error!(error = %e, "gRPCS server error");
+            }
         })
     } else {
         tracing::info!("gRPC listening on {}", grpc_addr);
         tokio::spawn(async move {
-            tonic::transport::Server::builder()
+            if let Err(e) = tonic::transport::Server::builder()
                 .add_service(RuneServiceServer::new(grpc_service))
                 .serve_with_shutdown(grpc_addr, async move {
                     while !*grpc_shutdown_rx.borrow_and_update() {
@@ -341,7 +362,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                 })
                 .await
-                .unwrap();
+            {
+                tracing::error!(error = %e, "gRPC server error");
+            }
         })
     };
 

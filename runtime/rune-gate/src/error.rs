@@ -46,5 +46,8 @@ pub fn map_flow_error(e: FlowError) -> axum::response::Response {
         FlowError::NoTerminalStep => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "NO_TERMINAL_STEP", &e.to_string())
         }
+        FlowError::SerializationFailed(_) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "SERIALIZATION_FAILED", &e.to_string())
+        }
     }
 }

@@ -17,6 +17,24 @@ fn is_exempt(path: &str, exempt_routes: &[String]) -> bool {
     })
 }
 
+/// Compute a rate-limit key from the raw Authorization header value.
+///
+/// The bearer token is hashed so that the raw secret is never stored as a
+/// map key — this prevents attackers from flooding the rate-limiter with
+/// fabricated tokens to exhaust memory.
+fn rate_key_from_header(auth_header: Option<&str>) -> String {
+    match auth_header.and_then(|v| v.strip_prefix("Bearer ")) {
+        Some(token) => {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            token.hash(&mut hasher);
+            format!("k_{:x}", hasher.finish())
+        }
+        None => "__anonymous__".to_string(),
+    }
+}
+
 pub async fn auth_middleware(
     State(state): State<GateState>,
     req: axum::extract::Request,
@@ -104,14 +122,12 @@ pub async fn rate_limit_middleware(
         }
     }
 
-    // Extract rate limit key from Authorization header
-    let rate_key = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("__anonymous__")
-        .to_string();
+    // Extract rate limit key from Authorization header (hashed to avoid leaking tokens)
+    let rate_key = rate_key_from_header(
+        req.headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok()),
+    );
 
     match rate_limiter.check(&rate_key) {
         Ok(()) => next.run(req).await,
@@ -161,5 +177,33 @@ mod tests {
         let routes = vec!["/".to_string()];
         assert!(is_exempt("/", &routes));
         assert!(is_exempt("/anything", &routes));
+    }
+
+    #[test]
+    fn test_fix_rate_key_is_hashed() {
+        let raw_token = "sk-abc123secretkey";
+        let key = rate_key_from_header(Some(&format!("Bearer {raw_token}")));
+
+        // Key must NOT contain the raw token
+        assert!(
+            !key.contains(raw_token),
+            "rate key must not contain the raw bearer token"
+        );
+        // Key must be deterministic
+        let key2 = rate_key_from_header(Some(&format!("Bearer {raw_token}")));
+        assert_eq!(key, key2, "same token must produce the same rate key");
+
+        // Different tokens must produce different keys
+        let key3 = rate_key_from_header(Some("Bearer other-token"));
+        assert_ne!(key, key3, "different tokens must produce different rate keys");
+    }
+
+    #[test]
+    fn test_fix_rate_key_anonymous_without_bearer() {
+        assert_eq!(rate_key_from_header(None), "__anonymous__");
+        assert_eq!(
+            rate_key_from_header(Some("Basic dXNlcjpwYXNz")),
+            "__anonymous__"
+        );
     }
 }
