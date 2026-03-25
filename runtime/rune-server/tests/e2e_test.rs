@@ -208,6 +208,7 @@ async fn spawn_server(state: GateState) -> (String, tokio::task::JoinHandle<()>)
 fn client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(10))
+        .no_proxy()
         .build()
         .unwrap()
 }
