@@ -28,27 +28,23 @@ pub fn map_error(e: RuneError) -> axum::response::Response {
     error_response(status, code, &e.to_string())
 }
 
-pub fn flow_error_response(status: StatusCode, code: &str, msg: &str) -> axum::response::Response {
-    error_response(status, code, msg)
-}
-
 pub fn map_flow_error(e: FlowError) -> axum::response::Response {
     match &e {
         FlowError::FlowNotFound(_) => {
-            flow_error_response(StatusCode::NOT_FOUND, "FLOW_NOT_FOUND", &e.to_string())
+            error_response(StatusCode::NOT_FOUND, "FLOW_NOT_FOUND", &e.to_string())
         }
         FlowError::StepFailed { source, .. } => {
             let (status, code) = match source {
                 RuneError::NotFound(_) => (StatusCode::SERVICE_UNAVAILABLE, "STEP_UNAVAILABLE"),
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "STEP_FAILED"),
             };
-            flow_error_response(status, code, &e.to_string())
+            error_response(status, code, &e.to_string())
         }
         FlowError::DagError(_) => {
-            flow_error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string())
+            error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string())
         }
         FlowError::NoTerminalStep => {
-            flow_error_response(StatusCode::INTERNAL_SERVER_ERROR, "NO_TERMINAL_STEP", &e.to_string())
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "NO_TERMINAL_STEP", &e.to_string())
         }
     }
 }

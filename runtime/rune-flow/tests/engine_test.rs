@@ -1454,3 +1454,109 @@ fn test_condition_gt_in_step_name_with_gt_operator() {
     let result = eval_comp_with_context("steps.a>b.output.val > 3", &outputs, &input);
     assert_eq!(result, Some(true), "should find standalone > operator, not the one in path");
 }
+
+// ============================================================
+// SF-2: uuid_simple() 并行 step 应产生唯一 request_id
+// ============================================================
+
+#[tokio::test]
+async fn sf2_parallel_steps_get_unique_request_ids() {
+    // 两个无依赖 step 并行执行时，它们的 request_id 不应重复。
+    // 我们通过让 rune handler 回显 ctx.request_id 来验证。
+    let relay = Arc::new(Relay::new());
+
+    let id_echo = make_handler(|ctx, _input| async move {
+        let id = ctx.request_id;
+        Ok(Bytes::from(format!(r#"{{"id":"{}"}}"#, id)))
+    });
+    relay
+        .register(
+            rune_config("id_echo"),
+            Arc::new(rune_core::invoker::LocalInvoker::new(id_echo)),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    // Two parallel steps (no dependencies between them)
+    engine
+        .register(flow(
+            "parallel_ids",
+            vec![step("p1", "id_echo"), step("p2", "id_echo")],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("parallel_ids", Bytes::from(r#"{}"#))
+        .await
+        .unwrap();
+
+    // 提取两个 step 的 request_id
+    let id1 = match result.steps.get("p1") {
+        Some(StepStatus::Completed { output }) => {
+            let v: serde_json::Value = serde_json::from_slice(output).unwrap();
+            v["id"].as_str().unwrap().to_string()
+        }
+        other => panic!("p1 should be completed, got {:?}", other),
+    };
+    let id2 = match result.steps.get("p2") {
+        Some(StepStatus::Completed { output }) => {
+            let v: serde_json::Value = serde_json::from_slice(output).unwrap();
+            v["id"].as_str().unwrap().to_string()
+        }
+        other => panic!("p2 should be completed, got {:?}", other),
+    };
+
+    assert_ne!(id1, id2, "parallel steps must get unique request_ids: {} vs {}", id1, id2);
+    // Both should now contain a counter segment (req-{ts}-{seq})
+    assert!(id1.matches('-').count() >= 2, "id should have format req-{{ts}}-{{seq}}: {}", id1);
+    assert!(id2.matches('-').count() >= 2, "id should have format req-{{ts}}-{{seq}}: {}", id2);
+}
+
+// ============================================================
+// SF-6: execute_flow works with a cloned FlowDefinition
+// ============================================================
+
+#[tokio::test]
+async fn sf6_execute_flow_with_cloned_definition() {
+    let relay = test_relay();
+    let mut engine = new_engine(relay);
+
+    let fd = flow("cloned", vec![step("A", "step_a")]);
+    engine.register(fd.clone()).unwrap();
+
+    // Simulate the pattern used in the gate handler:
+    // 1. Get a clone of the flow definition
+    let cloned_def = engine.get("cloned").unwrap().clone();
+
+    // 2. Execute using the cloned definition (no longer looking it up internally)
+    let result = engine
+        .execute_flow(&cloned_def, Bytes::from(r#"{"x":1}"#))
+        .await
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(v["x"], 1);
+    assert_eq!(v["a"], true);
+    assert_eq!(result.steps_executed, 1);
+}
+
+// ============================================================
+// NF-5: time_utils consistency
+// ============================================================
+
+#[test]
+fn nf5_time_utils_now_ms_is_reasonable() {
+    let ms = rune_core::time_utils::now_ms();
+    // After 2024-01-01
+    assert!(ms > 1_704_067_200_000);
+}
+
+#[test]
+fn nf5_time_utils_now_iso8601_format() {
+    let s = rune_core::time_utils::now_iso8601();
+    assert_eq!(s.len(), 20);
+    assert!(s.ends_with('Z'));
+}

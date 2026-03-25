@@ -373,7 +373,7 @@ impl SessionManager {
             payload: Some(session_message::Payload::Execute(ExecuteRequest {
                 request_id: request_id.to_string(), rune_name: rune_name.to_string(),
                 input: input.to_vec(), context,
-                timeout_ms: timeout.as_millis() as u32,
+                timeout_ms: safe_timeout_ms(timeout),
                 attachments: Vec::new(),
             })),
         };
@@ -406,7 +406,7 @@ impl SessionManager {
             payload: Some(session_message::Payload::Execute(ExecuteRequest {
                 request_id: request_id.to_string(), rune_name: rune_name.to_string(),
                 input: input.to_vec(), context,
-                timeout_ms: timeout.as_millis() as u32,
+                timeout_ms: safe_timeout_ms(timeout),
                 attachments: Vec::new(),
             })),
         };
@@ -454,10 +454,13 @@ impl SessionManager {
     }
 }
 
+/// Convert a Duration to milliseconds clamped to u32::MAX to avoid truncation.
+pub(crate) fn safe_timeout_ms(timeout: Duration) -> u32 {
+    timeout.as_millis().min(u32::MAX as u128) as u32
+}
+
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap()
-        .as_millis() as u64
+    crate::time_utils::now_ms()
 }
 
 #[cfg(test)]
@@ -1616,5 +1619,33 @@ mod tests {
             true,
         );
         assert!(mgr.dev_mode, "with_auth(dev_mode=true) should have dev_mode=true");
+    }
+
+    // MF-1: safe_timeout_ms should clamp large durations to u32::MAX
+    #[test]
+    fn test_safe_timeout_ms_normal_value() {
+        let result = safe_timeout_ms(Duration::from_secs(30));
+        assert_eq!(result, 30_000);
+    }
+
+    #[test]
+    fn test_safe_timeout_ms_max_u32() {
+        // u32::MAX milliseconds ≈ 49.7 days
+        let dur = Duration::from_millis(u32::MAX as u64);
+        assert_eq!(safe_timeout_ms(dur), u32::MAX);
+    }
+
+    #[test]
+    fn test_safe_timeout_ms_overflow_clamped() {
+        // Duration larger than u32::MAX ms should be clamped, not truncated
+        let dur = Duration::from_millis(u32::MAX as u64 + 1000);
+        assert_eq!(safe_timeout_ms(dur), u32::MAX);
+    }
+
+    #[test]
+    fn test_safe_timeout_ms_huge_duration() {
+        // 100 days in millis overflows u32 (8_640_000_000 > 4_294_967_295)
+        let dur = Duration::from_secs(100 * 86400);
+        assert_eq!(safe_timeout_ms(dur), u32::MAX);
     }
 }

@@ -17,7 +17,7 @@ pub async fn auth_middleware(
     }
 
     let path = req.uri().path().to_string();
-    if state.exempt_routes.iter().any(|r| path.starts_with(r)) {
+    if state.exempt_routes.iter().any(|r| path == *r || path.starts_with(&format!("{}/", r))) {
         return next.run(req).await;
     }
 
@@ -77,7 +77,7 @@ pub async fn rate_limit_middleware(
     let path = req.uri().path().to_string();
 
     // Exempt routes (e.g. /health)
-    if state.exempt_routes.iter().any(|r| path.starts_with(r)) {
+    if state.exempt_routes.iter().any(|r| path == *r || path.starts_with(&format!("{}/", r))) {
         return next.run(req).await;
     }
 

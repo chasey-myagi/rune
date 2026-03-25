@@ -90,7 +90,16 @@ impl FlowEngine {
         let flow = self
             .flows
             .get(flow_name)
-            .ok_or_else(|| FlowError::FlowNotFound(flow_name.to_string()))?;
+            .ok_or_else(|| FlowError::FlowNotFound(flow_name.to_string()))?
+            .clone();
+        self.execute_flow(&flow, input).await
+    }
+
+    /// Execute a pre-fetched FlowDefinition without looking it up from the
+    /// internal registry.  This allows callers to clone the definition, release
+    /// any lock protecting the engine, and then run the (potentially long)
+    /// execution without holding that lock.
+    pub async fn execute_flow(&self, flow: &FlowDefinition, input: Bytes) -> Result<FlowResult, FlowError> {
 
         // 空 flow: passthrough
         if flow.steps.is_empty() {
@@ -587,12 +596,11 @@ fn as_f64(v: &serde_json::Value) -> Option<f64> {
     }
 }
 
-/// 生成简单的请求 ID
+/// 生成简单的请求 ID（时间戳 + 单调计数器，保证并行 step 不重复）
 fn uuid_simple() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("req-{:x}", ts)
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ts = rune_core::time_utils::now_ms();
+    format!("req-{:x}-{:x}", ts, seq)
 }

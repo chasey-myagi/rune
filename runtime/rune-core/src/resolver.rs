@@ -128,16 +128,148 @@ impl Resolver for PriorityResolver {
             // Build a temporary vec of top-tier entries for inner resolver
             let top_tier: Vec<RuneEntry> = top_indices.iter().map(|&i| candidates[i].clone()).collect();
             let picked = self.inner.pick(rune_name, &top_tier)?;
-            // Map back: the inner resolver returns index into top_tier,
-            // we need the corresponding index in the original candidates.
-            // Find which top_tier entry was picked by comparing Arc pointers.
-            for (ti, &orig_idx) in top_indices.iter().enumerate() {
-                if Arc::ptr_eq(&top_tier[ti].invoker, &picked.invoker) {
-                    return Some(&candidates[orig_idx]);
-                }
+            // Map back using index: the inner resolver returns a reference into
+            // top_tier, so we compute the offset within that slice.
+            let picked_ptr = picked as *const RuneEntry;
+            let base_ptr = top_tier.as_ptr();
+            let inner_idx = (picked_ptr as usize - base_ptr as usize) / std::mem::size_of::<RuneEntry>();
+            if inner_idx < top_indices.len() {
+                Some(&candidates[top_indices[inner_idx]])
+            } else {
+                // Fallback: shouldn't happen
+                Some(&candidates[top_indices[0]])
             }
-            // Fallback: shouldn't happen, but just return the first top-tier
-            Some(&candidates[top_indices[0]])
         }
+    }
+}
+
+/// Remove stale counter entries for rune names that are no longer registered.
+impl RoundRobinResolver {
+    pub fn remove_counter(&self, rune_name: &str) {
+        self.counters.remove(rune_name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rune::{RuneConfig, make_handler};
+    use crate::invoker::LocalInvoker;
+
+    fn make_entry(name: &str, priority: i32) -> RuneEntry {
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        RuneEntry {
+            config: RuneConfig {
+                name: name.into(),
+                priority,
+                ..Default::default()
+            },
+            invoker: Arc::new(LocalInvoker::new(handler)),
+            caster_id: None,
+        }
+    }
+
+    // MF-6: PriorityResolver should correctly map back to original candidates
+    // even when inner resolver picks non-first entry from the filtered set
+    #[test]
+    fn priority_resolver_maps_back_correctly() {
+        // candidates: [low(0), high(10), high(10)]
+        // PriorityResolver should filter to indices [1, 2] and round-robin among them
+        let inner = Arc::new(RoundRobinResolver::new());
+        let resolver = PriorityResolver::new(inner);
+
+        let candidates = vec![
+            make_entry("low", 0),
+            make_entry("high_a", 10),
+            make_entry("high_b", 10),
+        ];
+
+        // First pick should be high_a (index 1 in original)
+        let picked = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(picked.config.name, "high_a");
+
+        // Second pick should be high_b (index 2 in original)
+        let picked = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(picked.config.name, "high_b");
+
+        // Third pick should round back to high_a
+        let picked = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(picked.config.name, "high_a");
+    }
+
+    #[test]
+    fn priority_resolver_all_same_priority_delegates_directly() {
+        let inner = Arc::new(RoundRobinResolver::new());
+        let resolver = PriorityResolver::new(inner);
+
+        let candidates = vec![
+            make_entry("a", 5),
+            make_entry("b", 5),
+            make_entry("c", 5),
+        ];
+
+        let picked = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(picked.config.name, "a");
+        let picked = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(picked.config.name, "b");
+        let picked = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(picked.config.name, "c");
+    }
+
+    #[test]
+    fn priority_resolver_single_high_always_picked() {
+        let inner = Arc::new(RoundRobinResolver::new());
+        let resolver = PriorityResolver::new(inner);
+
+        let candidates = vec![
+            make_entry("low_a", 1),
+            make_entry("low_b", 1),
+            make_entry("high", 10),
+        ];
+
+        for _ in 0..5 {
+            let picked = resolver.pick("test", &candidates).unwrap();
+            assert_eq!(picked.config.name, "high");
+        }
+    }
+
+    #[test]
+    fn priority_resolver_returns_reference_to_original_candidate() {
+        // Ensure the returned reference points into the original slice,
+        // not a temporary clone
+        let inner = Arc::new(RoundRobinResolver::new());
+        let resolver = PriorityResolver::new(inner);
+
+        let candidates = vec![
+            make_entry("low", 0),
+            make_entry("high", 10),
+        ];
+
+        let picked = resolver.pick("test", &candidates).unwrap();
+        let picked_ptr = picked as *const RuneEntry;
+        let orig_ptr = &candidates[1] as *const RuneEntry;
+        assert_eq!(picked_ptr, orig_ptr, "picked should point to original candidate, not a clone");
+    }
+
+    // NF-7: RoundRobin counter cleanup
+    #[test]
+    fn round_robin_remove_counter_cleans_up() {
+        let resolver = RoundRobinResolver::new();
+        let entries = vec![make_entry("test_rune", 0)];
+
+        // Use the resolver to create a counter entry
+        resolver.pick("test_rune", &entries);
+        assert!(resolver.counters.contains_key("test_rune"));
+
+        // Remove the counter
+        resolver.remove_counter("test_rune");
+        assert!(!resolver.counters.contains_key("test_rune"));
+    }
+
+    #[test]
+    fn round_robin_remove_counter_nonexistent_is_noop() {
+        let resolver = RoundRobinResolver::new();
+        // Should not panic
+        resolver.remove_counter("nonexistent");
     }
 }

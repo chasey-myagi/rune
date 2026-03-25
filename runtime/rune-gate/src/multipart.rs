@@ -21,31 +21,36 @@ pub struct FileMetadata {
 
 /// Sanitize a filename: remove path components, limit length.
 pub fn sanitize_filename(name: &str) -> String {
-    // Extract just the filename part (remove directory components)
-    let name = name
-        .replace('\\', "/")
-        .rsplit('/')
-        .next()
-        .unwrap_or(name)
-        .to_string();
-    // Remove ".." components
-    let name = name.replace("..", "");
-    // Trim leading dots and slashes
-    let name = name.trim_start_matches('/').trim_start_matches('.').to_string();
-    // Limit length to 255 characters
-    if name.len() > 255 {
+    // Normalize Windows backslashes to forward slashes before extraction
+    let normalized = name.replace('\\', "/");
+
+    // Use std::path to safely extract just the file name component
+    let extracted = std::path::Path::new(&normalized)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    // Trim leading dots (prevent hidden files / traversal remnants)
+    let name = extracted.trim_start_matches('.').to_string();
+
+    // If empty after extraction, generate a placeholder
+    if name.is_empty() {
+        return format!("upload_{}", uuid::Uuid::new_v4());
+    }
+
+    // Limit length to 255 characters (char-based, safe for multi-byte UTF-8)
+    if name.chars().count() > 255 {
         // Try to preserve extension
         if let Some(dot_pos) = name.rfind('.') {
-            let ext = &name[dot_pos..];
-            if ext.len() < 255 {
-                let stem_len = 255 - ext.len();
-                return format!("{}{}", &name[..stem_len], ext);
+            let ext: String = name[dot_pos..].to_string();
+            let ext_chars = ext.chars().count();
+            if ext_chars < 255 {
+                let stem_chars = 255 - ext_chars;
+                let stem: String = name.chars().take(stem_chars).collect();
+                return format!("{}{}", stem, ext);
             }
         }
-        name[..255].to_string()
-    } else if name.is_empty() {
-        // Generate a name for empty filenames
-        format!("upload_{}", uuid::Uuid::new_v4())
+        name.chars().take(255).collect()
     } else {
         name
     }
@@ -242,15 +247,16 @@ fn parse_multipart_binary(body: &[u8], boundary: &str) -> Vec<Result<MultipartPa
             part_data
         };
 
-        // Find the header/body separator (double CRLF)
-        let header_end = find_double_crlf(part_data);
-        if header_end.is_none() {
-            // Might be end delimiter or malformed
-            continue;
-        }
-        let header_end = header_end.unwrap();
+        // Find the header/body separator (double CRLF or double LF)
+        let (header_end, sep_len) = match find_double_crlf(part_data) {
+            Some(v) => v,
+            None => {
+                // Might be end delimiter or malformed
+                continue;
+            }
+        };
         let header_bytes = &part_data[..header_end];
-        let body_start = header_end + 4; // skip \r\n\r\n
+        let body_start = header_end + sep_len;
 
         let headers_str = match std::str::from_utf8(header_bytes) {
             Ok(s) => s,
@@ -309,10 +315,18 @@ fn parse_multipart_binary(body: &[u8], boundary: &str) -> Vec<Result<MultipartPa
     results
 }
 
-fn find_double_crlf(data: &[u8]) -> Option<usize> {
+/// Returns (position, separator_length) — separator is either \r\n\r\n (4) or \n\n (2).
+fn find_double_crlf(data: &[u8]) -> Option<(usize, usize)> {
+    // First try standard \r\n\r\n
     for i in 0..data.len().saturating_sub(3) {
         if &data[i..i + 4] == b"\r\n\r\n" {
-            return Some(i);
+            return Some((i, 4));
+        }
+    }
+    // Fallback: try \n\n (some clients send LF-only)
+    for i in 0..data.len().saturating_sub(1) {
+        if &data[i..i + 2] == b"\n\n" {
+            return Some((i, 2));
         }
     }
     None
@@ -375,4 +389,105 @@ pub fn build_multipart_body(
     }
     body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === MF-2 regression tests ===
+
+    #[test]
+    fn test_sanitize_double_dot_bypass() {
+        // "..../file" with single replace("..","") becomes "../file" — must be safe
+        let result = sanitize_filename("..../file.txt");
+        assert!(!result.contains(".."), "should not contain '..' after sanitize, got: {}", result);
+        assert!(!result.contains('/'), "should not contain '/' after sanitize, got: {}", result);
+        assert!(result.contains("file"), "should preserve 'file' part, got: {}", result);
+    }
+
+    #[test]
+    fn test_sanitize_nested_dots_no_slash() {
+        // Pure filename with nested dots should be handled safely
+        let result = sanitize_filename("....secret");
+        assert!(!result.contains(".."), "should not contain '..' after sanitize, got: {}", result);
+    }
+
+    #[test]
+    fn test_sanitize_long_multibyte_no_panic() {
+        // 256 multi-byte chars: byte-level truncation `name[..255]` would panic
+        // on a char boundary. Must use char-based truncation.
+        let long_name: String = "\u{00e9}".repeat(256); // each é is 2 bytes
+        let result = sanitize_filename(&long_name);
+        assert!(result.chars().count() <= 255);
+    }
+
+    #[test]
+    fn test_sanitize_long_with_extension_multibyte() {
+        // Long multibyte stem + extension, the extension-preserving path
+        // would also panic on `&name[..stem_len]` if stem_len is mid-char
+        let stem: String = "\u{00e9}".repeat(250);
+        let name = format!("{}.txt", stem);
+        let result = sanitize_filename(&name);
+        assert!(result.chars().count() <= 255);
+        assert!(result.ends_with(".txt"));
+    }
+
+    #[test]
+    fn test_sanitize_path_traversal() {
+        let result = sanitize_filename("../../etc/passwd");
+        assert!(!result.contains(".."), "got: {}", result);
+        assert_eq!(result, "passwd");
+    }
+
+    #[test]
+    fn test_sanitize_preserves_normal_filename() {
+        assert_eq!(sanitize_filename("photo.jpg"), "photo.jpg");
+        assert_eq!(sanitize_filename("my document.pdf"), "my document.pdf");
+    }
+
+    #[test]
+    fn test_sanitize_strips_directory_components() {
+        assert_eq!(sanitize_filename("/usr/local/bin/test.sh"), "test.sh");
+        assert_eq!(sanitize_filename("C:\\Users\\test\\file.txt"), "file.txt");
+    }
+
+    #[test]
+    fn test_sanitize_long_utf8_filename() {
+        // 300 multi-byte chars should be truncated to 255 chars, not panic
+        let long_name: String = "a".repeat(300);
+        let result = sanitize_filename(&long_name);
+        assert!(result.chars().count() <= 255);
+
+        // Multi-byte chars: should not panic on boundary
+        let long_cjk: String = "\u{4e2d}".repeat(300);
+        let result = sanitize_filename(&long_cjk);
+        assert!(result.chars().count() <= 255);
+    }
+
+    #[test]
+    fn test_sanitize_empty_filename() {
+        let result = sanitize_filename("");
+        assert!(!result.is_empty(), "empty filenames should get a generated name");
+        assert!(result.starts_with("upload_"));
+    }
+
+    #[test]
+    fn test_find_double_crlf_with_lf_only() {
+        // find_double_crlf should also match \n\n as fallback
+        let data = b"Header: value\n\nbody content";
+        let result = find_double_crlf(data);
+        assert!(result.is_some(), "should find \\n\\n as fallback");
+        let (pos, len) = result.unwrap();
+        assert_eq!(pos, 13);
+        assert_eq!(len, 2);
+    }
+
+    #[test]
+    fn test_find_double_crlf_prefers_crlf() {
+        let data = b"Header: value\r\n\r\nbody content";
+        let (pos, len) = find_double_crlf(data).unwrap();
+        assert_eq!(pos, 13);
+        assert_eq!(len, 4);
+    }
 }

@@ -335,6 +335,9 @@ class Caster:
                     )
                 )
             )
+        finally:
+            # NF-8: Always clean up the cancelled set to prevent unbounded growth
+            self._cancelled.discard(req.request_id)
 
     async def _execute_once(
         self,
@@ -346,9 +349,10 @@ class Caster:
         """Execute unary handler."""
         if registered.accepts_files:
             attachments = _extract_attachments(req)
-            output = await registered.handler(ctx, bytes(req.input), attachments)
+            result = registered.handler(ctx, bytes(req.input), attachments)
         else:
-            output = await registered.handler(ctx, bytes(req.input))
+            result = registered.handler(ctx, bytes(req.input))
+        output = await _ensure_awaitable(result)
 
         # Check if cancelled during execution
         if req.request_id in self._cancelled:
@@ -390,9 +394,10 @@ class Caster:
         sender = StreamSender(send_event)
         if registered.accepts_files:
             attachments = _extract_attachments(req)
-            await registered.handler(ctx, bytes(req.input), attachments, sender)
+            result = registered.handler(ctx, bytes(req.input), attachments, sender)
         else:
-            await registered.handler(ctx, bytes(req.input), sender)
+            result = registered.handler(ctx, bytes(req.input), sender)
+        await _ensure_awaitable(result)
 
         # Send StreamEnd
         await outbound_queue.put(
@@ -408,6 +413,19 @@ class Caster:
 # ------------------------------------------------------------------
 # Helpers (module-level)
 # ------------------------------------------------------------------
+
+
+async def _ensure_awaitable(result):
+    """Await a coroutine or return a sync result directly.
+
+    If the handler is a regular (non-async) function its return value
+    is *not* a coroutine and attempting ``await`` on it raises
+    ``TypeError``.  This wrapper detects that case and returns the
+    value as-is, so that sync handlers work transparently.
+    """
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def _handler_accepts_files(fn: Callable) -> bool:

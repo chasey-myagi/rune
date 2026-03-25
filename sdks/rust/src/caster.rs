@@ -28,6 +28,7 @@ pub struct Caster {
     config: CasterConfig,
     caster_id: String,
     runes: Arc<RwLock<HashMap<String, RegisteredRune>>>,
+    shutdown_token: CancellationToken,
 }
 
 impl Caster {
@@ -41,6 +42,7 @@ impl Caster {
             config,
             caster_id,
             runes: Arc::new(RwLock::new(HashMap::new())),
+            shutdown_token: CancellationToken::new(),
         }
     }
 
@@ -72,6 +74,15 @@ impl Caster {
             .get(name)
             .map(|r| r.handler.is_stream())
             .unwrap_or(false)
+    }
+
+    /// Signal the Caster to stop its run loop.
+    ///
+    /// Safe to call from any thread or task. The [`run()`](Self::run) method
+    /// will return shortly after this is called. Idempotent — calling
+    /// multiple times is safe.
+    pub fn stop(&self) {
+        self.shutdown_token.cancel();
     }
 
     /// Check if a rune handler accepts file attachments.
@@ -173,20 +184,34 @@ impl Caster {
     // -----------------------------------------------------------------------
 
     /// Start the Caster (blocking async). Connects to Runtime with auto-reconnect.
+    ///
+    /// Returns when the session ends normally, or when [`stop()`](Self::stop)
+    /// is called, or on unrecoverable error.
     pub async fn run(&self) -> SdkResult<()> {
         let mut delay = Duration::from_secs_f64(self.config.reconnect_base_delay_secs);
         let max_delay = Duration::from_secs_f64(self.config.reconnect_max_delay_secs);
 
         loop {
+            if self.shutdown_token.is_cancelled() {
+                return Ok(());
+            }
             match self.connect_and_run().await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
+                    if self.shutdown_token.is_cancelled() {
+                        return Ok(());
+                    }
                     tracing::warn!(
                         "connection error: {}, reconnecting in {:?}",
                         e,
                         delay
                     );
-                    tokio::time::sleep(delay).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = self.shutdown_token.cancelled() => {
+                            return Ok(());
+                        }
+                    }
                     delay = (delay * 2).min(max_delay);
                 }
             }
@@ -238,7 +263,18 @@ impl Caster {
             Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
         // Message loop
-        while let Some(msg) = inbound.message().await? {
+        loop {
+            let msg = tokio::select! {
+                msg = inbound.message() => {
+                    match msg? {
+                        Some(m) => m,
+                        None => break, // stream ended
+                    }
+                }
+                _ = self.shutdown_token.cancelled() => {
+                    break;
+                }
+            };
             match msg.payload {
                 Some(Payload::AttachAck(ack)) => {
                     if ack.accepted {
@@ -249,7 +285,10 @@ impl Caster {
                         );
                     } else {
                         tracing::error!("attach rejected: {}", ack.reason);
-                        break;
+                        return Err(SdkError::Other(format!(
+                            "attach rejected: {}",
+                            ack.reason
+                        )));
                     }
                 }
                 Some(Payload::Execute(req)) => {

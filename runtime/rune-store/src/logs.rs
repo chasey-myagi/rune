@@ -191,10 +191,10 @@ impl RuneStore {
             for r in rows {
                 let (name, lat) = r?;
                 if name != current_name {
-                    if !current_name.is_empty() {
+                    if !current_name.is_empty() && !current_lats.is_empty() {
                         let idx = ((current_lats.len() as f64 * 0.95).ceil() as usize)
                             .min(current_lats.len())
-                            - 1;
+                            .saturating_sub(1);
                         p95_map.push((std::mem::take(&mut current_name), current_lats[idx] as f64));
                         current_lats.clear();
                     }
@@ -202,10 +202,10 @@ impl RuneStore {
                 }
                 current_lats.push(lat);
             }
-            if !current_name.is_empty() {
+            if !current_name.is_empty() && !current_lats.is_empty() {
                 let idx = ((current_lats.len() as f64 * 0.95).ceil() as usize)
                     .min(current_lats.len())
-                    - 1;
+                    .saturating_sub(1);
                 p95_map.push((current_name, current_lats[idx] as f64));
             }
 
@@ -230,5 +230,47 @@ impl RuneStore {
             Ok((grand_total, results))
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::store::RuneStore;
+
+    #[tokio::test]
+    async fn test_call_stats_enhanced_empty_no_panic() {
+        // NF-11: call_stats_enhanced must not panic on empty data
+        let store = RuneStore::open_in_memory().unwrap();
+        let (total, results) = store.call_stats_enhanced().await.unwrap();
+        assert_eq!(total, 0);
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_call_stats_enhanced_with_data() {
+        use crate::models::CallLog;
+
+        let store = RuneStore::open_in_memory().unwrap();
+        let log = CallLog {
+            id: 0,
+            request_id: "r1".into(),
+            rune_name: "echo".into(),
+            mode: "sync".into(),
+            caster_id: None,
+            latency_ms: 100,
+            status_code: 200,
+            input_size: 10,
+            output_size: 20,
+            timestamp: "2025-01-01T00:00:00Z".into(),
+        };
+        store.insert_log(&log).await.unwrap();
+
+        let (total, results) = store.call_stats_enhanced().await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "echo");
+        assert_eq!(results[0].1, 1); // count
+        // P95 of a single value should be that value
+        assert!((results[0].4 - 100.0).abs() < 0.01, "p95 should be 100.0, got {}", results[0].4);
     }
 }

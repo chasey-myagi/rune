@@ -109,6 +109,32 @@ impl RuneStore {
         .await?
     }
 
+    /// Atomically complete a task only if it has not been cancelled.
+    /// Returns `true` if the row was updated, `false` if the task was already cancelled.
+    pub async fn complete_task_if_not_cancelled(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) -> StoreResult<bool> {
+        let conn = self.conn.clone();
+        let task_id = task_id.to_string();
+        let output = output.map(|s| s.to_string());
+        let error = error.map(|s| s.to_string());
+        tokio::task::spawn_blocking(move || {
+            let now = timestamp_now();
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let rows = conn.execute(
+                "UPDATE tasks SET status = ?1, output = ?2, error = ?3, \
+                 completed_at = ?4 WHERE task_id = ?5 AND status != 'cancelled'",
+                rusqlite::params![status.as_str(), output, error, now, task_id],
+            )?;
+            Ok(rows > 0)
+        })
+        .await?
+    }
+
     pub async fn list_tasks(
         &self,
         status: Option<TaskStatus>,

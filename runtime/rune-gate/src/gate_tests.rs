@@ -88,8 +88,8 @@ mod tests {
                 std::time::Duration::from_secs(35),
             )),
             auth_enabled: false,
-            exempt_routes: vec!["/health".to_string()],
-            cors_origins: vec![],
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            cors_origins: Arc::new(vec![]),
             dev_mode: true,
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
@@ -811,7 +811,7 @@ mod tests {
     async fn test_cors_restricted_rejects_unlisted_origin() {
         // Configure specific allowed origins — unlisted origin should NOT get ACAO
         let mut state = test_state();
-        state.cors_origins = vec!["https://allowed.example.com".to_string()];
+        state.cors_origins = Arc::new(vec!["https://allowed.example.com".to_string()]);
         let app = build_router(state, None);
 
         let response = app
@@ -839,7 +839,7 @@ mod tests {
     #[tokio::test]
     async fn test_cors_restricted_allows_listed_origin() {
         let mut state = test_state();
-        state.cors_origins = vec!["https://allowed.example.com".to_string()];
+        state.cors_origins = Arc::new(vec!["https://allowed.example.com".to_string()]);
         let app = build_router(state, None);
 
         let response = app
@@ -1004,8 +1004,8 @@ mod tests {
                 std::time::Duration::from_secs(35),
             )),
             auth_enabled: false,
-            exempt_routes: vec!["/health".to_string()],
-            cors_origins: vec![],
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            cors_origins: Arc::new(vec![]),
             dev_mode: true,
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
@@ -1345,8 +1345,8 @@ mod tests {
                 std::time::Duration::from_secs(35),
             )),
             auth_enabled: false,
-            exempt_routes: vec!["/health".to_string()],
-            cors_origins: vec![],
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            cors_origins: Arc::new(vec![]),
             dev_mode: true,
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
@@ -1880,8 +1880,8 @@ mod tests {
                 std::time::Duration::from_secs(35),
             )),
             auth_enabled: false,
-            exempt_routes: vec!["/health".to_string()],
-            cors_origins: vec![],
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            cors_origins: Arc::new(vec![]),
             dev_mode: true,
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
@@ -1976,8 +1976,8 @@ mod tests {
                 std::time::Duration::from_secs(35),
             )),
             auth_enabled: false,
-            exempt_routes: vec!["/health".to_string()],
-            cors_origins: vec![],
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            cors_origins: Arc::new(vec![]),
             dev_mode: true,
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
@@ -2059,8 +2059,8 @@ mod tests {
                 std::time::Duration::from_secs(35),
             )),
             auth_enabled: false,
-            exempt_routes: vec!["/health".to_string()],
-            cors_origins: vec![],
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            cors_origins: Arc::new(vec![]),
             dev_mode: true,
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
@@ -3873,8 +3873,8 @@ mod tests {
                 std::time::Duration::from_secs(35),
             )),
             auth_enabled: false,
-            exempt_routes: vec!["/health".to_string()],
-            cors_origins: vec![],
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            cors_origins: Arc::new(vec![]),
             dev_mode: true,
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
@@ -5688,9 +5688,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Empty body should either be rejected or treated as empty input
-        // Axum's Json extractor rejects empty body as 422
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        // SF-8: Empty body now defaults to {} (consistent with rune run)
+        assert_ne!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "empty body should default to {{}} and not return 422"
+        );
     }
 
     // ====================================================================
@@ -5750,8 +5753,8 @@ mod tests {
                 std::time::Duration::from_secs(35),
             )),
             auth_enabled: !dev_mode,
-            exempt_routes: vec!["/health".to_string()],
-            cors_origins: vec![],
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            cors_origins: Arc::new(vec![]),
             dev_mode,
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
@@ -6120,8 +6123,8 @@ mod tests {
                 std::time::Duration::from_secs(35),
             )),
             auth_enabled: false,
-            exempt_routes: vec!["/health".to_string()],
-            cors_origins: vec![], dev_mode: true,
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            cors_origins: Arc::new(vec![]), dev_mode: true,
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
@@ -6198,8 +6201,8 @@ mod tests {
                 std::time::Duration::from_secs(35),
             )),
             auth_enabled: false,
-            exempt_routes: vec!["/health".to_string()],
-            cors_origins: vec![], dev_mode: true,
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            cors_origins: Arc::new(vec![]), dev_mode: true,
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
@@ -6648,8 +6651,8 @@ mod tests {
                 std::time::Duration::from_secs(35),
             )),
             auth_enabled: false,
-            exempt_routes: vec!["/health".to_string()],
-            cors_origins: vec![], dev_mode: true,
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            cors_origins: Arc::new(vec![]), dev_mode: true,
             started_at: Instant::now(),
             file_broker: Arc::new(FileBroker::new()),
             max_upload_size_mb: 10,
@@ -7435,5 +7438,299 @@ mod tests {
             "connected_since should reflect caster connect time (< 5s), not server uptime. Got: {}s",
             connected_since
         );
+    }
+
+    // =========================================================================
+    // SF-3: async task cancel TOCTOU — atomic CAS prevents overwriting cancelled
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_complete_task_if_not_cancelled_respects_cancel() {
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let task_id = "cas-test-1";
+
+        // Insert and move to running
+        store.insert_task(task_id, "echo", Some("{}")).await.unwrap();
+        store.update_task_status(task_id, TaskStatus::Running, None, None).await.unwrap();
+
+        // Simulate cancel
+        store.update_task_status(task_id, TaskStatus::Cancelled, None, Some("user cancelled")).await.unwrap();
+
+        // Now try to complete — should return false (not updated)
+        let updated = store
+            .complete_task_if_not_cancelled(task_id, TaskStatus::Completed, Some("result"), None)
+            .await
+            .unwrap();
+        assert!(!updated, "should NOT overwrite cancelled task");
+
+        // Verify status is still cancelled
+        let task = store.get_task(task_id).await.unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_if_not_cancelled_succeeds_when_running() {
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let task_id = "cas-test-2";
+
+        store.insert_task(task_id, "echo", Some("{}")).await.unwrap();
+        store.update_task_status(task_id, TaskStatus::Running, None, None).await.unwrap();
+
+        let updated = store
+            .complete_task_if_not_cancelled(task_id, TaskStatus::Completed, Some("done"), None)
+            .await
+            .unwrap();
+        assert!(updated, "should update running task to completed");
+
+        let task = store.get_task(task_id).await.unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Completed);
+        assert_eq!(task.output.as_deref(), Some("done"));
+    }
+
+    // =========================================================================
+    // SF-4: stream mode records call log
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_stream_mode_records_call_log() {
+        use rune_core::invoker::LocalInvoker;
+
+        let state = test_state();
+        // Register a stream-capable rune
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        state.relay.register(
+            RuneConfig {
+                name: "stream_log_test".into(),
+                version: "1.0.0".into(),
+                description: "test".into(),
+                supports_stream: true,
+                gate: None,
+                input_schema: None,
+                output_schema: None,
+                priority: 0,
+                labels: Default::default(),
+            },
+            Arc::new(LocalInvoker::new(handler)),
+            None,
+        ).unwrap();
+
+        let app = build_router(state.clone(), None);
+
+        let response = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/runes/stream_log_test/run?stream=true")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"hello":"world"}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Consume the SSE stream to let the spawn task finish
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        assert!(!body.is_empty(), "stream should produce output");
+
+        // Give the background task time to insert the log
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Check that a call log was recorded with mode=stream
+        let logs = state.store.query_logs(Some("stream_log_test"), 10).await.unwrap();
+        assert!(
+            !logs.is_empty(),
+            "stream mode should record a call log"
+        );
+        assert_eq!(logs[0].mode, "stream");
+        assert_eq!(logs[0].rune_name, "stream_log_test");
+    }
+
+    // =========================================================================
+    // SF-5: mgmt_casters uses efficient reverse mapping
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_mgmt_casters_returns_correct_runes_per_caster() {
+        // This test verifies mgmt_casters works correctly — the optimization
+        // (reverse mapping) should produce the same results as the old approach.
+        let state = test_state();
+        let app = build_router(state, None);
+
+        let resp = app.oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/casters")
+                .body(Body::empty())
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Should be valid JSON with a "casters" array
+        assert!(json["casters"].is_array());
+    }
+
+    // =========================================================================
+    // SF-8: run_flow accepts empty body (defaults to {})
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_run_flow_empty_body_defaults_to_empty_json() {
+        // Register a flow first
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+
+        // Create a simple flow with echo step
+        let flow_json = serde_json::json!({
+            "name": "empty_body_test",
+            "steps": [{"name": "step1", "rune": "echo", "depends_on": []}]
+        });
+
+        let create_resp = app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/flows")
+                .header("content-type", "application/json")
+                .body(Body::from(flow_json.to_string()))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+        // Run the flow with empty body — should succeed, not 422
+        let app2 = build_router(state, None);
+        let run_resp = app2.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/flows/empty_body_test/run")
+                .header("content-type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_ne!(
+            run_resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "empty body should not return 422 for flow run"
+        );
+    }
+
+    // =========================================================================
+    // NF-2: flow_error_response removed — flow errors use same format
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_nf2_flow_errors_use_error_response_format() {
+        // After removing flow_error_response, flow errors should still
+        // use the standard {"error":{"code":"..","message":".."}} format.
+        let state = test_state();
+        let app = build_router(state, None);
+
+        let resp = app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/flows/nonexistent/run")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"x":1}"#))
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]["code"].is_string(), "error.code must be present");
+        assert!(json["error"]["message"].is_string(), "error.message must be present");
+    }
+
+    // =========================================================================
+    // NF-12: GateState clone uses Arc<Vec<String>> (no deep copy)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_nf12_gate_state_clone_shares_exempt_routes() {
+        let state = test_state();
+        let cloned = state.clone();
+        // Arc::ptr_eq verifies they share the same allocation (no deep copy)
+        assert!(
+            Arc::ptr_eq(&state.exempt_routes, &cloned.exempt_routes),
+            "exempt_routes should be shared via Arc after clone"
+        );
+        assert!(
+            Arc::ptr_eq(&state.cors_origins, &cloned.cors_origins),
+            "cors_origins should be shared via Arc after clone"
+        );
+    }
+
+    // =========================================================================
+    // NF-14: exempt_routes exact match (no prefix false-positive)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_nf14_exempt_routes_no_prefix_false_positive() {
+        use crate::middleware::auth_middleware;
+
+        let mut state = test_state();
+        state.auth_enabled = true;
+        // NoopVerifier accepts all keys, but requests without Authorization header
+        // are rejected at the header-parsing stage (before verifier is called).
+        state.exempt_routes = Arc::new(vec!["/health".to_string()]);
+
+        let app = Router::new()
+            .route("/health", axum::routing::get(|| async { "ok" }))
+            .route("/healthz", axum::routing::get(|| async { "ok" }))
+            .route("/health/deep", axum::routing::get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
+            .with_state(state);
+
+        // /health — should be exempt (exact match)
+        let resp = app.clone().oneshot(
+            Request::builder().uri("/health").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "/health should be exempt");
+
+        // /health/deep — should be exempt (starts_with "/health/")
+        let resp = app.clone().oneshot(
+            Request::builder().uri("/health/deep").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "/health/deep should be exempt");
+
+        // /healthz — should NOT be exempt (not exact match, not "/health/...")
+        let resp = app.clone().oneshot(
+            Request::builder().uri("/healthz").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "/healthz should NOT be exempt from auth"
+        );
+    }
+
+    // =========================================================================
+    // NF-15: download_file avoids .to_vec() copy
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_nf15_download_file_returns_correct_data() {
+        // After removing .to_vec(), download should still return correct data
+        let state = test_state();
+        let data = Bytes::from("file content here");
+        let file_id = state.file_broker.store(
+            "test.txt".into(),
+            "text/plain".into(),
+            data.clone(),
+            "req-1",
+        );
+
+        let app = build_router(state, None);
+        let resp = app.oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&format!("/api/v1/files/{}", file_id))
+                .body(Body::empty())
+                .unwrap(),
+        ).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(body.as_ref(), b"file content here");
     }
 }

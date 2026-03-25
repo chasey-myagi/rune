@@ -14,7 +14,7 @@ impl RuneStore {
         let label = label.to_string();
         tokio::task::spawn_blocking(move || {
             let raw_key = generate_raw_key();
-            let key_prefix = format!("rk_{}", &raw_key[3..11]);
+            let key_prefix = format!("rk_{}", &raw_key[3..19]);
             let key_hash = hash_key(&raw_key);
             let now = now_iso8601();
             let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -57,11 +57,19 @@ impl RuneStore {
                  FROM api_keys WHERE key_hash = ?1",
             )?;
             let result = stmt.query_row(rusqlite::params![key_hash], |row| {
+                let key_type_str = row.get::<_, String>(3)?;
+                let key_type = KeyType::from_str(&key_type_str).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        format!("unknown key_type: '{}'", key_type_str).into(),
+                    )
+                })?;
                 Ok(ApiKey {
                     id: row.get(0)?,
                     key_prefix: row.get(1)?,
                     key_hash: row.get::<_, String>(2).ok(),
-                    key_type: KeyType::from_str(&row.get::<_, String>(3)?).unwrap_or(KeyType::Gate),
+                    key_type,
                     label: row.get(4)?,
                     created_at: row.get(5)?,
                     revoked_at: row.get(6)?,
@@ -94,12 +102,19 @@ impl RuneStore {
             )?;
             let keys = stmt
                 .query_map([], |row| {
+                    let key_type_str = row.get::<_, String>(2)?;
+                    let key_type = KeyType::from_str(&key_type_str).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            format!("unknown key_type: '{}'", key_type_str).into(),
+                        )
+                    })?;
                     Ok(ApiKey {
                         id: row.get(0)?,
                         key_prefix: row.get(1)?,
                         key_hash: None,
-                        key_type: KeyType::from_str(&row.get::<_, String>(2)?)
-                            .unwrap_or(KeyType::Gate),
+                        key_type,
                         label: row.get(3)?,
                         created_at: row.get(4)?,
                         revoked_at: row.get(5)?,
@@ -139,36 +154,46 @@ fn hash_key(raw_key: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Delegates to the canonical implementation in `rune_core::time_utils`.
 pub fn now_iso8601() -> String {
-    use std::time::SystemTime;
-    let dur = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap();
-    let secs = dur.as_secs();
-    let days = secs / 86400;
-    let time_secs = secs % 86400;
-    let hours = time_secs / 3600;
-    let minutes = (time_secs % 3600) / 60;
-    let seconds = time_secs % 60;
-    let (year, month, day) = days_to_ymd(days);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hours, minutes, seconds
-    )
-}
-
-pub(crate) fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    days += 719468;
-    let era = days / 146097;
-    let doe = days - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+    rune_core::time_utils::now_iso8601()
 }
 
 pub(crate) use now_iso8601 as timestamp_now;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::KeyType;
+
+    #[tokio::test]
+    async fn test_key_prefix_has_sufficient_entropy() {
+        // key_prefix should be "rk_" + 16 hex chars (8 bytes = 64 bit)
+        let store = crate::store::RuneStore::open_in_memory().unwrap();
+        let result = store.create_key(KeyType::Gate, "test").await.unwrap();
+
+        let prefix = &result.api_key.key_prefix;
+        assert!(prefix.starts_with("rk_"), "prefix should start with rk_, got: {}", prefix);
+        // "rk_" (3 chars) + 16 hex chars = 19 chars total
+        assert_eq!(prefix.len(), 19, "prefix should be 19 chars (rk_ + 16 hex), got {} ({} chars)", prefix, prefix.len());
+
+        // The hex part after "rk_" should be valid hex
+        let hex_part = &prefix[3..];
+        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "prefix hex part should be valid hex, got: {}", hex_part);
+    }
+
+    #[tokio::test]
+    async fn test_key_prefix_uniqueness() {
+        // With only 32-bit prefix, collision probability is high for moderate key counts.
+        // With 64-bit prefix, collisions should be extremely rare.
+        let store = crate::store::RuneStore::open_in_memory().unwrap();
+        let mut prefixes = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let result = store.create_key(KeyType::Gate, "test").await.unwrap();
+            prefixes.insert(result.api_key.key_prefix);
+        }
+        // All 100 prefixes should be unique with 64-bit entropy
+        assert_eq!(prefixes.len(), 100, "all key prefixes should be unique");
+    }
+}

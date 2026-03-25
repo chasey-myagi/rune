@@ -23,8 +23,8 @@ pub struct GateState {
     pub key_verifier: Arc<dyn KeyVerifier>,
     pub session_mgr: Arc<rune_core::session::SessionManager>,
     pub auth_enabled: bool,
-    pub exempt_routes: Vec<String>,
-    pub cors_origins: Vec<String>,
+    pub exempt_routes: Arc<Vec<String>>,
+    pub cors_origins: Arc<Vec<String>>,
     pub dev_mode: bool,
     pub started_at: Instant,
     pub file_broker: Arc<FileBroker>,
@@ -59,9 +59,6 @@ pub fn unique_request_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let ts = rune_core::time_utils::now_ms();
     format!("r-{:x}-{:x}", ts, seq)
 }

@@ -616,3 +616,69 @@ async fn test_rust_stream_sender_new_requires_channel() {
     // Should be usable
     assert!(!sender.is_ended());
 }
+
+// ============================================================================
+// NF-9: Caster should have a shutdown/stop mechanism
+// ============================================================================
+
+#[test]
+fn test_nf9_caster_has_stop_method() {
+    let caster = Caster::new(CasterConfig::default());
+    // stop() should exist and be callable without panicking
+    caster.stop();
+}
+
+#[test]
+fn test_nf9_stop_is_idempotent() {
+    let caster = Caster::new(CasterConfig::default());
+    caster.stop();
+    caster.stop();
+    caster.stop();
+    // No panic
+}
+
+#[tokio::test]
+async fn test_nf9_run_exits_after_stop() {
+    let caster = std::sync::Arc::new(Caster::new(CasterConfig {
+        runtime: "localhost:59999".into(), // unreachable port
+        reconnect_base_delay_secs: 0.1,
+        reconnect_max_delay_secs: 0.2,
+        ..Default::default()
+    }));
+
+    let caster_clone = caster.clone();
+    // Call stop() after a short delay — run() should exit
+    let stop_handle = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        caster_clone.stop();
+    });
+
+    // run() should not hang forever; it should exit after stop() is called
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        caster.run(),
+    )
+    .await;
+
+    stop_handle.await.unwrap();
+
+    // Should complete (not timeout), and the result should be Ok or an error
+    assert!(result.is_ok(), "run() should have exited after stop()");
+}
+
+// ============================================================================
+// NF-16: attach rejected should return Err, not Ok(())
+// ============================================================================
+
+// Note: NF-16 is tested structurally. The fix changes the attach rejected path
+// from `break` (which returns Ok(())) to `return Err(...)`.
+// A full integration test would require a mock gRPC server.
+// We verify via code inspection that the error path is correct.
+// The following test verifies SdkError::Other can hold the reject message.
+#[test]
+fn test_nf16_sdk_error_other_for_attach_rejected() {
+    let err = SdkError::Other("attach rejected: unauthorized".into());
+    assert_eq!(err.to_string(), "attach rejected: unauthorized");
+    // Verify it's the right variant
+    assert!(matches!(err, SdkError::Other(_)));
+}

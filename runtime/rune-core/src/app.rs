@@ -25,13 +25,8 @@ pub struct App {
     pub config: AppConfig,
 }
 
-/// Components returned by `App::build()` for custom server setup.
-pub struct RunningApp {
-    pub relay: Arc<Relay>,
-    pub resolver: Arc<dyn Resolver>,
-    pub session_mgr: Arc<SessionManager>,
-    pub config: AppConfig,
-}
+/// Type alias for backward compatibility — `RunningApp` is identical to `App`.
+pub type RunningApp = App;
 
 impl App {
     pub fn new() -> Self {
@@ -121,13 +116,9 @@ impl App {
     }
 
     /// Finalize configuration and return components for custom server setup.
-    pub fn build(self) -> RunningApp {
-        RunningApp {
-            relay: self.relay,
-            resolver: self.resolver,
-            session_mgr: self.session_mgr,
-            config: self.config,
-        }
+    /// Returns `Self` (aliased as `RunningApp` for backward compatibility).
+    pub fn build(self) -> App {
+        self
     }
 }
 

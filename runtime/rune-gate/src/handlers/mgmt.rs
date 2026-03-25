@@ -79,21 +79,27 @@ pub async fn mgmt_status(State(state): State<GateState>) -> impl IntoResponse {
 
 pub async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
     let caster_ids = state.session_mgr.list_caster_ids();
+
+    // Build caster_id → rune names reverse mapping in one pass over entries
+    let mut caster_runes: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (name, _) in state.relay.list() {
+        if let Some(entries) = state.relay.find(&name) {
+            for e in entries.value() {
+                if let Some(ref cid) = e.caster_id {
+                    caster_runes
+                        .entry(cid.clone())
+                        .or_default()
+                        .push(name.clone());
+                }
+            }
+        }
+    }
+
     let casters: Vec<serde_json::Value> = caster_ids
         .iter()
         .map(|cid| {
-            // Collect rune names registered by this caster
-            let runes: Vec<String> = state.relay.list()
-                .iter()
-                .filter_map(|(name, _)| {
-                    if let Some(entries) = state.relay.find(name) {
-                        if entries.value().iter().any(|e| e.caster_id.as_deref() == Some(cid)) {
-                            return Some(name.clone());
-                        }
-                    }
-                    None
-                })
-                .collect();
+            let runes = caster_runes.remove(cid.as_str()).unwrap_or_default();
             let current_load = state.session_mgr.available_permits(cid);
             serde_json::json!({
                 "caster_id": cid,

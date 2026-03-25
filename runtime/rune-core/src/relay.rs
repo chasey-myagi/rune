@@ -35,29 +35,34 @@ impl Relay {
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         // Check gate.path conflict: different rune_name with same path+method is a hard error
+        // Uses gate_path_index for O(1) lookup instead of iterating all entries.
         if let Some(ref gate) = config.gate {
-            for entry in self.entries.iter() {
-                for e in entry.value() {
-                    if let Some(ref existing_gate) = e.config.gate {
-                        if existing_gate.path == gate.path
-                            && existing_gate.method == gate.method
-                            && e.config.name != config.name
-                        {
-                            return Err(format!(
-                                "route conflict: '{}' and '{}' both declare gate path '{}' method '{}'",
-                                e.config.name, config.name, gate.path, gate.method
-                            ));
-                        }
-                    }
+            let index_key = format!("{}:{}", gate.method, gate.path);
+            if let Some(existing_name) = self.gate_path_index.get(&index_key) {
+                if *existing_name != config.name {
+                    return Err(format!(
+                        "route conflict: '{}' and '{}' both declare gate path '{}' method '{}'",
+                        *existing_name, config.name, gate.path, gate.method
+                    ));
                 }
             }
-            // Also check conflict with reserved management routes
-            let reserved = ["/health", "/api/v1/runes", "/api/v1/tasks", "/api/v1/flows"];
-            for r in reserved {
-                if gate.path == r || gate.path.starts_with(&format!("{}/", r)) {
+            // Also check conflict with reserved management routes.
+            // Reserve the entire /api/v1/ prefix for management routes.
+            let reserved_exact = ["/health"];
+            let reserved_prefixes = ["/api/v1/"];
+            for r in reserved_exact {
+                if gate.path == r {
                     return Err(format!(
                         "route conflict: gate path '{}' conflicts with management route '{}'",
                         gate.path, r
+                    ));
+                }
+            }
+            for prefix in reserved_prefixes {
+                if gate.path.starts_with(prefix) {
+                    return Err(format!(
+                        "route conflict: gate path '{}' conflicts with reserved management prefix '{}'",
+                        gate.path, prefix
                     ));
                 }
             }
@@ -159,11 +164,12 @@ impl Relay {
         self.gate_path_index.get(&key).map(|r| r.value().clone())
     }
 
-    /// 列出所有已注册 Rune 的名称和 gate path
+    /// 列出所有已注册 Rune 的名称和 gate path（按 name 去重，每个 rune 只返回一条）
     pub fn list(&self) -> Vec<(String, Option<String>)> {
         let mut result = Vec::new();
         for entry in self.entries.iter() {
-            for e in entry.value() {
+            // Take the first entry per rune name (all candidates share the same name)
+            if let Some(e) = entry.value().first() {
                 let gate_path = e.config.gate.as_ref().map(|g| g.path.clone());
                 result.push((e.config.name.clone(), gate_path));
             }
@@ -453,7 +459,7 @@ mod tests {
         let result = relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("/api/v1/runes"), "error should mention the reserved prefix, got: {}", err);
+        assert!(err.contains("/api/v1/"), "error should mention the reserved prefix, got: {}", err);
     }
 
     // ---- Scenario 9: list() method ----
@@ -513,14 +519,13 @@ mod tests {
         }, Arc::new(crate::invoker::LocalInvoker::new(h3)), Some("c2".into())).unwrap();
 
         let list = relay.list();
-        assert_eq!(list.len(), 3);
+        // SF-7: list() deduplicates by rune name, so "echo" (2 casters) counts once
+        assert_eq!(list.len(), 2);
 
         // Verify the entries contain the expected names and gate paths
         let echo_entries: Vec<_> = list.iter().filter(|(n, _)| n == "echo").collect();
-        assert_eq!(echo_entries.len(), 2);
-        for (_, gate_path) in &echo_entries {
-            assert_eq!(gate_path.as_deref(), Some("/api/echo"));
-        }
+        assert_eq!(echo_entries.len(), 1);
+        assert_eq!(echo_entries[0].1.as_deref(), Some("/api/echo"));
 
         let translate_entries: Vec<_> = list.iter().filter(|(n, _)| n == "translate").collect();
         assert_eq!(translate_entries.len(), 1);
@@ -664,20 +669,22 @@ mod tests {
             ).unwrap();
         }
 
-        // Verify 5 entries
+        // Verify 1 entry in list (deduped by name) but 5 candidates internally
         let list: Vec<_> = relay.list().into_iter()
             .filter(|(n, _)| n == "shared_rune").collect();
-        assert_eq!(list.len(), 5);
+        assert_eq!(list.len(), 1);
+        assert_eq!(relay.find("shared_rune").unwrap().value().len(), 5);
 
         // Remove casters c0, c1, c2
         relay.remove_caster("c0");
         relay.remove_caster("c1");
         relay.remove_caster("c2");
 
-        // Verify 2 remaining entries
+        // Verify still 1 entry in list (deduped) but 2 candidates internally
         let list: Vec<_> = relay.list().into_iter()
             .filter(|(n, _)| n == "shared_rune").collect();
-        assert_eq!(list.len(), 2);
+        assert_eq!(list.len(), 1);
+        assert_eq!(relay.find("shared_rune").unwrap().value().len(), 2);
 
         // Rune should still be resolvable
         assert!(relay.resolve("shared_rune", &resolver).is_some());
@@ -718,25 +725,30 @@ mod tests {
         // Register A
         let h_a = make_handler(|_ctx, _input| async { Ok(Bytes::from("A")) });
         relay.register(make_cfg(), Arc::new(crate::invoker::LocalInvoker::new(h_a)), Some("A".into())).unwrap();
-        assert_eq!(relay.list().len(), 1);
+        assert_eq!(relay.list().len(), 1); // 1 rune name
+        assert_eq!(relay.find("interleaved").unwrap().value().len(), 1);
 
-        // Register B
+        // Register B (same rune name, different caster)
         let h_b = make_handler(|_ctx, _input| async { Ok(Bytes::from("B")) });
         relay.register(make_cfg(), Arc::new(crate::invoker::LocalInvoker::new(h_b)), Some("B".into())).unwrap();
-        assert_eq!(relay.list().len(), 2);
+        assert_eq!(relay.list().len(), 1); // still 1 rune name (deduped)
+        assert_eq!(relay.find("interleaved").unwrap().value().len(), 2);
 
         // Remove A
         relay.remove_caster("A");
         assert_eq!(relay.list().len(), 1);
+        assert_eq!(relay.find("interleaved").unwrap().value().len(), 1);
 
         // Register C
         let h_c = make_handler(|_ctx, _input| async { Ok(Bytes::from("C")) });
         relay.register(make_cfg(), Arc::new(crate::invoker::LocalInvoker::new(h_c)), Some("C".into())).unwrap();
-        assert_eq!(relay.list().len(), 2);
+        assert_eq!(relay.list().len(), 1); // still 1 rune name
+        assert_eq!(relay.find("interleaved").unwrap().value().len(), 2);
 
         // Remove B
         relay.remove_caster("B");
         assert_eq!(relay.list().len(), 1);
+        assert_eq!(relay.find("interleaved").unwrap().value().len(), 1);
 
         // Only C should remain
         assert!(relay.resolve("interleaved", &resolver).is_some());
@@ -787,14 +799,10 @@ mod tests {
 
         let list: Vec<_> = relay.list().into_iter()
             .filter(|(n, _)| n == "multi_path_rune").collect();
-        assert_eq!(list.len(), 2);
-
-        // Both gate paths should be present
-        let paths: Vec<_> = list.iter()
-            .map(|(_, p)| p.as_deref().unwrap_or(""))
-            .collect();
-        assert!(paths.contains(&"/api/path_a"));
-        assert!(paths.contains(&"/api/path_b"));
+        // SF-7: deduped by name — only one entry in list
+        assert_eq!(list.len(), 1);
+        // But both candidates exist internally
+        assert_eq!(relay.find("multi_path_rune").unwrap().value().len(), 2);
     }
 
     // ---- Gate path with query string ----
@@ -878,7 +886,7 @@ mod tests {
             ).unwrap();
         }
 
-        assert_eq!(relay.list().len(), 3);
+        assert_eq!(relay.list().len(), 1); // deduped: 3 casters, 1 rune name
         assert!(relay.resolve("doomed_rune", &resolver).is_some());
 
         // Remove all casters one by one
@@ -1911,5 +1919,161 @@ mod tests {
                 has_entry_with_path, index_has_path
             );
         }
+    }
+
+    // SF-7: list() should deduplicate by rune name
+    #[test]
+    fn test_list_deduplicates_by_name() {
+        let relay = Relay::new();
+        let cfg = || RuneConfig {
+            name: "echo".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: None,
+            input_schema: None,
+            output_schema: None,
+            priority: 0, labels: Default::default(),
+        };
+
+        // Register same rune from 3 different casters
+        for i in 0..3 {
+            let handler = make_handler(|_ctx, input| async move { Ok(input) });
+            relay.register(
+                cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some(format!("c{}", i)),
+            ).unwrap();
+        }
+
+        let list = relay.list();
+        assert_eq!(list.len(), 1, "same rune name from 3 casters should appear once in list");
+        assert_eq!(list[0].0, "echo");
+
+        // But internal entries should have all 3 candidates
+        assert_eq!(relay.find("echo").unwrap().value().len(), 3);
+    }
+
+    // ---- NF-3: gate_path_index O(1) conflict check ----
+
+    #[test]
+    fn test_gate_path_conflict_uses_index() {
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, input| async move { Ok(input) });
+        let h2 = make_handler(|_ctx, input| async move { Ok(input) });
+
+        let config1 = RuneConfig {
+            name: "rune_a".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/action".into(),
+                method: "POST".into(),
+            }),
+            input_schema: None, output_schema: None,
+            priority: 0, labels: Default::default(),
+        };
+        relay.register(config1, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
+
+        let config2 = RuneConfig {
+            name: "rune_b".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/action".into(),
+                method: "POST".into(),
+            }),
+            input_schema: None, output_schema: None,
+            priority: 0, labels: Default::default(),
+        };
+        let result = relay.register(config2, Arc::new(crate::invoker::LocalInvoker::new(h2)), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("route conflict"));
+    }
+
+    #[test]
+    fn test_gate_path_index_allows_same_rune_name() {
+        let relay = Relay::new();
+        let h1 = make_handler(|_ctx, input| async move { Ok(input) });
+        let h2 = make_handler(|_ctx, input| async move { Ok(input) });
+
+        let config = RuneConfig {
+            name: "scaling_rune".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/scale".into(),
+                method: "POST".into(),
+            }),
+            input_schema: None, output_schema: None,
+            priority: 0, labels: Default::default(),
+        };
+
+        relay.register(config.clone(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
+        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c2".into())).unwrap();
+    }
+
+    // NF-4: reserved routes should block all /api/v1/ paths
+    #[test]
+    fn test_reserved_route_keys() {
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let config = RuneConfig {
+            name: "my_rune".into(),
+            gate: Some(crate::rune::GateConfig { path: "/api/v1/keys".into(), method: "GET".into() }),
+            ..Default::default()
+        };
+        assert!(relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).is_err());
+    }
+
+    #[test]
+    fn test_reserved_route_casters() {
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let config = RuneConfig {
+            name: "my_rune".into(),
+            gate: Some(crate::rune::GateConfig { path: "/api/v1/casters".into(), method: "GET".into() }),
+            ..Default::default()
+        };
+        assert!(relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).is_err());
+    }
+
+    #[test]
+    fn test_reserved_route_openapi_json() {
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let config = RuneConfig {
+            name: "my_rune".into(),
+            gate: Some(crate::rune::GateConfig { path: "/api/v1/openapi.json".into(), method: "GET".into() }),
+            ..Default::default()
+        };
+        assert!(relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).is_err());
+    }
+
+    #[test]
+    fn test_reserved_route_status() {
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let config = RuneConfig {
+            name: "my_rune".into(),
+            gate: Some(crate::rune::GateConfig { path: "/api/v1/status".into(), method: "GET".into() }),
+            ..Default::default()
+        };
+        assert!(relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).is_err());
+    }
+
+    #[test]
+    fn test_non_reserved_route_allowed() {
+        let relay = Relay::new();
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let config = RuneConfig {
+            name: "my_rune".into(),
+            gate: Some(crate::rune::GateConfig { path: "/api/echo".into(), method: "POST".into() }),
+            ..Default::default()
+        };
+        assert!(relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).is_ok());
     }
 }

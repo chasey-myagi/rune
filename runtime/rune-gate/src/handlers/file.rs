@@ -28,7 +28,7 @@ pub async fn download_file(
                     ),
                 ),
             ];
-            (StatusCode::OK, headers, stored.data.to_vec()).into_response()
+            (StatusCode::OK, headers, stored.data).into_response()
         }
         None => error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "file not found"),
     }

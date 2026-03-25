@@ -769,3 +769,140 @@ def test_c02b_attach_message_labels_defaults_empty():
 
     msg = c._build_attach_message()
     assert dict(msg.attach.labels) == {}
+
+
+# ============================================================
+# MF-5: Non-async handler should produce clear error, not TypeError
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_mf5_sync_handler_gives_clear_error():
+    """MF-5: A non-async (sync) handler registered via @rune should either
+    be auto-wrapped or produce a clear error at execute time, not a raw
+    'object NoneType can't be used in await expression' TypeError."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("sync_echo")
+    def sync_handler(ctx, input):
+        return input.upper() if isinstance(input, bytes) else input
+
+    ctx = RuneContext(rune_name="sync_echo", request_id="r-1")
+
+    # After the fix, calling a sync handler through the internal
+    # execute path should work (auto-wrapped) or raise a clear error.
+    # We verify by calling _execute_once with a mock outbound queue.
+    outbound: asyncio.Queue = asyncio.Queue()
+
+    from unittest.mock import MagicMock
+
+    # Build a minimal fake ExecuteRequest
+    req = MagicMock()
+    req.rune_name = "sync_echo"
+    req.request_id = "r-sync-1"
+    req.input = b"hello"
+    req.context = {}
+    req.attachments = []
+
+    registered = c._runes["sync_echo"]
+
+    # This should not crash with a raw TypeError
+    await c._execute_once(registered, ctx, req, outbound)
+
+    # Should get a completed result in the queue
+    msg = await outbound.get()
+    # Result should be STATUS_COMPLETED (value 2) or the output should match
+    assert msg.result.output == b"HELLO"
+
+
+@pytest.mark.asyncio
+async def test_mf5_sync_stream_handler_gives_clear_error():
+    """MF-5b: A non-async stream handler also works or gives clear error."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.stream_rune("sync_stream")
+    def sync_stream(ctx, input, stream):
+        # This is a sync function, should be handled gracefully
+        pass
+
+    ctx = RuneContext(rune_name="sync_stream", request_id="r-1")
+    outbound: asyncio.Queue = asyncio.Queue()
+
+    from unittest.mock import MagicMock
+
+    req = MagicMock()
+    req.rune_name = "sync_stream"
+    req.request_id = "r-sync-stream-1"
+    req.input = b""
+    req.context = {}
+    req.attachments = []
+
+    registered = c._runes["sync_stream"]
+    await c._execute_stream(registered, ctx, req, outbound)
+
+    # Should get stream_end in the queue, not a TypeError
+    msg = await outbound.get()
+    assert msg.stream_end.request_id == "r-sync-stream-1"
+
+
+# ============================================================
+# NF-8: _cancelled set should be cleaned up in finally block
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_nf8_cancelled_set_cleaned_after_execute():
+    """NF-8: request_id should be discarded from _cancelled in finally block
+    of _handle_execute, preventing unbounded growth."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("slow")
+    async def slow_handler(ctx, input):
+        return input
+
+    outbound: asyncio.Queue = asyncio.Queue()
+
+    from unittest.mock import MagicMock
+
+    req = MagicMock()
+    req.rune_name = "slow"
+    req.request_id = "r-cancel-test"
+    req.input = b"data"
+    req.context = {}
+    req.attachments = []
+
+    # Simulate a cancel happening before execution
+    c._cancelled.add("r-cancel-test")
+    assert "r-cancel-test" in c._cancelled
+
+    await c._handle_execute(req, outbound)
+
+    # After _handle_execute finishes, request_id should be cleaned up
+    assert "r-cancel-test" not in c._cancelled
+
+
+@pytest.mark.asyncio
+async def test_nf8_cancelled_set_cleaned_even_on_error():
+    """NF-8b: _cancelled cleanup also happens when handler raises."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("failing")
+    async def failing_handler(ctx, input):
+        raise RuntimeError("intentional failure")
+
+    outbound: asyncio.Queue = asyncio.Queue()
+
+    from unittest.mock import MagicMock
+
+    req = MagicMock()
+    req.rune_name = "failing"
+    req.request_id = "r-fail-cancel"
+    req.input = b"data"
+    req.context = {}
+    req.attachments = []
+
+    c._cancelled.add("r-fail-cancel")
+    await c._handle_execute(req, outbound)
+
+    # Should be cleaned up even though handler failed
+    assert "r-fail-cancel" not in c._cancelled

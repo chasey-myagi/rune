@@ -375,12 +375,18 @@ pub async fn stream_execute(
 
     let state_clone = state.clone();
     let req_id = request_id.to_string();
+    let rune_name_log = ctx.rune_name.clone();
+    let input_size = body.len() as i64;
+    let start = Instant::now();
     tokio::spawn(async move {
+        let mut status_code: i32 = 200;
+        let mut output_size: i64 = 0;
         match invoker.invoke_stream(ctx, body).await {
             Ok(mut stream_rx) => {
                 while let Some(chunk) = stream_rx.recv().await {
                     match chunk {
                         Ok(data) => {
+                            output_size += data.len() as i64;
                             let event = Event::default()
                                 .event("message")
                                 .data(String::from_utf8_lossy(&data).to_string());
@@ -389,13 +395,15 @@ pub async fn stream_execute(
                                     .session_mgr
                                     .cancel_by_request_id(&req_id, "SSE client disconnected")
                                     .await;
-                                return;
+                                status_code = 499;
+                                break;
                             }
                         }
                         Err(e) => {
                             let _ = tx
                                 .send(Ok(Event::default().event("error").data(e.to_string())))
                                 .await;
+                            status_code = 500;
                             break;
                         }
                     }
@@ -408,8 +416,24 @@ pub async fn stream_execute(
                 let _ = tx
                     .send(Ok(Event::default().event("error").data(e.to_string())))
                     .await;
+                status_code = 500;
             }
         }
+
+        // Record call log for stream mode (best-effort)
+        let latency_ms = start.elapsed().as_millis() as i64;
+        let _ = state_clone.store.insert_log(&CallLog {
+            id: 0,
+            request_id: req_id,
+            rune_name: rune_name_log,
+            mode: "stream".into(),
+            caster_id: None,
+            latency_ms,
+            status_code,
+            input_size,
+            output_size,
+            timestamp: rune_store::now_iso8601(),
+        }).await;
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -456,32 +480,33 @@ pub async fn async_execute(
     tokio::spawn(async move {
         let result = invoker.invoke_once(ctx, body).await;
 
-        // Check if task was cancelled during execution
-        if let Ok(Some(task)) = store.get_task(&task_id).await {
-            if task.status == TaskStatus::Cancelled {
-                return;
-            }
-        }
-
+        // Atomically complete the task only if it has not been cancelled (CAS).
         let (status, output_size) = match result {
             Ok(ref output) => {
                 let output_str = String::from_utf8_lossy(output).to_string();
                 let size = output.len() as i64;
-                let _ = store.update_task_status(
+                let updated = store.complete_task_if_not_cancelled(
                     &task_id,
                     TaskStatus::Completed,
                     Some(&output_str),
                     None,
-                ).await;
+                ).await.unwrap_or(false);
+                if !updated {
+                    // Task was cancelled — skip call log
+                    return;
+                }
                 (200i32, size)
             }
             Err(ref e) => {
-                let _ = store.update_task_status(
+                let updated = store.complete_task_if_not_cancelled(
                     &task_id,
                     TaskStatus::Failed,
                     None,
                     Some(&e.to_string()),
-                ).await;
+                ).await.unwrap_or(false);
+                if !updated {
+                    return;
+                }
                 (500i32, 0i64)
             }
         };

@@ -96,9 +96,13 @@ async fn main() -> anyhow::Result<()> {
             make_handler(|_ctx, input| async move {
                 let mut v: serde_json::Value =
                     serde_json::from_slice(&input).map_err(|e| RuneError::InvalidInput(e.to_string()))?;
-                v.as_object_mut()
-                    .unwrap()
-                    .insert("step_b".into(), true.into());
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("step_b".into(), true.into());
+                } else {
+                    return Err(RuneError::InvalidInput(
+                        "step_b expects a JSON object as input".to_string(),
+                    ));
+                }
                 Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
             }),
         );
@@ -181,8 +185,8 @@ async fn main() -> anyhow::Result<()> {
         key_verifier,
         session_mgr: Arc::clone(&running.session_mgr),
         auth_enabled: config.auth.enabled,
-        exempt_routes: config.auth.exempt_routes.clone(),
-        cors_origins: config.gate.cors_origins.clone(),
+        exempt_routes: Arc::new(config.auth.exempt_routes.clone()),
+        cors_origins: Arc::new(config.gate.cors_origins.clone()),
         dev_mode: config.server.dev_mode,
         started_at: Instant::now(),
         file_broker: Arc::new(gate::FileBroker::new()),

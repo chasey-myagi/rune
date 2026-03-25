@@ -39,10 +39,19 @@ const PROTO_PATH = path.resolve(
   '../proto/rune.proto',
 );
 
+// Module-level cache for loaded proto (NF-17: avoid re-parsing on every reconnect)
+let _protoCache: {
+  RuneServiceClient: grpc.ServiceClientConstructor;
+  SessionMessage: Record<string, unknown>;
+} | null = null;
+
 function loadProto(): {
   RuneServiceClient: grpc.ServiceClientConstructor;
   SessionMessage: Record<string, unknown>;
 } {
+  if (_protoCache) {
+    return _protoCache;
+  }
   const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
     keepCase: true,
     longs: String,
@@ -52,10 +61,18 @@ function loadProto(): {
   });
   const proto = grpc.loadPackageDefinition(packageDefinition) as Record<string, any>;
   const v1 = proto.rune.wire.v1;
-  return {
+  _protoCache = {
     RuneServiceClient: v1.RuneService as grpc.ServiceClientConstructor,
     SessionMessage: v1.SessionMessage,
   };
+  return _protoCache;
+}
+
+/**
+ * @internal Exposed for testing — returns the cached proto reference.
+ */
+export function _getProtoCache() {
+  return _protoCache;
 }
 
 // ---------------------------------------------------------------------------
@@ -393,8 +410,14 @@ export class Caster {
     input: unknown,
   ): Promise<void> {
     try {
-      const handler = registered.handler as RuneHandler;
-      const output = await handler(ctx, input);
+      let output: unknown;
+      if (registered.acceptsFiles) {
+        const handler = registered.handler as RuneHandlerWithFiles;
+        output = await handler(ctx, input, ctx.attachments ?? []);
+      } else {
+        const handler = registered.handler as RuneHandler;
+        output = await handler(ctx, input);
+      }
 
       // If cancelled during execution, discard result
       if (ctx.signal.aborted) {
@@ -452,8 +475,13 @@ export class Caster {
     });
 
     try {
-      const handler = registered.handler as StreamRuneHandler;
-      await handler(ctx, input, sender);
+      if (registered.acceptsFiles) {
+        const handler = registered.handler as StreamRuneHandlerWithFiles;
+        await handler(ctx, input, ctx.attachments ?? [], sender);
+      } else {
+        const handler = registered.handler as StreamRuneHandler;
+        await handler(ctx, input, sender);
+      }
 
       // Send StreamEnd on completion
       grpcStream.write({
