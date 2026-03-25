@@ -2,12 +2,21 @@ use std::sync::Arc;
 use crate::auth::KeyVerifier;
 use crate::rune::{RuneConfig, RuneHandler, StreamRuneHandler};
 use crate::relay::Relay;
-use crate::resolver::{Resolver, RoundRobinResolver};
+use crate::resolver::{Resolver, RoundRobinResolver, RandomResolver, LeastLoadResolver, PriorityResolver};
 use crate::session::SessionManager;
 use crate::invoker::{LocalInvoker, LocalStreamInvoker};
 use crate::config::AppConfig;
 use crate::grpc_service::RuneGrpcService;
 use rune_proto::rune_service_server::RuneServiceServer;
+
+fn resolver_from_strategy(strategy: &str, session_mgr: &Arc<SessionManager>) -> Arc<dyn Resolver> {
+    match strategy {
+        "random" => Arc::new(RandomResolver),
+        "least_load" => Arc::new(LeastLoadResolver::new(Arc::clone(session_mgr))),
+        "priority" => Arc::new(PriorityResolver::new(Arc::new(RoundRobinResolver::new()))),
+        _ => Arc::new(RoundRobinResolver::new()), // "round_robin" and fallback
+    }
+}
 
 pub struct App {
     pub relay: Arc<Relay>,
@@ -39,13 +48,15 @@ impl App {
     }
 
     pub fn with_config(config: AppConfig) -> Self {
+        let session_mgr = Arc::new(SessionManager::new_dev(
+            config.heartbeat_interval(),
+            config.heartbeat_timeout(),
+        ));
+        let resolver = resolver_from_strategy(&config.resolver.strategy, &session_mgr);
         Self {
             relay: Arc::new(Relay::new()),
-            resolver: Arc::new(RoundRobinResolver::new()),
-            session_mgr: Arc::new(SessionManager::new_dev(
-                config.heartbeat_interval(),
-                config.heartbeat_timeout(),
-            )),
+            resolver,
+            session_mgr,
             config,
         }
     }
@@ -55,15 +66,17 @@ impl App {
         key_verifier: Arc<dyn KeyVerifier>,
     ) -> Self {
         let dev_mode = config.server.dev_mode;
+        let session_mgr = Arc::new(SessionManager::with_auth(
+            config.heartbeat_interval(),
+            config.heartbeat_timeout(),
+            key_verifier,
+            dev_mode,
+        ));
+        let resolver = resolver_from_strategy(&config.resolver.strategy, &session_mgr);
         Self {
             relay: Arc::new(Relay::new()),
-            resolver: Arc::new(RoundRobinResolver::new()),
-            session_mgr: Arc::new(SessionManager::with_auth(
-                config.heartbeat_interval(),
-                config.heartbeat_timeout(),
-                key_verifier,
-                dev_mode,
-            )),
+            resolver,
+            session_mgr,
             config,
         }
     }
