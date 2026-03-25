@@ -10,11 +10,11 @@ use crate::state::GateState;
 
 pub async fn openapi_handler(State(state): State<GateState>) -> impl IntoResponse {
     let rune_infos: Vec<RuneInfo> = state
-        .relay
+        .rune.relay
         .list()
         .into_iter()
         .filter_map(|(name, _gate_path)| {
-            let entries = state.relay.find(&name)?;
+            let entries = state.rune.relay.find(&name)?;
             let first = entries.value().first()?;
             let config = &first.config;
             Some(RuneInfo {

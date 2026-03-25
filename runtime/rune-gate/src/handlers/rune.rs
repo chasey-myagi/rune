@@ -40,7 +40,7 @@ pub async fn run_rune(
 
     // Read body with appropriate size limit
     let max_body = if is_multipart(&content_type) {
-        (state.max_upload_size_mb as usize + 10) * 1024 * 1024
+        (state.rune.max_upload_size_mb as usize + 10) * 1024 * 1024
     } else {
         1024 * 1024
     };
@@ -81,7 +81,7 @@ pub async fn dynamic_rune_handler(
 
     // Read body with appropriate size limit
     let max_body = if is_multipart(&content_type) {
-        (state.max_upload_size_mb as usize + 10) * 1024 * 1024
+        (state.rune.max_upload_size_mb as usize + 10) * 1024 * 1024
     } else {
         1024 * 1024
     };
@@ -97,7 +97,7 @@ pub async fn dynamic_rune_handler(
         }
     };
 
-    let rune_name = state.relay.resolve_by_gate_path(&method, &path);
+    let rune_name = state.rune.relay.resolve_by_gate_path(&method, &path);
 
     let rune_name = match rune_name {
         Some(name) => name,
@@ -141,9 +141,9 @@ pub async fn execute_rune(
 ) -> axum::response::Response {
     // Use label-based routing if labels are provided
     let invoker = if labels.is_empty() {
-        state.relay.resolve(rune_name, &*state.resolver)
+        state.rune.relay.resolve(rune_name, &*state.rune.resolver)
     } else {
-        state.relay.resolve_with_labels(rune_name, labels, &*state.resolver)
+        state.rune.relay.resolve_with_labels(rune_name, labels, &*state.rune.resolver)
     };
     let invoker = match invoker {
         Some(inv) => inv,
@@ -165,7 +165,7 @@ pub async fn execute_rune(
     };
 
     // Get RuneConfig for schema validation and stream support (single lookup)
-    let (input_schema, output_schema, supports_stream) = if let Some(entries) = state.relay.find(rune_name) {
+    let (input_schema, output_schema, supports_stream) = if let Some(entries) = state.rune.relay.find(rune_name) {
         if let Some(first) = entries.value().first() {
             (first.config.input_schema.clone(), first.config.output_schema.clone(), first.config.supports_stream)
         } else {
@@ -214,7 +214,7 @@ pub async fn execute_rune(
         rune_name: rune_name.to_string(),
         request_id: request_id.clone(),
         context: Default::default(),
-        timeout: state.request_timeout,
+        timeout: state.rune.request_timeout,
     };
 
     // Determine mode string for call log
@@ -252,7 +252,7 @@ pub async fn execute_rune(
     // Record call log (best-effort)
     let latency_ms = start.elapsed().as_millis() as i64;
     let status_code = response.status().as_u16() as i32;
-    let _ = state.store.insert_log(&CallLog {
+    let _ = state.admin.store.insert_log(&CallLog {
         id: 0,
         request_id: req_id,
         rune_name: rune_name_owned,
@@ -268,7 +268,7 @@ pub async fn execute_rune(
     // Schedule deferred file cleanup: give clients 60s to download, then clean up.
     // TTL (5 min) in FileBroker acts as a safety net if this task is dropped.
     if has_files {
-        let broker = state.file_broker.clone();
+        let broker = state.rune.file_broker.clone();
         let rid = request_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -357,7 +357,7 @@ pub async fn sync_execute_multipart(
         Err(e) => {
             // Clean up files on error
             for fid in file_ids {
-                state.file_broker.remove(fid);
+                state.rune.file_broker.remove(fid);
             }
             map_error(e)
         }
@@ -392,7 +392,7 @@ pub async fn stream_execute(
                                 .data(String::from_utf8_lossy(&data).to_string());
                             if tx.send(Ok(event)).await.is_err() {
                                 state_clone
-                                    .session_mgr
+                                    .rune.session_mgr
                                     .cancel_by_request_id(&req_id, "SSE client disconnected")
                                     .await;
                                 status_code = 499;
@@ -422,7 +422,7 @@ pub async fn stream_execute(
 
         // Record call log for stream mode (best-effort)
         let latency_ms = start.elapsed().as_millis() as i64;
-        let _ = state_clone.store.insert_log(&CallLog {
+        let _ = state_clone.admin.store.insert_log(&CallLog {
             id: 0,
             request_id: req_id,
             rune_name: rune_name_log,
@@ -452,7 +452,7 @@ pub async fn async_execute(
     let input_str = String::from_utf8_lossy(&body).to_string();
 
     // Insert task into store
-    if let Err(e) = state.store.insert_task(&task_id, &rune_name, Some(&input_str)).await {
+    if let Err(e) = state.admin.store.insert_task(&task_id, &rune_name, Some(&input_str)).await {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL",
@@ -461,7 +461,7 @@ pub async fn async_execute(
     }
     if let Err(e) =
         state
-            .store
+            .admin.store
             .update_task_status(&task_id, TaskStatus::Running, None, None)
     .await
     {
@@ -472,7 +472,7 @@ pub async fn async_execute(
         );
     }
 
-    let store = Arc::clone(&state.store);
+    let store = Arc::clone(&state.admin.store);
     let start = Instant::now();
     let input_size = body.len() as i64;
     let rune_name_log = rune_name.clone();

@@ -3,7 +3,7 @@
 //! All types previously defined in `gate.rs` have been moved to dedicated modules.
 //! This module re-exports them so that `rune_gate::gate::GateState`, etc. still work.
 
-pub use crate::state::{GateState, RunParams, LogQuery, CreateKeyRequest, DEFAULT_REQUEST_TIMEOUT};
+pub use crate::state::{GateState, AuthState, RuneState, FlowState, AdminState, RunParams, LogQuery, CreateKeyRequest, DEFAULT_REQUEST_TIMEOUT};
 pub use crate::router::build_router;
 pub use crate::shutdown::ShutdownCoordinator;
 pub use crate::rate_limit::RateLimitState;

@@ -98,7 +98,7 @@ pub async fn parse_multipart(
         }
     };
 
-    let max_size_bytes = state.max_upload_size_mb as usize * 1024 * 1024;
+    let max_size_bytes = state.rune.max_upload_size_mb as usize * 1024 * 1024;
 
     let stream = futures_free_multipart_stream(body, &boundary);
     let mut json_input: Option<Bytes> = None;
@@ -112,7 +112,7 @@ pub async fn parse_multipart(
             Err(e) => {
                 // Clean up any files already stored
                 for fid in &file_ids {
-                    state.file_broker.remove(fid);
+                    state.rune.file_broker.remove(fid);
                 }
                 return Err(error_response(
                     StatusCode::BAD_REQUEST,
@@ -138,7 +138,7 @@ pub async fn parse_multipart(
             if total_file_size > max_size_bytes {
                 // Clean up any files already stored
                 for fid in &file_ids {
-                    state.file_broker.remove(fid);
+                    state.rune.file_broker.remove(fid);
                 }
                 return Err(error_response(
                     StatusCode::PAYLOAD_TOO_LARGE,
@@ -155,7 +155,7 @@ pub async fn parse_multipart(
             };
 
             // Store in broker
-            let file_id = state.file_broker.store(filename.clone(), mime_type.clone(), data, request_id);
+            let file_id = state.rune.file_broker.store(filename.clone(), mime_type.clone(), data, request_id);
             file_ids.push(file_id.clone());
 
             files.push(FileMetadata {

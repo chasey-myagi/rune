@@ -164,25 +164,33 @@ fn build_test_state(auth_enabled: bool) -> (GateState, Arc<RuneStore>) {
     )));
 
     let state = GateState {
-        relay,
-        resolver,
-        store: store.clone(),
-        key_verifier,
-        session_mgr: Arc::new(SessionManager::new_dev(
-            Duration::from_secs(10),
-            Duration::from_secs(35),
-        )),
-        auth_enabled,
-        exempt_routes: Arc::new(vec!["/health".to_string()]),
+        auth: gate::AuthState {
+            key_verifier,
+            auth_enabled,
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+        },
+        rune: gate::RuneState {
+            relay,
+            resolver,
+            session_mgr: Arc::new(SessionManager::new_dev(
+                Duration::from_secs(10),
+                Duration::from_secs(35),
+            )),
+            file_broker: Arc::new(gate::FileBroker::new()),
+            max_upload_size_mb: 1, // 1MB for upload tests
+            request_timeout: Duration::from_secs(30),
+        },
+        flow: gate::FlowState {
+            flow_engine,
+        },
+        admin: gate::AdminState {
+            store: store.clone(),
+            started_at: Instant::now(),
+            dev_mode: !auth_enabled,
+        },
         cors_origins: Arc::new(vec![]),
-        dev_mode: !auth_enabled,
-        started_at: Instant::now(),
-        file_broker: Arc::new(gate::FileBroker::new()),
-        max_upload_size_mb: 1, // 1MB for upload tests
-        flow_engine,
         rate_limiter: None,
         shutdown: gate::ShutdownCoordinator::new(),
-        request_timeout: Duration::from_secs(30),
     };
 
     (state, store)
@@ -1509,7 +1517,7 @@ async fn e2e_on_caster_attach_callback_no_panic() {
 async fn e2e_max_upload_size_from_config() {
     // build_test_state sets max_upload_size_mb=1, verify the config value is respected
     let (state, _store) = build_test_state(false);
-    assert_eq!(state.max_upload_size_mb, 1, "max_upload_size_mb should come from test config");
+    assert_eq!(state.rune.max_upload_size_mb, 1, "max_upload_size_mb should come from test config");
 }
 
 // ===========================================================================

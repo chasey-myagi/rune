@@ -53,7 +53,7 @@ pub async fn create_flow(
         return error_response(StatusCode::BAD_REQUEST, "INVALID_INPUT", "flow must have at least one step");
     }
 
-    let mut engine = state.flow_engine.write().await;
+    let mut engine = state.flow.flow_engine.write().await;
 
     // Check for duplicate name
     if engine.get(&flow.name).is_some() {
@@ -75,7 +75,7 @@ pub async fn create_flow(
 pub async fn list_flows(
     State(state): State<GateState>,
 ) -> impl IntoResponse {
-    let engine = state.flow_engine.read().await;
+    let engine = state.flow.flow_engine.read().await;
     let entries: Vec<serde_json::Value> = engine
         .list()
         .iter()
@@ -96,7 +96,7 @@ pub async fn get_flow(
     State(state): State<GateState>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    let engine = state.flow_engine.read().await;
+    let engine = state.flow.flow_engine.read().await;
     match engine.get(&name) {
         Some(flow) => (StatusCode::OK, Json(serde_json::json!(flow))).into_response(),
         None => error_response(
@@ -111,7 +111,7 @@ pub async fn delete_flow(
     State(state): State<GateState>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    let mut engine = state.flow_engine.write().await;
+    let mut engine = state.flow.flow_engine.write().await;
     if engine.remove(&name) {
         StatusCode::NO_CONTENT.into_response()
     } else {
@@ -153,7 +153,7 @@ pub async fn run_flow(
     // Clone the flow definition and release the read lock before execution.
     // This prevents long-running flow executions from blocking flow registration.
     let flow_def = {
-        let engine = state.flow_engine.read().await;
+        let engine = state.flow.flow_engine.read().await;
         match engine.get(&name) {
             Some(f) => f.clone(),
             None => {
@@ -178,7 +178,7 @@ pub async fn run_flow(
 
     // Sync mode (default) — lock is only held briefly to access relay/resolver,
     // the actual execution uses the cloned flow definition.
-    let engine = state.flow_engine.read().await;
+    let engine = state.flow.flow_engine.read().await;
     match engine.execute_flow(&flow_def, body).await {
         Ok(result) => {
             let output_json = serde_json::from_slice::<serde_json::Value>(&result.output)
@@ -205,17 +205,17 @@ pub async fn run_flow_async(
     let task_id = unique_request_id();
     let input_str = String::from_utf8_lossy(&body).to_string();
 
-    if let Err(e) = state.store.insert_task(&task_id, &format!("flow:{}", flow_name), Some(&input_str)).await {
+    if let Err(e) = state.admin.store.insert_task(&task_id, &format!("flow:{}", flow_name), Some(&input_str)).await {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL",
             &e.to_string(),
         );
     }
-    let _ = state.store.update_task_status(&task_id, TaskStatus::Running, None, None).await;
+    let _ = state.admin.store.update_task_status(&task_id, TaskStatus::Running, None, None).await;
 
-    let engine = Arc::clone(&state.flow_engine);
-    let store = Arc::clone(&state.store);
+    let engine = Arc::clone(&state.flow.flow_engine);
+    let store = Arc::clone(&state.admin.store);
     let tid = task_id.clone();
 
     tokio::spawn(async move {
@@ -266,7 +266,7 @@ pub async fn run_flow_stream(
 ) -> axum::response::Response {
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
 
-    let engine = Arc::clone(&state.flow_engine);
+    let engine = Arc::clone(&state.flow.flow_engine);
 
     tokio::spawn(async move {
         let eng = engine.read().await;

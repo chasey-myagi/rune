@@ -52,25 +52,33 @@ fn make_state(auth_enabled: bool) -> GateState {
         FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
     ));
     GateState {
-        relay,
-        resolver,
-        store,
-        key_verifier,
-        session_mgr: Arc::new(SessionManager::new_dev(
-            std::time::Duration::from_secs(10),
-            std::time::Duration::from_secs(35),
-        )),
-        auth_enabled,
-        exempt_routes: Arc::new(vec!["/health".to_string()]),
+        auth: gate::AuthState {
+            key_verifier,
+            auth_enabled,
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+        },
+        rune: gate::RuneState {
+            relay,
+            resolver,
+            session_mgr: Arc::new(SessionManager::new_dev(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            file_broker: Arc::new(gate::FileBroker::new()),
+            max_upload_size_mb: 10,
+            request_timeout: std::time::Duration::from_secs(30),
+        },
+        flow: gate::FlowState {
+            flow_engine,
+        },
+        admin: gate::AdminState {
+            store,
+            started_at: Instant::now(),
+            dev_mode: !auth_enabled,
+        },
         cors_origins: Arc::new(vec![]),
-        dev_mode: !auth_enabled,
-        started_at: Instant::now(),
-        file_broker: Arc::new(gate::FileBroker::new()),
-        max_upload_size_mb: 10,
-        flow_engine,
         rate_limiter: None,
         shutdown: gate::ShutdownCoordinator::new(),
-        request_timeout: std::time::Duration::from_secs(30),
     }
 }
 
@@ -103,7 +111,7 @@ async fn test_full_auth_chain_reject_no_key() {
 #[tokio::test]
 async fn test_full_auth_chain_accept_valid_key() {
     let state = make_state(true);
-    let key_result = state.store.create_key(KeyType::Gate, "integration test").await.unwrap();
+    let key_result = state.admin.store.create_key(KeyType::Gate, "integration test").await.unwrap();
 
     let app = gate::build_router(state, None);
     let response = app
@@ -210,7 +218,7 @@ async fn test_async_task_persisted_to_sqlite() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Verify task is in SQLite
-    let task = state.store.get_task(&task_id).await.unwrap().unwrap();
+    let task = state.admin.store.get_task(&task_id).await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Completed);
     assert!(task.output.is_some());
     assert!(task.completed_at.is_some());
@@ -221,9 +229,9 @@ async fn test_task_cancel_updates_sqlite_status() {
     let state = make_state(false);
 
     // Insert a task manually in running state
-    state.store.insert_task("cancel-me", "echo", Some("test")).await.unwrap();
+    state.admin.store.insert_task("cancel-me", "echo", Some("test")).await.unwrap();
     state
-        .store
+        .admin.store
         .update_task_status("cancel-me", TaskStatus::Running, None, None).await
         .unwrap();
 
@@ -242,7 +250,7 @@ async fn test_task_cancel_updates_sqlite_status() {
     assert_eq!(response.status(), 200);
 
     // Verify SQLite reflects cancelled status
-    let task = state.store.get_task("cancel-me").await.unwrap().unwrap();
+    let task = state.admin.store.get_task("cancel-me").await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Cancelled);
 }
 
@@ -255,7 +263,7 @@ async fn test_key_create_then_authenticate() {
     let state = make_state(true);
 
     // Create a key directly in store
-    let key = state.store.create_key(KeyType::Gate, "lifecycle test").await.unwrap();
+    let key = state.admin.store.create_key(KeyType::Gate, "lifecycle test").await.unwrap();
 
     // Use the key to authenticate
     let app = gate::build_router(state, None);
@@ -280,8 +288,8 @@ async fn test_revoked_key_fails_auth() {
     let state = make_state(true);
 
     // Create and then revoke a key
-    let key = state.store.create_key(KeyType::Gate, "revocable").await.unwrap();
-    state.store.revoke_key(key.api_key.id).await.unwrap();
+    let key = state.admin.store.create_key(KeyType::Gate, "revocable").await.unwrap();
+    state.admin.store.revoke_key(key.api_key.id).await.unwrap();
 
     let app = gate::build_router(state, None);
     let response = app
@@ -321,7 +329,7 @@ async fn test_sync_call_recorded_in_logs() {
         .unwrap();
 
     // Check call log was recorded
-    let logs = state.store.query_logs(Some("echo"), 10).await.unwrap();
+    let logs = state.admin.store.query_logs(Some("echo"), 10).await.unwrap();
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].rune_name, "echo");
     assert_eq!(logs[0].mode, "sync");
@@ -411,7 +419,7 @@ async fn test_full_auth_chain_create_key_call_rune_verify_log() {
     // Step 1: create a gate key via management API (mgmt routes are behind auth
     // middleware too, so we create the key directly in the store first to
     // bootstrap, then use it)
-    let bootstrap_key = state.store.create_key(KeyType::Gate, "bootstrap").await.unwrap();
+    let bootstrap_key = state.admin.store.create_key(KeyType::Gate, "bootstrap").await.unwrap();
 
     // Step 2: use the bootstrap key to call the echo rune
     let app = gate::build_router(state.clone(), None);
@@ -434,7 +442,7 @@ async fn test_full_auth_chain_create_key_call_rune_verify_log() {
     assert_eq!(json["chain"], "test");
 
     // Step 3: verify a call log was recorded with correct rune name and mode
-    let logs = state.store.query_logs(Some("echo"), 10).await.unwrap();
+    let logs = state.admin.store.query_logs(Some("echo"), 10).await.unwrap();
     assert!(!logs.is_empty(), "call log should be recorded");
     assert_eq!(logs[0].rune_name, "echo");
     assert_eq!(logs[0].mode, "sync");
@@ -450,7 +458,7 @@ async fn test_key_immediately_usable_after_creation() {
     let state = make_state(true);
 
     // Create a key and immediately use it in the very next request (no sleep)
-    let key = state.store.create_key(KeyType::Gate, "instant").await.unwrap();
+    let key = state.admin.store.create_key(KeyType::Gate, "instant").await.unwrap();
 
     let app = gate::build_router(state.clone(), None);
     let response = app
@@ -482,9 +490,9 @@ async fn test_multiple_keys_independent() {
     let state = make_state(true);
 
     // Create three independent keys
-    let key_a = state.store.create_key(KeyType::Gate, "key-a").await.unwrap();
-    let key_b = state.store.create_key(KeyType::Gate, "key-b").await.unwrap();
-    let key_c = state.store.create_key(KeyType::Gate, "key-c").await.unwrap();
+    let key_a = state.admin.store.create_key(KeyType::Gate, "key-a").await.unwrap();
+    let key_b = state.admin.store.create_key(KeyType::Gate, "key-b").await.unwrap();
+    let key_c = state.admin.store.create_key(KeyType::Gate, "key-c").await.unwrap();
 
     // All three should work
     for (label, raw_key) in [
@@ -515,7 +523,7 @@ async fn test_multiple_keys_independent() {
     }
 
     // Revoke key_b — only key_b should stop working
-    state.store.revoke_key(key_b.api_key.id).await.unwrap();
+    state.admin.store.revoke_key(key_b.api_key.id).await.unwrap();
 
     // key_a still works
     let app = gate::build_router(state.clone(), None);
@@ -573,7 +581,7 @@ async fn test_multiple_keys_independent() {
 async fn test_concurrent_authenticated_requests() {
     let state = make_state(true);
     let key = state
-        .store
+        .admin.store
         .create_key(KeyType::Gate, "concurrent").await
         .unwrap();
 
@@ -609,7 +617,7 @@ async fn test_concurrent_authenticated_requests() {
     }
 
     // Verify all 10 calls were logged
-    let logs = state.store.query_logs(Some("echo"), 100).await.unwrap();
+    let logs = state.admin.store.query_logs(Some("echo"), 100).await.unwrap();
     assert_eq!(logs.len(), 10, "all 10 calls should be recorded");
     for log in &logs {
         assert_eq!(log.rune_name, "echo");
@@ -626,7 +634,7 @@ async fn test_concurrent_authenticated_requests() {
 async fn test_full_async_chain_with_auth() {
     let state = make_state(true);
     let key = state
-        .store
+        .admin.store
         .create_key(KeyType::Gate, "async-chain").await
         .unwrap();
 
@@ -678,7 +686,7 @@ async fn test_full_async_chain_with_auth() {
     assert!(json["output"].is_string());
 
     // Step 4: Verify call log
-    let logs = state.store.query_logs(Some("echo"), 10).await.unwrap();
+    let logs = state.admin.store.query_logs(Some("echo"), 10).await.unwrap();
     assert!(!logs.is_empty(), "async call should be logged");
     let async_log = logs.iter().find(|l| l.mode == "async");
     assert!(async_log.is_some(), "should have an async mode log entry");
@@ -692,7 +700,7 @@ async fn test_full_async_chain_with_auth() {
 async fn test_revoked_key_rejects_pending_request() {
     let state = make_state(true);
     let key = state
-        .store
+        .admin.store
         .create_key(KeyType::Gate, "to-revoke").await
         .unwrap();
 
@@ -713,7 +721,7 @@ async fn test_revoked_key_rejects_pending_request() {
     assert_eq!(response.status(), 200, "first call should succeed");
 
     // Revoke the key
-    state.store.revoke_key(key.api_key.id).await.unwrap();
+    state.admin.store.revoke_key(key.api_key.id).await.unwrap();
 
     // Next request with same key should fail
     let app2 = gate::build_router(state.clone(), None);
@@ -790,25 +798,33 @@ async fn test_mixed_sync_and_stream_runes() {
         FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
     ));
     let state = GateState {
-        relay,
-        resolver,
-        store,
-        key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
-        session_mgr: Arc::new(SessionManager::new_dev(
-            std::time::Duration::from_secs(10),
-            std::time::Duration::from_secs(35),
-        )),
-        auth_enabled: false,
-        exempt_routes: Arc::new(vec!["/health".to_string()]),
+        auth: gate::AuthState {
+            key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
+            auth_enabled: false,
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+        },
+        rune: gate::RuneState {
+            relay,
+            resolver,
+            session_mgr: Arc::new(SessionManager::new_dev(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            file_broker: Arc::new(gate::FileBroker::new()),
+            max_upload_size_mb: 10,
+            request_timeout: std::time::Duration::from_secs(30),
+        },
+        flow: gate::FlowState {
+            flow_engine,
+        },
+        admin: gate::AdminState {
+            store,
+            started_at: std::time::Instant::now(),
+            dev_mode: true,
+        },
         cors_origins: Arc::new(vec![]),
-        dev_mode: true,
-        started_at: std::time::Instant::now(),
-        file_broker: Arc::new(gate::FileBroker::new()),
-        max_upload_size_mb: 10,
-        flow_engine,
         rate_limiter: None,
         shutdown: gate::ShutdownCoordinator::new(),
-        request_timeout: std::time::Duration::from_secs(30),
     };
 
     // Sync rune: normal call works
@@ -922,25 +938,33 @@ async fn test_stats_accumulate_across_runes() {
         FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
     ));
     let state = GateState {
-        relay,
-        resolver,
-        store,
-        key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
-        session_mgr: Arc::new(SessionManager::new_dev(
-            std::time::Duration::from_secs(10),
-            std::time::Duration::from_secs(35),
-        )),
-        auth_enabled: false,
-        exempt_routes: Arc::new(vec!["/health".to_string()]),
+        auth: gate::AuthState {
+            key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
+            auth_enabled: false,
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+        },
+        rune: gate::RuneState {
+            relay,
+            resolver,
+            session_mgr: Arc::new(SessionManager::new_dev(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(35),
+            )),
+            file_broker: Arc::new(gate::FileBroker::new()),
+            max_upload_size_mb: 10,
+            request_timeout: std::time::Duration::from_secs(30),
+        },
+        flow: gate::FlowState {
+            flow_engine,
+        },
+        admin: gate::AdminState {
+            store,
+            started_at: std::time::Instant::now(),
+            dev_mode: true,
+        },
         cors_origins: Arc::new(vec![]),
-        dev_mode: true,
-        started_at: std::time::Instant::now(),
-        file_broker: Arc::new(gate::FileBroker::new()),
-        max_upload_size_mb: 10,
-        flow_engine,
         rate_limiter: None,
         shutdown: gate::ShutdownCoordinator::new(),
-        request_timeout: std::time::Duration::from_secs(30),
     };
 
     // Call rune_a 4 times
@@ -1013,7 +1037,7 @@ async fn test_stats_accumulate_across_runes() {
 #[tokio::test]
 async fn test_gate_key_cannot_create_keys() {
     let state = make_state(true); // auth enabled, dev_mode=false
-    let gate_key = state.store.create_key(KeyType::Gate, "normal user").await.unwrap();
+    let gate_key = state.admin.store.create_key(KeyType::Gate, "normal user").await.unwrap();
 
     let app = gate::build_router(state, None);
     let response = app
@@ -1039,8 +1063,8 @@ async fn test_gate_key_cannot_create_keys() {
 #[tokio::test]
 async fn test_gate_key_cannot_revoke_keys() {
     let state = make_state(true);
-    let gate_key = state.store.create_key(KeyType::Gate, "normal user").await.unwrap();
-    let target_key = state.store.create_key(KeyType::Gate, "target").await.unwrap();
+    let gate_key = state.admin.store.create_key(KeyType::Gate, "normal user").await.unwrap();
+    let target_key = state.admin.store.create_key(KeyType::Gate, "target").await.unwrap();
 
     let app = gate::build_router(state, None);
     let response = app
@@ -1065,7 +1089,7 @@ async fn test_gate_key_cannot_revoke_keys() {
 #[tokio::test]
 async fn test_gate_key_cannot_list_keys() {
     let state = make_state(true);
-    let gate_key = state.store.create_key(KeyType::Gate, "normal user").await.unwrap();
+    let gate_key = state.admin.store.create_key(KeyType::Gate, "normal user").await.unwrap();
 
     let app = gate::build_router(state, None);
     let response = app

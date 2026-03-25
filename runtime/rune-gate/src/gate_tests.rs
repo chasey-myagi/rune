@@ -26,7 +26,7 @@ mod tests {
     use crate::rate_limit::RateLimitState;
     use crate::router::build_router;
     use crate::shutdown::ShutdownCoordinator;
-    use crate::state::{GateState, DEFAULT_REQUEST_TIMEOUT};
+    use crate::state::{GateState, AuthState, RuneState, FlowState, AdminState, DEFAULT_REQUEST_TIMEOUT};
     fn test_state() -> GateState {
         let relay = Arc::new(Relay::new());
         let resolver = Arc::new(RoundRobinResolver::new());
@@ -79,25 +79,33 @@ mod tests {
         ));
 
         GateState {
-            relay,
-            resolver,
-            store,
-            key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(35),
-            )),
-            auth_enabled: false,
-            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            auth: AuthState {
+                key_verifier,
+                auth_enabled: false,
+                exempt_routes: Arc::new(vec!["/health".to_string()]),
+            },
+            rune: RuneState {
+                relay,
+                resolver,
+                session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(35),
+                )),
+                file_broker: Arc::new(FileBroker::new()),
+                max_upload_size_mb: 10,
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            },
+            flow: FlowState {
+                flow_engine,
+            },
+            admin: AdminState {
+                store,
+                started_at: Instant::now(),
+                dev_mode: true,
+            },
             cors_origins: Arc::new(vec![]),
-            dev_mode: true,
-            started_at: Instant::now(),
-            file_broker: Arc::new(FileBroker::new()),
-            max_upload_size_mb: 10,
-            flow_engine,
             rate_limiter: None,
             shutdown: ShutdownCoordinator::new(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
 
@@ -237,8 +245,8 @@ mod tests {
     #[tokio::test]
     async fn test_auth_blocks_without_key() {
         let mut state = test_state();
-        state.auth_enabled = true;
-        state.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.store.clone()));
+        state.auth.auth_enabled = true;
+        state.auth.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
         let app = build_router(state, None);
 
         let response = app
@@ -258,8 +266,8 @@ mod tests {
     #[tokio::test]
     async fn test_auth_allows_exempt_route() {
         let mut state = test_state();
-        state.auth_enabled = true;
-        state.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.store.clone()));
+        state.auth.auth_enabled = true;
+        state.auth.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
         let app = build_router(state, None);
 
         let response = app
@@ -273,12 +281,12 @@ mod tests {
     #[tokio::test]
     async fn test_auth_allows_valid_key() {
         let mut state = test_state();
-        state.auth_enabled = true;
+        state.auth.auth_enabled = true;
         let key_result = state
-            .store
+            .admin.store
             .create_key(rune_store::KeyType::Gate, "test").await
             .unwrap();
-        state.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.store.clone()));
+        state.auth.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
         let app = build_router(state, None);
 
         let response = app
@@ -401,7 +409,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Verify task is persisted in store
-        let task = state.store.get_task(&task_id).await.unwrap();
+        let task = state.admin.store.get_task(&task_id).await.unwrap();
         assert!(task.is_some());
         let task = task.unwrap();
         assert_eq!(task.status, TaskStatus::Completed);
@@ -470,11 +478,11 @@ mod tests {
 
         // Insert a task and mark it completed
         state
-            .store
+            .admin.store
             .insert_task("done-task", "echo", Some("input")).await
             .unwrap();
         state
-            .store
+            .admin.store
             .update_task_status("done-task", TaskStatus::Completed, Some("result"), None).await
             .unwrap();
 
@@ -512,11 +520,11 @@ mod tests {
 
         // Insert a task and mark it failed
         state
-            .store
+            .admin.store
             .insert_task("fail-task", "echo", Some("input")).await
             .unwrap();
         state
-            .store
+            .admin.store
             .update_task_status("fail-task", TaskStatus::Failed, None, Some("boom")).await
             .unwrap();
 
@@ -659,9 +667,9 @@ mod tests {
 
     fn auth_state() -> GateState {
         let mut state = test_state();
-        state.auth_enabled = true;
-        state.key_verifier =
-            Arc::new(rune_store::StoreKeyVerifier::new(state.store.clone()));
+        state.auth.auth_enabled = true;
+        state.auth.key_verifier =
+            Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
         state
     }
 
@@ -671,7 +679,7 @@ mod tests {
         // "bearer " (lowercase) should fail to strip the prefix and return 401.
         let state = auth_state();
         let key_result = state
-            .store
+            .admin.store
             .create_key(rune_store::KeyType::Gate, "test").await
             .unwrap();
         let app = build_router(state, None);
@@ -696,7 +704,7 @@ mod tests {
         // "BEARER " (all caps) should also fail — middleware uses strip_prefix("Bearer ")
         let state = auth_state();
         let key_result = state
-            .store
+            .admin.store
             .create_key(rune_store::KeyType::Gate, "test").await
             .unwrap();
         let app = build_router(state, None);
@@ -722,7 +730,7 @@ mod tests {
         // which is not a valid key, so verification should fail with 401.
         let state = auth_state();
         let key_result = state
-            .store
+            .admin.store
             .create_key(rune_store::KeyType::Gate, "test").await
             .unwrap();
         let app = build_router(state, None);
@@ -751,7 +759,7 @@ mod tests {
         // Passing just the raw key without "Bearer " prefix should return 401
         let state = auth_state();
         let key_result = state
-            .store
+            .admin.store
             .create_key(rune_store::KeyType::Gate, "test").await
             .unwrap();
         let app = build_router(state, None);
@@ -995,25 +1003,33 @@ mod tests {
             FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
         ));
         let state = GateState {
-            relay,
-            resolver,
-            store,
-            key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(35),
-            )),
-            auth_enabled: false,
-            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            auth: AuthState {
+                key_verifier,
+                auth_enabled: false,
+                exempt_routes: Arc::new(vec!["/health".to_string()]),
+            },
+            rune: RuneState {
+                relay,
+                resolver,
+                session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(35),
+                )),
+                file_broker: Arc::new(FileBroker::new()),
+                max_upload_size_mb: 10,
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            },
+            flow: FlowState {
+                flow_engine,
+            },
+            admin: AdminState {
+                store,
+                started_at: Instant::now(),
+                dev_mode: true,
+            },
             cors_origins: Arc::new(vec![]),
-            dev_mode: true,
-            started_at: Instant::now(),
-            file_broker: Arc::new(FileBroker::new()),
-            max_upload_size_mb: 10,
-            flow_engine,
             rate_limiter: None,
             shutdown: ShutdownCoordinator::new(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         };
 
         for (path, expected_name) in [("/alpha", "alpha"), ("/beta", "beta"), ("/gamma", "gamma")] {
@@ -1110,11 +1126,11 @@ mod tests {
 
         // Manually insert a failed task
         state
-            .store
+            .admin.store
             .insert_task("fail-async", "echo", Some("input")).await
             .unwrap();
         state
-            .store
+            .admin.store
             .update_task_status(
                 "fail-async",
                 TaskStatus::Failed,
@@ -1156,11 +1172,11 @@ mod tests {
 
         // Insert a task in running state
         state
-            .store
+            .admin.store
             .insert_task("cancel-run", "echo", Some("data")).await
             .unwrap();
         state
-            .store
+            .admin.store
             .update_task_status("cancel-run", TaskStatus::Running, None, None).await
             .unwrap();
 
@@ -1185,7 +1201,7 @@ mod tests {
         assert_eq!(json["task_id"], "cancel-run");
 
         // Verify store state
-        let task = state.store.get_task("cancel-run").await.unwrap().unwrap();
+        let task = state.admin.store.get_task("cancel-run").await.unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Cancelled);
     }
 
@@ -1199,11 +1215,11 @@ mod tests {
 
         // Insert and cancel
         state
-            .store
+            .admin.store
             .insert_task("idempotent-cancel", "echo", Some("data")).await
             .unwrap();
         state
-            .store
+            .admin.store
             .update_task_status("idempotent-cancel", TaskStatus::Cancelled, None, Some("first cancel")).await
             .unwrap();
 
@@ -1283,7 +1299,7 @@ mod tests {
 
         // Query each independently
         for tid in &task_ids {
-            let task = state.store.get_task(tid).await.unwrap();
+            let task = state.admin.store.get_task(tid).await.unwrap();
             assert!(task.is_some(), "task {} should exist", tid);
             let task = task.unwrap();
             assert_eq!(
@@ -1336,25 +1352,33 @@ mod tests {
             FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
         ));
         let state = GateState {
-            relay,
-            resolver,
-            store,
-            key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(35),
-            )),
-            auth_enabled: false,
-            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            auth: AuthState {
+                key_verifier,
+                auth_enabled: false,
+                exempt_routes: Arc::new(vec!["/health".to_string()]),
+            },
+            rune: RuneState {
+                relay,
+                resolver,
+                session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(35),
+                )),
+                file_broker: Arc::new(FileBroker::new()),
+                max_upload_size_mb: 10,
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            },
+            flow: FlowState {
+                flow_engine,
+            },
+            admin: AdminState {
+                store,
+                started_at: Instant::now(),
+                dev_mode: true,
+            },
             cors_origins: Arc::new(vec![]),
-            dev_mode: true,
-            started_at: Instant::now(),
-            file_broker: Arc::new(FileBroker::new()),
-            max_upload_size_mb: 10,
-            flow_engine,
             rate_limiter: None,
             shutdown: ShutdownCoordinator::new(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         };
 
         let app = build_router(state, None);
@@ -1537,7 +1561,7 @@ mod tests {
 
         // Insert a task in pending state (insert_task default is pending)
         state
-            .store
+            .admin.store
             .insert_task("pending-cancel", "echo", Some("data")).await
             .unwrap();
 
@@ -1560,7 +1584,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "cancelled");
 
-        let task = state.store.get_task("pending-cancel").await.unwrap().unwrap();
+        let task = state.admin.store.get_task("pending-cancel").await.unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Cancelled);
     }
 
@@ -1623,7 +1647,7 @@ mod tests {
         // Wait and verify task completed
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let task_id = json["task_id"].as_str().unwrap();
-        let task = state.store.get_task(task_id).await.unwrap().unwrap();
+        let task = state.admin.store.get_task(task_id).await.unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Completed);
     }
 
@@ -1871,25 +1895,33 @@ mod tests {
             FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
         ));
         let state = GateState {
-            relay,
-            resolver,
-            store,
-            key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(35),
-            )),
-            auth_enabled: false,
-            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            auth: AuthState {
+                key_verifier,
+                auth_enabled: false,
+                exempt_routes: Arc::new(vec!["/health".to_string()]),
+            },
+            rune: RuneState {
+                relay,
+                resolver,
+                session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(35),
+                )),
+                file_broker: Arc::new(FileBroker::new()),
+                max_upload_size_mb: 10,
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            },
+            flow: FlowState {
+                flow_engine,
+            },
+            admin: AdminState {
+                store,
+                started_at: Instant::now(),
+                dev_mode: true,
+            },
             cors_origins: Arc::new(vec![]),
-            dev_mode: true,
-            started_at: Instant::now(),
-            file_broker: Arc::new(FileBroker::new()),
-            max_upload_size_mb: 10,
-            flow_engine,
             rate_limiter: None,
             shutdown: ShutdownCoordinator::new(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         };
 
         // Requesting the percent-encoded path — the dynamic_rune_handler
@@ -1967,25 +1999,33 @@ mod tests {
             FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
         ));
         let state = GateState {
-            relay,
-            resolver,
-            store,
-            key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(35),
-            )),
-            auth_enabled: false,
-            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            auth: AuthState {
+                key_verifier,
+                auth_enabled: false,
+                exempt_routes: Arc::new(vec!["/health".to_string()]),
+            },
+            rune: RuneState {
+                relay,
+                resolver,
+                session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(35),
+                )),
+                file_broker: Arc::new(FileBroker::new()),
+                max_upload_size_mb: 10,
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            },
+            flow: FlowState {
+                flow_engine,
+            },
+            admin: AdminState {
+                store,
+                started_at: Instant::now(),
+                dev_mode: true,
+            },
             cors_origins: Arc::new(vec![]),
-            dev_mode: true,
-            started_at: Instant::now(),
-            file_broker: Arc::new(FileBroker::new()),
-            max_upload_size_mb: 10,
-            flow_engine,
             rate_limiter: None,
             shutdown: ShutdownCoordinator::new(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         };
 
         // Debug route with a rune name that doesn't exist (contains unicode)
@@ -2050,25 +2090,33 @@ mod tests {
             FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
         ));
         let state = GateState {
-            relay,
-            resolver,
-            store,
-            key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(35),
-            )),
-            auth_enabled: false,
-            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            auth: AuthState {
+                key_verifier,
+                auth_enabled: false,
+                exempt_routes: Arc::new(vec!["/health".to_string()]),
+            },
+            rune: RuneState {
+                relay,
+                resolver,
+                session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(35),
+                )),
+                file_broker: Arc::new(FileBroker::new()),
+                max_upload_size_mb: 10,
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            },
+            flow: FlowState {
+                flow_engine,
+            },
+            admin: AdminState {
+                store,
+                started_at: Instant::now(),
+                dev_mode: true,
+            },
             cors_origins: Arc::new(vec![]),
-            dev_mode: true,
-            started_at: Instant::now(),
-            file_broker: Arc::new(FileBroker::new()),
-            max_upload_size_mb: 10,
-            flow_engine,
             rate_limiter: None,
             shutdown: ShutdownCoordinator::new(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         };
 
         // Percent-encoded request for "/符文"
@@ -2455,7 +2503,7 @@ mod tests {
     async fn test_file_equal_to_max_upload_size_succeeds() {
         // When max_upload_size_mb = 1, a file of exactly 1MB should pass.
         let mut state = test_state();
-        state.max_upload_size_mb = 1;
+        state.rune.max_upload_size_mb = 1;
         let app = build_router(state, None);
         let boundary = "----TestBoundarySizeEq";
         let exact_data = vec![0x42u8; 1 * 1024 * 1024];
@@ -2479,7 +2527,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_exceeds_max_upload_size_returns_413() {
         let mut state = test_state();
-        state.max_upload_size_mb = 1;
+        state.rune.max_upload_size_mb = 1;
         let app = build_router(state, None);
         let boundary = "----TestBoundarySizeOver";
         let big_data = vec![0x43u8; 2 * 1024 * 1024]; // 2MB > 1MB limit
@@ -2507,7 +2555,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_files_total_size_exceeds_limit_returns_413() {
         let mut state = test_state();
-        state.max_upload_size_mb = 1;
+        state.rune.max_upload_size_mb = 1;
         let app = build_router(state, None);
         let boundary = "----TestBoundaryMultiOver";
         let chunk = vec![0x44u8; 600 * 1024]; // 600KB each, total 1.2MB > 1MB
@@ -2781,9 +2829,9 @@ mod tests {
             .expect("should have file_id");
 
         // Step 2: Look up the request_id from the broker, then mark it completed
-        let stored = state.file_broker.get(file_id).expect("file should exist before cleanup");
+        let stored = state.rune.file_broker.get(file_id).expect("file should exist before cleanup");
         let request_id = stored.request_id.clone();
-        state.file_broker.complete_request(&request_id);
+        state.rune.file_broker.complete_request(&request_id);
 
         // Step 3: Try to download the cleaned-up file → should be 404
         let app2 = build_router(state, None);
@@ -3531,7 +3579,7 @@ mod tests {
     #[tokio::test]
     async fn test_max_upload_size_zero_rejects_all() {
         let mut state = test_state();
-        state.max_upload_size_mb = 0;
+        state.rune.max_upload_size_mb = 0;
         let app = build_router(state, None);
         let boundary = "----TestBoundaryZeroLimit";
         // Even a 1-byte file should be rejected
@@ -3864,25 +3912,33 @@ mod tests {
             FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
         ));
         GateState {
-            relay,
-            resolver,
-            store,
-            key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(35),
-            )),
-            auth_enabled: false,
-            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            auth: AuthState {
+                key_verifier,
+                auth_enabled: false,
+                exempt_routes: Arc::new(vec!["/health".to_string()]),
+            },
+            rune: RuneState {
+                relay,
+                resolver,
+                session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(35),
+                )),
+                file_broker: Arc::new(FileBroker::new()),
+                max_upload_size_mb: 10,
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            },
+            flow: FlowState {
+                flow_engine,
+            },
+            admin: AdminState {
+                store,
+                started_at: Instant::now(),
+                dev_mode: true,
+            },
             cors_origins: Arc::new(vec![]),
-            dev_mode: true,
-            started_at: Instant::now(),
-            file_broker: Arc::new(FileBroker::new()),
-            max_upload_size_mb: 10,
-            flow_engine,
             rate_limiter: None,
             shutdown: ShutdownCoordinator::new(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
 
@@ -4720,7 +4776,7 @@ mod tests {
                 })
             });
         state
-            .relay
+            .rune.relay
             .register(
                 RuneConfig {
                     name: "fail-rune".into(),
@@ -5272,7 +5328,7 @@ mod tests {
     async fn test_flow_create_with_valid_token() {
         let state = auth_state();
         let key_result = state
-            .store
+            .admin.store
             .create_key(rune_store::KeyType::Gate, "flow-test").await
             .unwrap();
         let app = build_router(state, None);
@@ -5744,25 +5800,33 @@ mod tests {
         ));
 
         let state = GateState {
-            relay,
-            resolver,
-            store,
-            key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(35),
-            )),
-            auth_enabled: !dev_mode,
-            exempt_routes: Arc::new(vec!["/health".to_string()]),
+            auth: AuthState {
+                key_verifier,
+                auth_enabled: !dev_mode,
+                exempt_routes: Arc::new(vec!["/health".to_string()]),
+            },
+            rune: RuneState {
+                relay,
+                resolver,
+                session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(35),
+                )),
+                file_broker: Arc::new(FileBroker::new()),
+                max_upload_size_mb: 10,
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            },
+            flow: FlowState {
+                flow_engine,
+            },
+            admin: AdminState {
+                store,
+                started_at: Instant::now(),
+                dev_mode,
+            },
             cors_origins: Arc::new(vec![]),
-            dev_mode,
-            started_at: Instant::now(),
-            file_broker: Arc::new(FileBroker::new()),
-            max_upload_size_mb: 10,
-            flow_engine,
             rate_limiter: if dev_mode { None } else { Some(RateLimitState::new(requests_per_minute, 1)) },
             shutdown: ShutdownCoordinator::new(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         };
 
         (state, raw_key)
@@ -5827,8 +5891,8 @@ mod tests {
     async fn test_rate_limit_different_keys_independent() {
         // Two different keys should have independent counters
         let (state, _key1) = rate_limit_state(2, false).await;
-        let key2_result = state.store.create_key(rune_store::KeyType::Gate, "key2").await.unwrap();
-        let key1 = state.store.create_key(rune_store::KeyType::Gate, "key1b").await.unwrap().raw_key;
+        let key2_result = state.admin.store.create_key(rune_store::KeyType::Gate, "key2").await.unwrap();
+        let key1 = state.admin.store.create_key(rune_store::KeyType::Gate, "key1b").await.unwrap().raw_key;
         let key2 = key2_result.raw_key;
 
         // Key1: 2 requests → both OK
@@ -6117,21 +6181,32 @@ mod tests {
         ));
 
         let state = GateState {
-            relay, resolver, store, key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(35),
-            )),
-            auth_enabled: false,
-            exempt_routes: Arc::new(vec!["/health".to_string()]),
-            cors_origins: Arc::new(vec![]), dev_mode: true,
-            started_at: Instant::now(),
-            file_broker: Arc::new(FileBroker::new()),
-            max_upload_size_mb: 10,
-            flow_engine,
+            auth: AuthState {
+                key_verifier,
+                auth_enabled: false,
+                exempt_routes: Arc::new(vec!["/health".to_string()]),
+            },
+            rune: RuneState {
+                relay, resolver,
+                session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(35),
+                )),
+                file_broker: Arc::new(FileBroker::new()),
+                max_upload_size_mb: 10,
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            },
+            flow: FlowState {
+                flow_engine,
+            },
+            admin: AdminState {
+                store,
+                started_at: Instant::now(),
+                dev_mode: true,
+            },
+            cors_origins: Arc::new(vec![]),
             rate_limiter: None,
             shutdown: ShutdownCoordinator::new(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         };
 
         let shutdown = state.shutdown.clone();
@@ -6195,21 +6270,32 @@ mod tests {
         ));
 
         let state = GateState {
-            relay, resolver, store, key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(35),
-            )),
-            auth_enabled: false,
-            exempt_routes: Arc::new(vec!["/health".to_string()]),
-            cors_origins: Arc::new(vec![]), dev_mode: true,
-            started_at: Instant::now(),
-            file_broker: Arc::new(FileBroker::new()),
-            max_upload_size_mb: 10,
-            flow_engine,
+            auth: AuthState {
+                key_verifier,
+                auth_enabled: false,
+                exempt_routes: Arc::new(vec!["/health".to_string()]),
+            },
+            rune: RuneState {
+                relay, resolver,
+                session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(35),
+                )),
+                file_broker: Arc::new(FileBroker::new()),
+                max_upload_size_mb: 10,
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            },
+            flow: FlowState {
+                flow_engine,
+            },
+            admin: AdminState {
+                store,
+                started_at: Instant::now(),
+                dev_mode: true,
+            },
+            cors_origins: Arc::new(vec![]),
             rate_limiter: None,
             shutdown: ShutdownCoordinator::new(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         };
 
         let app = build_router(state, None);
@@ -6645,21 +6731,32 @@ mod tests {
         ));
 
         let state = GateState {
-            relay, resolver, store, key_verifier,
-            session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(35),
-            )),
-            auth_enabled: false,
-            exempt_routes: Arc::new(vec!["/health".to_string()]),
-            cors_origins: Arc::new(vec![]), dev_mode: true,
-            started_at: Instant::now(),
-            file_broker: Arc::new(FileBroker::new()),
-            max_upload_size_mb: 10,
-            flow_engine,
+            auth: AuthState {
+                key_verifier,
+                auth_enabled: false,
+                exempt_routes: Arc::new(vec!["/health".to_string()]),
+            },
+            rune: RuneState {
+                relay, resolver,
+                session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(35),
+                )),
+                file_broker: Arc::new(FileBroker::new()),
+                max_upload_size_mb: 10,
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            },
+            flow: FlowState {
+                flow_engine,
+            },
+            admin: AdminState {
+                store,
+                started_at: Instant::now(),
+                dev_mode: true,
+            },
+            cors_origins: Arc::new(vec![]),
             rate_limiter: None,
             shutdown: ShutdownCoordinator::new(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         };
 
         // Spawn 5 concurrent slow requests
@@ -7087,7 +7184,7 @@ mod tests {
 
         // Manually store a file in the broker as if uploaded via multipart
         let request_id = "test-req-cleanup";
-        let _file_id = state.file_broker.store(
+        let _file_id = state.rune.file_broker.store(
             "test.txt".into(),
             "text/plain".into(),
             Bytes::from("file content"),
@@ -7095,13 +7192,13 @@ mod tests {
         );
 
         // Verify file is stored
-        assert_eq!(state.file_broker.files.len(), 1);
+        assert_eq!(state.rune.file_broker.files.len(), 1);
 
         // Call complete_request to clean up
-        state.file_broker.complete_request(request_id);
+        state.rune.file_broker.complete_request(request_id);
 
         // Verify file is removed
-        assert_eq!(state.file_broker.files.len(), 0, "FileBroker should have no files after complete_request");
+        assert_eq!(state.rune.file_broker.files.len(), 0, "FileBroker should have no files after complete_request");
     }
 
     // =======================================================================
@@ -7181,7 +7278,7 @@ mod tests {
         let app = build_router(state.clone(), None);
 
         // /echo is registered with gate_path="/echo" method="POST" — verify reverse index
-        let resolved = state.relay.resolve_by_gate_path("POST", "/echo");
+        let resolved = state.rune.relay.resolve_by_gate_path("POST", "/echo");
         assert_eq!(resolved, Some("echo".to_string()), "reverse index should map POST:/echo → echo");
 
         // Also verify the HTTP route still works via the fallback handler
@@ -7236,9 +7333,9 @@ mod tests {
         // Enable auth so auth_middleware would normally do a DB lookup.
         // Start drain so shutdown_middleware should reject with 503 first.
         let mut state = test_state();
-        state.auth_enabled = true;
-        state.dev_mode = false;
-        state.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.store.clone()));
+        state.auth.auth_enabled = true;
+        state.admin.dev_mode = false;
+        state.auth.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
 
         // Start drain BEFORE building the router
         state.shutdown.start_drain();
@@ -7360,7 +7457,7 @@ mod tests {
         let state = test_state();
 
         // Store a file whose name contains a double-quote character
-        let file_id = state.file_broker.store(
+        let file_id = state.rune.file_broker.store(
             r#"evil"name.txt"#.to_string(),
             "application/octet-stream".to_string(),
             bytes::Bytes::from_static(b"data"),
@@ -7408,10 +7505,10 @@ mod tests {
         // Create a state whose started_at is far in the past
         let mut state = test_state();
         // Simulate server running for a long time by setting started_at 1000s ago
-        state.started_at = std::time::Instant::now() - std::time::Duration::from_secs(1000);
+        state.admin.started_at = std::time::Instant::now() - std::time::Duration::from_secs(1000);
 
         // Insert a caster that connected "now" via the public test helper
-        state.session_mgr.insert_test_caster("test-caster-1", 5);
+        state.rune.session_mgr.insert_test_caster("test-caster-1", 5);
 
         let app = build_router(state, None);
         let resp = app
@@ -7498,7 +7595,7 @@ mod tests {
         let state = test_state();
         // Register a stream-capable rune
         let handler = make_handler(|_ctx, input| async move { Ok(input) });
-        state.relay.register(
+        state.rune.relay.register(
             RuneConfig {
                 name: "stream_log_test".into(),
                 version: "1.0.0".into(),
@@ -7535,7 +7632,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Check that a call log was recorded with mode=stream
-        let logs = state.store.query_logs(Some("stream_log_test"), 10).await.unwrap();
+        let logs = state.admin.store.query_logs(Some("stream_log_test"), 10).await.unwrap();
         assert!(
             !logs.is_empty(),
             "stream mode should record a call log"
@@ -7651,7 +7748,7 @@ mod tests {
         let cloned = state.clone();
         // Arc::ptr_eq verifies they share the same allocation (no deep copy)
         assert!(
-            Arc::ptr_eq(&state.exempt_routes, &cloned.exempt_routes),
+            Arc::ptr_eq(&state.auth.exempt_routes, &cloned.auth.exempt_routes),
             "exempt_routes should be shared via Arc after clone"
         );
         assert!(
@@ -7669,10 +7766,10 @@ mod tests {
         use crate::middleware::auth_middleware;
 
         let mut state = test_state();
-        state.auth_enabled = true;
+        state.auth.auth_enabled = true;
         // NoopVerifier accepts all keys, but requests without Authorization header
         // are rejected at the header-parsing stage (before verifier is called).
-        state.exempt_routes = Arc::new(vec!["/health".to_string()]);
+        state.auth.exempt_routes = Arc::new(vec!["/health".to_string()]);
 
         let app = Router::new()
             .route("/health", axum::routing::get(|| async { "ok" }))
@@ -7713,7 +7810,7 @@ mod tests {
         // After removing .to_vec(), download should still return correct data
         let state = test_state();
         let data = Bytes::from("file content here");
-        let file_id = state.file_broker.store(
+        let file_id = state.rune.file_broker.store(
             "test.txt".into(),
             "text/plain".into(),
             data.clone(),

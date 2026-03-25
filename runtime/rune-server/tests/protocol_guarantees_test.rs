@@ -279,25 +279,33 @@ fn build_guarantee_state() -> (GateState, Arc<Relay>, Arc<RuneStore>) {
     )));
 
     let state = GateState {
-        relay: Arc::clone(&relay),
-        resolver,
-        store: store.clone(),
-        key_verifier,
-        session_mgr: Arc::new(SessionManager::new_dev(
-            Duration::from_secs(10),
-            Duration::from_secs(35),
-        )),
-        auth_enabled: false,
-        exempt_routes: Arc::new(vec!["/health".to_string()]),
+        auth: gate::AuthState {
+            key_verifier,
+            auth_enabled: false,
+            exempt_routes: Arc::new(vec!["/health".to_string()]),
+        },
+        rune: gate::RuneState {
+            relay: Arc::clone(&relay),
+            resolver,
+            session_mgr: Arc::new(SessionManager::new_dev(
+                Duration::from_secs(10),
+                Duration::from_secs(35),
+            )),
+            file_broker: Arc::new(gate::FileBroker::new()),
+            max_upload_size_mb: 1,
+            request_timeout: Duration::from_secs(30),
+        },
+        flow: gate::FlowState {
+            flow_engine,
+        },
+        admin: gate::AdminState {
+            store: store.clone(),
+            started_at: Instant::now(),
+            dev_mode: true,
+        },
         cors_origins: Arc::new(vec![]),
-        dev_mode: true,
-        started_at: Instant::now(),
-        file_broker: Arc::new(gate::FileBroker::new()),
-        max_upload_size_mb: 1,
-        flow_engine,
         rate_limiter: None,
         shutdown: gate::ShutdownCoordinator::new(),
-        request_timeout: Duration::from_secs(30),
     };
 
     (state, relay, store)
@@ -631,7 +639,7 @@ async fn test_guarantee_06_disconnect_convergence() {
 #[tokio::test]
 async fn test_guarantee_07_no_state_pollution() {
     let (mut state, _relay, _store) = build_guarantee_state();
-    state.request_timeout = Duration::from_millis(200);
+    state.rune.request_timeout = Duration::from_millis(200);
     let (base, _h) = spawn_server(state).await;
 
     let c = Client::builder()

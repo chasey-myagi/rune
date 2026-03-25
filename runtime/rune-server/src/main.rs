@@ -179,26 +179,34 @@ async fn main() -> anyhow::Result<()> {
     let drain_timeout_secs = config.server.drain_timeout_secs;
 
     let gate_state = gate::GateState {
-        relay: Arc::clone(&running.relay),
-        resolver: Arc::clone(&running.resolver),
-        store: store.clone(),
-        key_verifier,
-        session_mgr: Arc::clone(&running.session_mgr),
-        auth_enabled: config.auth.enabled,
-        exempt_routes: Arc::new(config.auth.exempt_routes.clone()),
+        auth: gate::AuthState {
+            key_verifier,
+            auth_enabled: config.auth.enabled,
+            exempt_routes: Arc::new(config.auth.exempt_routes.clone()),
+        },
+        rune: gate::RuneState {
+            relay: Arc::clone(&running.relay),
+            resolver: Arc::clone(&running.resolver),
+            session_mgr: Arc::clone(&running.session_mgr),
+            file_broker: Arc::new(gate::FileBroker::new()),
+            max_upload_size_mb: config.gate.max_upload_size_mb,
+            request_timeout: config.default_timeout(),
+        },
+        flow: gate::FlowState {
+            flow_engine: Arc::clone(&flow_engine),
+        },
+        admin: gate::AdminState {
+            store: store.clone(),
+            started_at: Instant::now(),
+            dev_mode: config.server.dev_mode,
+        },
         cors_origins: Arc::new(config.gate.cors_origins.clone()),
-        dev_mode: config.server.dev_mode,
-        started_at: Instant::now(),
-        file_broker: Arc::new(gate::FileBroker::new()),
-        max_upload_size_mb: config.gate.max_upload_size_mb,
-        flow_engine: Arc::clone(&flow_engine),
         rate_limiter: if config.server.dev_mode {
             None
         } else {
             Some(gate::RateLimitState::new(config.rate_limit.requests_per_minute, 60))
         },
         shutdown: shutdown.clone(),
-        request_timeout: config.default_timeout(),
     };
 
     let http_router = gate::build_router(gate_state, None);

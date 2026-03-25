@@ -21,7 +21,7 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
 /// Returns Some(error_response) if the caller is NOT an admin, None if OK.
 async fn require_admin(state: &GateState, headers: &HeaderMap) -> Option<axum::response::Response> {
     // In dev mode, auth is disabled entirely — allow everything.
-    if state.dev_mode {
+    if state.admin.dev_mode {
         return None;
     }
 
@@ -36,7 +36,7 @@ async fn require_admin(state: &GateState, headers: &HeaderMap) -> Option<axum::r
         }
     };
 
-    if state.key_verifier.verify_admin_key(&raw_key).await {
+    if state.auth.key_verifier.verify_admin_key(&raw_key).await {
         None
     } else {
         Some(error_response(
@@ -56,7 +56,7 @@ pub async fn health(State(state): State<GateState>) -> axum::response::Response 
 
 pub async fn list_runes(State(state): State<GateState>) -> impl IntoResponse {
     let runes: Vec<serde_json::Value> = state
-        .relay
+        .rune.relay
         .list()
         .into_iter()
         .map(|(name, gate_path)| serde_json::json!({"name": name, "gate_path": gate_path}))
@@ -65,26 +65,26 @@ pub async fn list_runes(State(state): State<GateState>) -> impl IntoResponse {
 }
 
 pub async fn mgmt_status(State(state): State<GateState>) -> impl IntoResponse {
-    let uptime_secs = state.started_at.elapsed().as_secs();
-    let caster_count = state.session_mgr.caster_count();
-    let rune_count = state.relay.list().len();
+    let uptime_secs = state.admin.started_at.elapsed().as_secs();
+    let caster_count = state.rune.session_mgr.caster_count();
+    let rune_count = state.rune.relay.list().len();
 
     Json(serde_json::json!({
         "uptime_secs": uptime_secs,
         "caster_count": caster_count,
         "rune_count": rune_count,
-        "dev_mode": state.dev_mode,
+        "dev_mode": state.admin.dev_mode,
     }))
 }
 
 pub async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
-    let caster_ids = state.session_mgr.list_caster_ids();
+    let caster_ids = state.rune.session_mgr.list_caster_ids();
 
     // Build caster_id → rune names reverse mapping in one pass over entries
     let mut caster_runes: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
-    for (name, _) in state.relay.list() {
-        if let Some(entries) = state.relay.find(&name) {
+    for (name, _) in state.rune.relay.list() {
+        if let Some(entries) = state.rune.relay.find(&name) {
             for e in entries.value() {
                 if let Some(ref cid) = e.caster_id {
                     caster_runes
@@ -100,12 +100,12 @@ pub async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
         .iter()
         .map(|cid| {
             let runes = caster_runes.remove(cid.as_str()).unwrap_or_default();
-            let current_load = state.session_mgr.available_permits(cid);
+            let current_load = state.rune.session_mgr.available_permits(cid);
             serde_json::json!({
                 "caster_id": cid,
                 "runes": runes,
                 "current_load": current_load,
-                "connected_since": state.session_mgr.connected_at(cid)
+                "connected_since": state.rune.session_mgr.connected_at(cid)
                     .map(|t| t.elapsed().as_secs())
                     .unwrap_or(0),
             })
@@ -115,7 +115,7 @@ pub async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
 }
 
 pub async fn mgmt_stats(State(state): State<GateState>) -> impl IntoResponse {
-    match state.store.call_stats_enhanced().await {
+    match state.admin.store.call_stats_enhanced().await {
         Ok((total, by_rune)) => {
             let rune_stats: Vec<serde_json::Value> = by_rune
                 .into_iter()
@@ -147,7 +147,7 @@ pub async fn mgmt_logs(
     Query(params): Query<LogQuery>,
 ) -> impl IntoResponse {
     let limit = params.limit.unwrap_or(50).min(500);
-    match state.store.query_logs(params.rune.as_deref(), limit).await {
+    match state.admin.store.query_logs(params.rune.as_deref(), limit).await {
         Ok(logs) => Json(serde_json::json!({"logs": logs})).into_response(),
         Err(e) => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
@@ -178,7 +178,7 @@ pub async fn mgmt_create_key(
         }
     };
 
-    match state.store.create_key(key_type, &req.label).await {
+    match state.admin.store.create_key(key_type, &req.label).await {
         Ok(result) => (
             StatusCode::CREATED,
             Json(serde_json::json!({
@@ -201,7 +201,7 @@ pub async fn mgmt_list_keys(
         return denied;
     }
 
-    match state.store.list_keys().await {
+    match state.admin.store.list_keys().await {
         Ok(keys) => Json(serde_json::json!({"keys": keys})).into_response(),
         Err(e) => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
@@ -218,7 +218,7 @@ pub async fn mgmt_revoke_key(
         return denied;
     }
 
-    match state.store.revoke_key(id).await {
+    match state.admin.store.revoke_key(id).await {
         Ok(()) => Json(serde_json::json!({"status": "revoked", "id": id})).into_response(),
         Err(e) => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())

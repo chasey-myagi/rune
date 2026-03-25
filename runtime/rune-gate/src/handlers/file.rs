@@ -13,7 +13,7 @@ pub async fn download_file(
 ) -> axum::response::Response {
     // Files are cleaned up by complete_request() after the rune handler returns.
     // Use get() here so downloads can be retried if the connection drops.
-    match state.file_broker.get(&file_id) {
+    match state.rune.file_broker.get(&file_id) {
         Some(stored) => {
             let headers = [
                 (

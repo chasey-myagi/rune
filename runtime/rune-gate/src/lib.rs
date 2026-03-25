@@ -13,7 +13,7 @@ pub mod router;
 pub mod gate;
 
 // Also re-export at crate root for convenience
-pub use state::GateState;
+pub use state::{GateState, AuthState, RuneState, FlowState, AdminState};
 pub use router::build_router;
 pub use shutdown::ShutdownCoordinator;
 pub use rate_limit::RateLimitState;

@@ -14,26 +14,50 @@ use crate::shutdown::ShutdownCoordinator;
 /// Default request timeout (used when request_timeout is not set).
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Gate shared state
+/// Authentication-related state.
 #[derive(Clone)]
-pub struct GateState {
-    pub relay: Arc<Relay>,
-    pub resolver: Arc<dyn Resolver>,
-    pub store: Arc<RuneStore>,
+pub struct AuthState {
     pub key_verifier: Arc<dyn KeyVerifier>,
-    pub session_mgr: Arc<rune_core::session::SessionManager>,
     pub auth_enabled: bool,
     pub exempt_routes: Arc<Vec<String>>,
-    pub cors_origins: Arc<Vec<String>>,
-    pub dev_mode: bool,
-    pub started_at: Instant,
+}
+
+/// Rune execution-related state.
+#[derive(Clone)]
+pub struct RuneState {
+    pub relay: Arc<Relay>,
+    pub resolver: Arc<dyn Resolver>,
+    pub session_mgr: Arc<rune_core::session::SessionManager>,
     pub file_broker: Arc<FileBroker>,
     pub max_upload_size_mb: u64,
-    pub flow_engine: Arc<tokio::sync::RwLock<FlowEngine>>,
-    pub rate_limiter: Option<RateLimitState>,
-    pub shutdown: ShutdownCoordinator,
     /// Timeout for individual rune/flow step invocations (from config).
     pub request_timeout: Duration,
+}
+
+/// Flow engine state.
+#[derive(Clone)]
+pub struct FlowState {
+    pub flow_engine: Arc<tokio::sync::RwLock<FlowEngine>>,
+}
+
+/// Administration / operational state.
+#[derive(Clone)]
+pub struct AdminState {
+    pub store: Arc<RuneStore>,
+    pub started_at: Instant,
+    pub dev_mode: bool,
+}
+
+/// Gate shared state — composed of semantic sub-states.
+#[derive(Clone)]
+pub struct GateState {
+    pub auth: AuthState,
+    pub rune: RuneState,
+    pub flow: FlowState,
+    pub admin: AdminState,
+    pub cors_origins: Arc<Vec<String>>,
+    pub rate_limiter: Option<RateLimitState>,
+    pub shutdown: ShutdownCoordinator,
 }
 
 #[derive(serde::Deserialize, Default)]

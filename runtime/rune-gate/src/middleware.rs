@@ -12,12 +12,12 @@ pub async fn auth_middleware(
     req: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
-    if !state.auth_enabled {
+    if !state.auth.auth_enabled {
         return next.run(req).await;
     }
 
     let path = req.uri().path().to_string();
-    if state.exempt_routes.iter().any(|r| path == *r || path.starts_with(&format!("{}/", r))) {
+    if state.auth.exempt_routes.iter().any(|r| path == *r || path.starts_with(&format!("{}/", r))) {
         return next.run(req).await;
     }
 
@@ -30,7 +30,7 @@ pub async fn auth_middleware(
 
     match auth_header {
         Some(key) => {
-            if state.key_verifier.verify_gate_key(&key).await {
+            if state.auth.key_verifier.verify_gate_key(&key).await {
                 next.run(req).await
             } else {
                 error_response(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "invalid api key")
@@ -65,7 +65,7 @@ pub async fn rate_limit_middleware(
     next: Next,
 ) -> axum::response::Response {
     // Skip rate limiting in dev mode or if not configured
-    if state.dev_mode {
+    if state.admin.dev_mode {
         return next.run(req).await;
     }
 
@@ -77,7 +77,7 @@ pub async fn rate_limit_middleware(
     let path = req.uri().path().to_string();
 
     // Exempt routes (e.g. /health)
-    if state.exempt_routes.iter().any(|r| path == *r || path.starts_with(&format!("{}/", r))) {
+    if state.auth.exempt_routes.iter().any(|r| path == *r || path.starts_with(&format!("{}/", r))) {
         return next.run(req).await;
     }
 
