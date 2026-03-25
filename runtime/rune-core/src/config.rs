@@ -437,9 +437,8 @@ mod tests {
     fn test_fix_from_path_with_pathbuf() {
         // Regression test for M-5: from_path must accept PathBuf directly
         // without going through to_str() which can fail on non-UTF-8 paths.
-        let dir = std::env::temp_dir().join("rune_test_m5");
-        let _ = std::fs::create_dir_all(&dir);
-        let config_path = dir.join("test.toml");
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("test.toml");
         std::fs::write(
             &config_path,
             r#"
@@ -451,9 +450,7 @@ http_port = 19999
 
         let config = AppConfig::from_path(&config_path).unwrap();
         assert_eq!(config.server.http_port, 19999);
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&dir);
+        // dir auto-cleaned on drop
     }
 
     #[test]

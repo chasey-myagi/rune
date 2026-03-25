@@ -130,6 +130,15 @@ impl Resolver for PriorityResolver {
             let picked = self.inner.pick(rune_name, &top_tier)?;
             // Safe index lookup: match by (name, caster_id) value equality,
             // which is robust even if inner resolver clones or rebinds references.
+            // Precondition: (name, caster_id) must be unique within top_tier.
+            debug_assert!({
+                let mut pairs: Vec<_> = top_tier.iter()
+                    .map(|e| (&e.config.name, &e.caster_id))
+                    .collect();
+                pairs.sort();
+                pairs.dedup();
+                pairs.len() == top_tier.len()
+            }, "top_tier contains duplicate (name, caster_id) entries");
             let inner_idx = top_tier.iter().position(|e| {
                 e.config.name == picked.config.name && e.caster_id == picked.caster_id
             }).unwrap_or(0);

@@ -6,19 +6,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Returns the current time as milliseconds since the Unix epoch.
 pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_millis() as u64,
+        Err(_) => {
+            eprintln!("WARNING: system clock is before Unix epoch, returning 0");
+            0
+        }
+    }
 }
 
 /// Returns the current time as an ISO 8601 string (UTC, second precision).
 ///
 /// Format: `YYYY-MM-DDThh:mm:ssZ`
 pub fn now_iso8601() -> String {
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
+    let dur = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("WARNING: system clock is before Unix epoch, returning epoch");
+            std::time::Duration::default()
+        }
+    };
     let secs = dur.as_secs();
     let days = secs / 86400;
     let time_secs = secs % 86400;
