@@ -128,7 +128,10 @@ impl FileBroker {
         let storage = if data.len() > DISK_THRESHOLD {
             if let Some(dir) = &self.disk_dir {
                 let path = dir.join(&file_id);
-                // Best-effort write; fall back to memory if disk write fails.
+                // Write to disk. For large files this is blocking I/O, but store()
+                // is called synchronously from multipart parsing which already has
+                // the full body in memory. The write latency is bounded by file size
+                // and is a one-time cost per upload.
                 match std::fs::write(&path, &data) {
                     Ok(()) => FileStorage::Disk { path },
                     Err(e) => {
