@@ -3,42 +3,60 @@ use crate::store::RuneStore;
 use async_trait::async_trait;
 use rune_core::auth::KeyVerifier;
 use std::sync::Arc;
+
 pub struct StoreKeyVerifier {
     store: Arc<RuneStore>,
+    /// HMAC secret for key verification. When `Some`, uses HMAC-SHA256 with
+    /// fallback to legacy SHA-256. When `None`, uses plain SHA-256 only.
+    hmac_secret: Option<Vec<u8>>,
 }
+
 impl StoreKeyVerifier {
+    /// Create a verifier that uses legacy SHA-256 only (backward compatible).
     pub fn new(store: Arc<RuneStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            hmac_secret: None,
+        }
+    }
+
+    /// Create a verifier that uses HMAC-SHA256 with fallback to legacy SHA-256.
+    pub fn with_hmac_secret(store: Arc<RuneStore>, secret: Vec<u8>) -> Self {
+        Self {
+            store,
+            hmac_secret: Some(secret),
+        }
+    }
+
+    async fn verify(&self, raw_key: &str, key_type: KeyType) -> bool {
+        let result = match &self.hmac_secret {
+            Some(secret) => self.store.verify_key_hmac(raw_key, key_type, secret).await,
+            None => self.store.verify_key(raw_key, key_type).await,
+        };
+        result
+            .inspect_err(|e| {
+                tracing::error!(
+                    key_type = key_type.as_str(),
+                    error = %e,
+                    "verify_key failed due to store error"
+                )
+            })
+            .ok()
+            .flatten()
+            .is_some()
     }
 }
+
 #[async_trait]
 impl KeyVerifier for StoreKeyVerifier {
     async fn verify_gate_key(&self, raw_key: &str) -> bool {
-        self.store
-            .verify_key(raw_key, KeyType::Gate)
-            .await
-            .inspect_err(|e| tracing::error!(key_type = "gate", error = %e, "verify_key failed due to store error"))
-            .ok()
-            .flatten()
-            .is_some()
+        self.verify(raw_key, KeyType::Gate).await
     }
     async fn verify_caster_key(&self, raw_key: &str) -> bool {
-        self.store
-            .verify_key(raw_key, KeyType::Caster)
-            .await
-            .inspect_err(|e| tracing::error!(key_type = "caster", error = %e, "verify_key failed due to store error"))
-            .ok()
-            .flatten()
-            .is_some()
+        self.verify(raw_key, KeyType::Caster).await
     }
     async fn verify_admin_key(&self, raw_key: &str) -> bool {
-        self.store
-            .verify_key(raw_key, KeyType::Admin)
-            .await
-            .inspect_err(|e| tracing::error!(key_type = "admin", error = %e, "verify_key failed due to store error"))
-            .ok()
-            .flatten()
-            .is_some()
+        self.verify(raw_key, KeyType::Admin).await
     }
 }
 #[cfg(test)]
@@ -107,5 +125,31 @@ mod tests {
         let verifier = StoreKeyVerifier::new(store);
         // Should return false (not panic), and the error is logged via inspect_err
         assert!(!verifier.verify_gate_key(&result.raw_key).await);
+    }
+
+    #[tokio::test]
+    async fn test_hmac_verifier_with_hmac_key() {
+        let secret = b"test-hmac-secret".to_vec();
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let result = store
+            .create_key_hmac(KeyType::Gate, "hmac gate key", &secret)
+            .await
+            .unwrap();
+        let verifier = StoreKeyVerifier::with_hmac_secret(store, secret);
+        assert!(verifier.verify_gate_key(&result.raw_key).await);
+    }
+
+    #[tokio::test]
+    async fn test_hmac_verifier_legacy_fallback() {
+        let secret = b"test-hmac-secret".to_vec();
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        // Create key with legacy SHA-256
+        let result = store
+            .create_key(KeyType::Gate, "legacy gate key")
+            .await
+            .unwrap();
+        // Verify with HMAC verifier — should fall back to SHA-256
+        let verifier = StoreKeyVerifier::with_hmac_secret(store, secret);
+        assert!(verifier.verify_gate_key(&result.raw_key).await);
     }
 }

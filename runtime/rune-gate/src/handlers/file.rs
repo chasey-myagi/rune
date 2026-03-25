@@ -28,7 +28,14 @@ pub async fn download_file(
                     ),
                 ),
             ];
-            (StatusCode::OK, headers, stored.data).into_response()
+            match stored.data() {
+                Ok(data) => (StatusCode::OK, headers, data).into_response(),
+                Err(_) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "FILE_READ_ERROR",
+                    "failed to read file data",
+                ),
+            }
         }
         None => error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "file not found"),
     }

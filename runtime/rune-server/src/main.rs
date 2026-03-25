@@ -51,7 +51,24 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Key Verifier ──
     let key_verifier: Arc<dyn KeyVerifier> = if config.auth.enabled {
-        Arc::new(StoreKeyVerifier::new(store.clone()))
+        let hmac_secret = config.auth.hmac_secret.clone().unwrap_or_else(|| {
+            if config.server.dev_mode {
+                tracing::info!("dev mode: using fixed HMAC secret for key hashing");
+                "dev-hmac-secret".to_string()
+            } else {
+                let secret = hex::encode(rand::random::<[u8; 32]>());
+                tracing::warn!(
+                    "no HMAC secret configured (auth.hmac_secret); generated a random \
+                     ephemeral secret — keys created now will NOT survive a restart. \
+                     Set RUNE_AUTH__HMAC_SECRET or auth.hmac_secret in config."
+                );
+                secret
+            }
+        });
+        Arc::new(StoreKeyVerifier::with_hmac_secret(
+            store.clone(),
+            hmac_secret.into_bytes(),
+        ))
     } else {
         Arc::new(NoopVerifier)
     };

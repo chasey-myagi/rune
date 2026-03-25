@@ -36,6 +36,11 @@ impl Default for ServerConfig {
 pub struct AuthConfig {
     pub enabled: bool,
     pub exempt_routes: Vec<String>,
+    /// HMAC secret for API key hashing. When set, keys are hashed with
+    /// HMAC-SHA256 instead of plain SHA-256. Existing SHA-256 keys remain
+    /// verifiable via automatic fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hmac_secret: Option<String>,
 }
 
 impl Default for AuthConfig {
@@ -43,6 +48,7 @@ impl Default for AuthConfig {
         Self {
             enabled: true,
             exempt_routes: vec!["/health".to_string()],
+            hmac_secret: None,
         }
     }
 }
@@ -269,6 +275,9 @@ impl AppConfig {
 
         // Auth
         env_override!("RUNE_AUTH__ENABLED", self.auth.enabled, bool);
+        if let Ok(v) = std::env::var("RUNE_AUTH__HMAC_SECRET") {
+            self.auth.hmac_secret = if v.is_empty() { None } else { Some(v) };
+        }
 
         // Store
         env_override_string!("RUNE_STORE__DB_PATH", self.store.db_path);
