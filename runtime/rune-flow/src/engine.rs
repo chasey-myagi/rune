@@ -40,6 +40,17 @@ pub enum FlowError {
 /// Default step timeout when not configured.
 const DEFAULT_STEP_TIMEOUT_SECS: u64 = 30;
 
+/// Lightweight handle for executing flows without holding the engine lock.
+///
+/// Created via [`FlowEngine::runner()`]. Clone the necessary `Arc` fields from
+/// `FlowEngine`, then release the lock and run the (potentially long)
+/// execution on this handle instead.
+pub struct FlowRunner {
+    relay: Arc<Relay>,
+    resolver: Arc<dyn Resolver>,
+    step_timeout: std::time::Duration,
+}
+
 #[allow(dead_code)]
 pub struct FlowEngine {
     flows: HashMap<String, FlowDefinition>,
@@ -65,6 +76,15 @@ impl FlowEngine {
             relay,
             resolver,
             step_timeout,
+        }
+    }
+
+    /// Create a lightweight runner that can execute flows without the engine lock.
+    pub fn runner(&self) -> FlowRunner {
+        FlowRunner {
+            relay: Arc::clone(&self.relay),
+            resolver: Arc::clone(&self.resolver),
+            step_timeout: self.step_timeout,
         }
     }
 
@@ -96,9 +116,18 @@ impl FlowEngine {
     }
 
     /// Execute a pre-fetched FlowDefinition without looking it up from the
-    /// internal registry.  This allows callers to clone the definition, release
-    /// any lock protecting the engine, and then run the (potentially long)
-    /// execution without holding that lock.
+    /// internal registry.  Delegates to [`FlowRunner::execute_flow`].
+    pub async fn execute_flow(&self, flow: &FlowDefinition, input: Bytes) -> Result<FlowResult, FlowError> {
+        self.runner().execute_flow(flow, input).await
+    }
+}
+
+impl FlowRunner {
+    /// Execute a pre-fetched FlowDefinition.
+    ///
+    /// This is the core execution logic.  Because `FlowRunner` only holds
+    /// cheap `Arc` clones, callers can drop the engine lock before calling
+    /// this method.
     pub async fn execute_flow(&self, flow: &FlowDefinition, input: Bytes) -> Result<FlowResult, FlowError> {
 
         // 空 flow: passthrough
@@ -194,7 +223,7 @@ impl FlowEngine {
                 let step_def = &flow.steps[step_idx];
 
                 // 构造 step input
-                let step_input = self.build_step_input(
+                let step_input = Self::build_step_input(
                     step_def,
                     &input,
                     &step_outputs,
@@ -284,7 +313,7 @@ impl FlowEngine {
         }
 
         // 确定最终输出：取最后一层中最后一个完成的 step 的 output
-        let output = self.determine_output(flow, &step_outputs, &input);
+        let output = Self::determine_output(flow, &step_outputs, &input);
 
         Ok(FlowResult {
             output,
@@ -294,7 +323,6 @@ impl FlowEngine {
     }
 
     fn build_step_input(
-        &self,
         step_def: &crate::dag::StepDefinition,
         flow_input: &Bytes,
         step_outputs: &HashMap<String, Option<Bytes>>,
@@ -323,7 +351,6 @@ impl FlowEngine {
     }
 
     fn determine_output(
-        &self,
         flow: &FlowDefinition,
         step_outputs: &HashMap<String, Option<Bytes>>,
         flow_input: &Bytes,

@@ -9,6 +9,7 @@ use axum::{
 };
 use bytes::Bytes;
 use rune_flow::dag::FlowDefinition;
+use rune_flow::engine::FlowRunner;
 use rune_store::TaskStatus;
 use tokio::sync::mpsc;
 
@@ -150,11 +151,12 @@ pub async fn run_flow(
         );
     }
 
-    // Clone the flow definition and release the read lock before execution.
-    // This prevents long-running flow executions from blocking flow registration.
-    let flow_def = {
+    // Clone the flow definition and a lightweight runner, then release the
+    // read lock.  This prevents long-running flow executions from blocking
+    // flow registration (which needs a write lock).
+    let (flow_def, runner) = {
         let engine = state.flow.flow_engine.read().await;
-        match engine.get(&name) {
+        let flow = match engine.get(&name) {
             Some(f) => f.clone(),
             None => {
                 return error_response(
@@ -163,23 +165,23 @@ pub async fn run_flow(
                     &format!("flow '{}' not found", name),
                 );
             }
-        }
-    };
+        };
+        let runner = engine.runner();
+        (flow, runner)
+    }; // lock released here
 
     // Stream mode
     if params.stream.unwrap_or(false) {
-        return run_flow_stream(&state, &name, body, flow_def).await;
+        return run_flow_stream(body, flow_def, runner).await;
     }
 
     // Async mode
     if params.async_mode.unwrap_or(false) {
-        return run_flow_async(&state, &name, body, flow_def).await;
+        return run_flow_async(&state, &name, body, flow_def, runner).await;
     }
 
-    // Sync mode (default) — lock is only held briefly to access relay/resolver,
-    // the actual execution uses the cloned flow definition.
-    let engine = state.flow.flow_engine.read().await;
-    match engine.execute_flow(&flow_def, body).await {
+    // Sync mode (default) — no lock held during execution.
+    match runner.execute_flow(&flow_def, body).await {
         Ok(result) => {
             let output_json = serde_json::from_slice::<serde_json::Value>(&result.output)
                 .unwrap_or(serde_json::Value::Null);
@@ -201,6 +203,7 @@ pub async fn run_flow_async(
     flow_name: &str,
     body: Bytes,
     flow_def: FlowDefinition,
+    runner: FlowRunner,
 ) -> axum::response::Response {
     let task_id = unique_request_id();
     let input_str = String::from_utf8_lossy(&body).to_string();
@@ -214,13 +217,11 @@ pub async fn run_flow_async(
     }
     let _ = state.admin.store.update_task_status(&task_id, TaskStatus::Running, None, None).await;
 
-    let engine = Arc::clone(&state.flow.flow_engine);
     let store = Arc::clone(&state.admin.store);
     let tid = task_id.clone();
 
     tokio::spawn(async move {
-        let eng = engine.read().await;
-        match eng.execute_flow(&flow_def, body).await {
+        match runner.execute_flow(&flow_def, body).await {
             Ok(result) => {
                 let output_str = String::from_utf8_lossy(&result.output).to_string();
                 let val = serde_json::from_str::<serde_json::Value>(&output_str)
@@ -259,18 +260,14 @@ pub async fn run_flow_async(
 }
 
 pub async fn run_flow_stream(
-    state: &GateState,
-    _flow_name: &str,
     body: Bytes,
     flow_def: FlowDefinition,
+    runner: FlowRunner,
 ) -> axum::response::Response {
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
 
-    let engine = Arc::clone(&state.flow.flow_engine);
-
     tokio::spawn(async move {
-        let eng = engine.read().await;
-        match eng.execute_flow(&flow_def, body).await {
+        match runner.execute_flow(&flow_def, body).await {
             Ok(result) => {
                 let output_json = serde_json::from_slice::<serde_json::Value>(&result.output)
                     .unwrap_or(serde_json::Value::Null);

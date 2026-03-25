@@ -7,6 +7,16 @@ use axum::{
 use crate::error::error_response;
 use crate::state::GateState;
 
+/// Zero-allocation exempt route check.
+/// Matches exact path or path prefix followed by '/'.
+fn is_exempt(path: &str, exempt_routes: &[String]) -> bool {
+    exempt_routes.iter().any(|r| {
+        path == r.as_str()
+            || (path.starts_with(r.as_str())
+                && (r.ends_with('/') || path.as_bytes().get(r.len()) == Some(&b'/')))
+    })
+}
+
 pub async fn auth_middleware(
     State(state): State<GateState>,
     req: axum::extract::Request,
@@ -17,7 +27,7 @@ pub async fn auth_middleware(
     }
 
     let path = req.uri().path().to_string();
-    if state.auth.exempt_routes.iter().any(|r| path == *r || path.starts_with(&format!("{}/", r))) {
+    if is_exempt(&path, &state.auth.exempt_routes) {
         return next.run(req).await;
     }
 
@@ -77,7 +87,7 @@ pub async fn rate_limit_middleware(
     let path = req.uri().path().to_string();
 
     // Exempt routes (e.g. /health)
-    if state.auth.exempt_routes.iter().any(|r| path == *r || path.starts_with(&format!("{}/", r))) {
+    if is_exempt(&path, &state.auth.exempt_routes) {
         return next.run(req).await;
     }
 
@@ -117,5 +127,39 @@ pub async fn rate_limit_middleware(
             );
             response
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_exempt_exact_match() {
+        let routes = vec!["/health".to_string(), "/ready".to_string()];
+        assert!(is_exempt("/health", &routes));
+        assert!(is_exempt("/ready", &routes));
+        assert!(!is_exempt("/other", &routes));
+    }
+
+    #[test]
+    fn test_is_exempt_prefix_match() {
+        let routes = vec!["/api/v1/status".to_string()];
+        assert!(is_exempt("/api/v1/status", &routes));
+        assert!(is_exempt("/api/v1/status/detail", &routes));
+        assert!(!is_exempt("/api/v1/statusx", &routes));
+    }
+
+    #[test]
+    fn test_is_exempt_empty_routes() {
+        let routes: Vec<String> = vec![];
+        assert!(!is_exempt("/anything", &routes));
+    }
+
+    #[test]
+    fn test_is_exempt_root_path() {
+        let routes = vec!["/".to_string()];
+        assert!(is_exempt("/", &routes));
+        assert!(is_exempt("/anything", &routes));
     }
 }
