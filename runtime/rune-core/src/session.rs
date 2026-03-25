@@ -166,29 +166,6 @@ impl SessionManager {
         });
         drop(shutdown_tx);
 
-        // Timeout scanner
-        let timeout_pending = Arc::clone(&pending);
-        let timeout_handle = tokio::spawn(async move {
-            loop {
-                time::sleep(Duration::from_secs(1)).await;
-                let now = Instant::now();
-                let expired: Vec<String> = timeout_pending.iter()
-                    .filter(|e| now.duration_since(e.value().created_at) > e.value().timeout)
-                    .map(|e| e.key().clone())
-                    .collect();
-                for req_id in expired {
-                    if let Some((_, p)) = timeout_pending.remove(&req_id) {
-                        tracing::warn!(request_id = %req_id, "request timed out");
-                        // permit auto-returned when PendingRequest is dropped
-                        match p.tx {
-                            PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
-                            PendingResponse::Stream(tx) => { let _ = tx.send(Err(RuneError::Timeout)).await; }
-                        }
-                    }
-                }
-            }
-        });
-
         loop {
             let msg = tokio::select! {
                 result = inbound.message() => {
@@ -335,7 +312,6 @@ impl SessionManager {
         }
 
         hb_handle.abort();
-        timeout_handle.abort();
         let _ = state; // state is now Disconnected conceptually
         if let Some(id) = &caster_id {
             tracing::info!(caster_id = %id, "cleaning up disconnected caster");
@@ -369,6 +345,23 @@ impl SessionManager {
             _permit: permit,
         });
 
+        // Per-request timeout: spawn a task that fires after the request's timeout
+        let timeout_pending = Arc::clone(&session.pending);
+        let timeout_req_id = request_id.to_string();
+        let req_timeout = timeout;
+        tokio::spawn(async move {
+            tokio::time::sleep(req_timeout).await;
+            // If still pending when timeout fires, remove and send error
+            if let Some((_, p)) = timeout_pending.remove(&timeout_req_id) {
+                tracing::warn!(request_id = %timeout_req_id, "request timed out");
+                match p.tx {
+                    PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
+                    PendingResponse::Stream(tx) => { let _ = tx.send(Err(RuneError::Timeout)).await; }
+                }
+            }
+            // If already removed (completed/cancelled), this is a no-op
+        });
+
         let msg = SessionMessage {
             payload: Some(session_message::Payload::Execute(ExecuteRequest {
                 request_id: request_id.to_string(), rune_name: rune_name.to_string(),
@@ -400,6 +393,23 @@ impl SessionManager {
         session.pending.insert(request_id.to_string(), PendingRequest {
             tx: PendingResponse::Stream(tx), created_at: Instant::now(), timeout,
             _permit: permit,
+        });
+
+        // Per-request timeout: spawn a task that fires after the request's timeout
+        let timeout_pending = Arc::clone(&session.pending);
+        let timeout_req_id = request_id.to_string();
+        let req_timeout = timeout;
+        tokio::spawn(async move {
+            tokio::time::sleep(req_timeout).await;
+            // If still pending when timeout fires, remove and send error
+            if let Some((_, p)) = timeout_pending.remove(&timeout_req_id) {
+                tracing::warn!(request_id = %timeout_req_id, "request timed out");
+                match p.tx {
+                    PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
+                    PendingResponse::Stream(tx) => { let _ = tx.send(Err(RuneError::Timeout)).await; }
+                }
+            }
+            // If already removed (completed/cancelled), this is a no-op
         });
 
         let msg = SessionMessage {

@@ -128,17 +128,11 @@ impl Resolver for PriorityResolver {
             // Build a temporary vec of top-tier entries for inner resolver
             let top_tier: Vec<RuneEntry> = top_indices.iter().map(|&i| candidates[i].clone()).collect();
             let picked = self.inner.pick(rune_name, &top_tier)?;
-            // Map back using index: the inner resolver returns a reference into
-            // top_tier, so we compute the offset within that slice.
-            let picked_ptr = picked as *const RuneEntry;
-            let base_ptr = top_tier.as_ptr();
-            let inner_idx = (picked_ptr as usize - base_ptr as usize) / std::mem::size_of::<RuneEntry>();
-            if inner_idx < top_indices.len() {
-                Some(&candidates[top_indices[inner_idx]])
-            } else {
-                // Fallback: shouldn't happen
-                Some(&candidates[top_indices[0]])
-            }
+            // Safe index lookup: find which element in top_tier was picked.
+            // picked's lifetime is tied to top_tier; ptr::eq works because both
+            // references point into the same Vec allocation.
+            let inner_idx = top_tier.iter().position(|e| std::ptr::eq(e, picked)).unwrap_or(0);
+            Some(&candidates[top_indices[inner_idx]])
         }
     }
 }
@@ -271,5 +265,25 @@ mod tests {
         let resolver = RoundRobinResolver::new();
         // Should not panic
         resolver.remove_counter("nonexistent");
+    }
+
+    #[test]
+    fn priority_resolver_many_candidates_stress() {
+        let inner = Arc::new(RoundRobinResolver::new());
+        let resolver = PriorityResolver::new(inner);
+        let mut candidates: Vec<RuneEntry> = (0..10)
+            .map(|i| make_entry(&format!("low_{}", i), 1))
+            .collect();
+        candidates.push(make_entry("high_a", 10));
+        candidates.push(make_entry("high_b", 10));
+        candidates.push(make_entry("high_c", 10));
+
+        let names: Vec<String> = (0..6)
+            .map(|_| resolver.pick("stress", &candidates).unwrap().config.name.clone())
+            .collect();
+        assert_eq!(names[0], "high_a");
+        assert_eq!(names[1], "high_b");
+        assert_eq!(names[2], "high_c");
+        assert_eq!(names[3], "high_a");
     }
 }

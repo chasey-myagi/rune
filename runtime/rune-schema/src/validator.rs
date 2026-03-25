@@ -24,7 +24,7 @@ fn cache() -> &'static ValidatorCache {
 fn get_or_compile(schema_str: &str) -> Result<Arc<jsonschema::Validator>, SchemaError> {
     // Fast path: read lock
     {
-        let cache = cache().read().unwrap();
+        let cache = cache().read().unwrap_or_else(|e| e.into_inner());
         if let Some(v) = cache.get(schema_str) {
             return Ok(Arc::clone(v));
         }
@@ -37,7 +37,7 @@ fn get_or_compile(schema_str: &str) -> Result<Arc<jsonschema::Validator>, Schema
         .map_err(|e| SchemaError::InvalidSchema(e.to_string()))?;
     let v = Arc::new(validator);
 
-    let mut cache = cache().write().unwrap();
+    let mut cache = cache().write().unwrap_or_else(|e| e.into_inner());
     cache.insert(schema_str.to_string(), Arc::clone(&v));
     Ok(v)
 }
@@ -45,7 +45,7 @@ fn get_or_compile(schema_str: &str) -> Result<Arc<jsonschema::Validator>, Schema
 /// Clear the validator cache. Mainly used for benchmarking cold-start scenarios.
 pub fn clear_validator_cache() {
     if let Some(c) = VALIDATOR_CACHE.get() {
-        c.write().unwrap().clear();
+        c.write().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 

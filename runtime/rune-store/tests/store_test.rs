@@ -2325,3 +2325,36 @@ fn test_key_type_from_str_valid_values() {
     assert_eq!(KeyType::from_str("caster"), Some(KeyType::Caster));
     assert_eq!(KeyType::from_str("admin"), Some(KeyType::Admin));
 }
+
+// ============================================================
+// WAL mode & busy_timeout
+// ============================================================
+
+#[tokio::test]
+async fn test_wal_mode_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test_wal.db");
+    let store = RuneStore::open(&db_path).unwrap();
+
+    let mode = store.journal_mode().unwrap();
+    assert_eq!(
+        mode.to_lowercase(),
+        "wal",
+        "journal_mode should be WAL, got: {}",
+        mode
+    );
+}
+
+#[tokio::test]
+async fn test_busy_timeout_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test_timeout.db");
+    let store = RuneStore::open(&db_path).unwrap();
+
+    let timeout = store.busy_timeout().unwrap();
+    assert!(
+        timeout >= 5000,
+        "busy_timeout should be >= 5000, got: {}",
+        timeout
+    );
+}

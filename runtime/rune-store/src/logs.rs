@@ -170,44 +170,24 @@ impl RuneStore {
                 grand_total += a.count;
             }
 
-            // Query 2: All latencies sorted by rune_name + latency for P95
-            let mut lat_stmt = conn.prepare(
-                "SELECT rune_name, latency_ms \
-                 FROM call_logs \
-                 ORDER BY rune_name, latency_ms ASC",
+            // Query 2: P95 via SQL window function (no full-table scan into memory)
+            let mut p95_stmt = conn.prepare(
+                "WITH ranked AS (
+                    SELECT rune_name, latency_ms,
+                           ROW_NUMBER() OVER (PARTITION BY rune_name ORDER BY latency_ms ASC) as rn,
+                           COUNT(*) OVER (PARTITION BY rune_name) as cnt
+                    FROM call_logs
+                )
+                SELECT rune_name, latency_ms
+                FROM ranked
+                WHERE rn = CAST((cnt * 95 + 99) / 100 AS INTEGER)
+                ORDER BY rune_name",
             )?;
-
-            // Stream through sorted results, grouping by rune_name sequentially.
-            // Since results are sorted by rune_name, we can compute P95 per group
-            // without a HashMap by collecting latencies for the current group.
-            let mut p95_map: Vec<(String, f64)> = Vec::with_capacity(aggs.len());
-            let mut current_name = String::new();
-            let mut current_lats: Vec<i64> = Vec::new();
-
-            let rows = lat_stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })?;
-
-            for r in rows {
-                let (name, lat) = r?;
-                if name != current_name {
-                    if !current_name.is_empty() && !current_lats.is_empty() {
-                        let idx = ((current_lats.len() as f64 * 0.95).ceil() as usize)
-                            .min(current_lats.len())
-                            .saturating_sub(1);
-                        p95_map.push((std::mem::take(&mut current_name), current_lats[idx] as f64));
-                        current_lats.clear();
-                    }
-                    current_name = name;
-                }
-                current_lats.push(lat);
-            }
-            if !current_name.is_empty() && !current_lats.is_empty() {
-                let idx = ((current_lats.len() as f64 * 0.95).ceil() as usize)
-                    .min(current_lats.len())
-                    .saturating_sub(1);
-                p95_map.push((current_name, current_lats[idx] as f64));
-            }
+            let p95_map: Vec<(String, f64)> = p95_stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as f64))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
 
             // Combine aggregation + P95 (both are sorted by rune_name)
             let mut p95_iter = p95_map.into_iter().peekable();
@@ -272,5 +252,82 @@ mod tests {
         assert_eq!(results[0].1, 1); // count
         // P95 of a single value should be that value
         assert!((results[0].4 - 100.0).abs() < 0.01, "p95 should be 100.0, got {}", results[0].4);
+    }
+
+    #[tokio::test]
+    async fn test_p95_calculation_accuracy_100_entries() {
+        use crate::models::CallLog;
+        let store = RuneStore::open_in_memory().unwrap();
+        // 插入 100 条日志, latency_ms = 1..=100
+        for i in 1..=100i64 {
+            let log = CallLog {
+                id: 0,
+                request_id: format!("r{}", i),
+                rune_name: "echo".into(),
+                mode: "sync".into(),
+                caster_id: None,
+                latency_ms: i,
+                status_code: 200,
+                input_size: 10,
+                output_size: 20,
+                timestamp: "2025-01-01T00:00:00Z".into(),
+            };
+            store.insert_log(&log).await.unwrap();
+        }
+        let (total, results) = store.call_stats_enhanced().await.unwrap();
+        assert_eq!(total, 100);
+        assert_eq!(results.len(), 1);
+        // P95 of 1..=100 should be 95
+        assert!(
+            (results[0].4 - 95.0).abs() < 1.01,
+            "p95 should be ~95, got {}",
+            results[0].4
+        );
+    }
+
+    #[tokio::test]
+    async fn test_p95_multiple_runes() {
+        use crate::models::CallLog;
+        let store = RuneStore::open_in_memory().unwrap();
+        // rune "fast": latencies 1..=20 (P95 ≈ 19)
+        for i in 1..=20i64 {
+            let log = CallLog {
+                id: 0,
+                request_id: format!("rf{}", i),
+                rune_name: "fast".into(),
+                mode: "sync".into(),
+                caster_id: None,
+                latency_ms: i,
+                status_code: 200,
+                input_size: 10,
+                output_size: 20,
+                timestamp: "2025-01-01T00:00:00Z".into(),
+            };
+            store.insert_log(&log).await.unwrap();
+        }
+        // rune "slow": latencies 100..=200 (P95 ≈ 196)
+        for i in 100..=200i64 {
+            let log = CallLog {
+                id: 0,
+                request_id: format!("rs{}", i),
+                rune_name: "slow".into(),
+                mode: "sync".into(),
+                caster_id: None,
+                latency_ms: i,
+                status_code: 200,
+                input_size: 10,
+                output_size: 20,
+                timestamp: "2025-01-01T00:00:00Z".into(),
+            };
+            store.insert_log(&log).await.unwrap();
+        }
+        let (total, results) = store.call_stats_enhanced().await.unwrap();
+        assert_eq!(total, 121); // 20 + 101
+        assert_eq!(results.len(), 2);
+        // Results are sorted by rune_name
+        let fast = results.iter().find(|r| r.0 == "fast").unwrap();
+        let slow = results.iter().find(|r| r.0 == "slow").unwrap();
+        assert!((fast.4 - 19.0).abs() < 2.0, "fast p95 should be ~19, got {}", fast.4);
+        assert!((slow.4 - 196.0).abs() < 6.0, "slow p95 should be ~196, got {}", slow.4);
     }
 }

@@ -28,6 +28,7 @@ impl RuneStore {
     /// Open a database at the given file path.
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -38,6 +39,7 @@ impl RuneStore {
     /// Open an in-memory database (useful for testing).
     pub fn open_in_memory() -> StoreResult<Self> {
         let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -55,6 +57,22 @@ impl RuneStore {
         });
         // The thread panicked while holding the lock → Mutex is now poisoned.
         let _ = handle.join();
+    }
+
+    /// Query the current journal_mode (test-only).
+    #[cfg(feature = "test-helpers")]
+    pub fn journal_mode(&self) -> StoreResult<String> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        Ok(mode)
+    }
+
+    /// Query the current busy_timeout (test-only).
+    #[cfg(feature = "test-helpers")]
+    pub fn busy_timeout(&self) -> StoreResult<i64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let timeout: i64 = conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+        Ok(timeout)
     }
 
     fn run_migrations(&self) -> StoreResult<()> {

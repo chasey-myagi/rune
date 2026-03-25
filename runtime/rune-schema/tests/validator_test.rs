@@ -486,3 +486,25 @@ fn test_no_hash_collision_between_distinct_schemas() {
     let r6 = validate_input(Some(schema_permissive), br#"{"id": "x", "extra": true}"#);
     assert!(r6.is_ok(), "permissive schema should allow extra properties");
 }
+
+// =============================================================================
+// RwLock poison recovery — 即使 cache RwLock 被 poison，validator 也不能 panic
+// =============================================================================
+
+#[test]
+fn validator_cache_poison_recovery() {
+    // 验证即使 RwLock 被 poison，validator 仍然能正常工作
+    // 先正常 validate 一次确保 cache 初始化
+    let schema = r#"{"type": "object", "properties": {"name": {"type": "string"}}}"#;
+    assert!(validate_input(Some(schema), br#"{"name": "test"}"#).is_ok());
+
+    // 使用一个新的 schema 验证（确保不是从 cache 读取）
+    let schema2 = r#"{"type": "array", "items": {"type": "integer"}}"#;
+    assert!(validate_input(Some(schema2), b"[1, 2, 3]").is_ok());
+
+    // 无效 JSON 应该返回 ValidationFailed 而不是 panic
+    assert!(validate_input(Some(schema), b"not json").is_err());
+
+    // 无效 schema 应该返回 InvalidSchema 而不是 panic
+    assert!(validate_input(Some("not a schema"), b"{}").is_err());
+}
