@@ -1,0 +1,894 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rune 深度解析 — 协议优先的分布式函数执行框架</title>
+<style>
+/* ─── Reset ─── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+/* ─── Light Theme ─── */
+:root{
+  --bg:#f4f0ec;--bg-alt:#eae4dd;--bg-code:#1a1714;
+  --fg:#1c1917;--fg-2:#44403c;--fg-3:#78716c;
+  --accent:#dc4a1a;--accent-2:#9a3412;--accent-glow:rgba(220,74,26,0.12);
+  --green:#15803d;--green-bg:#ecfdf5;--red-bg:#fef2f2;
+  --blue:#2563eb;--blue-bg:rgba(37,99,235,0.06);
+  --border:#d6d0c8;--border-2:#c4bdb4;
+  --tag-bg:rgba(220,74,26,0.08);--tag-fg:var(--accent-2);
+  --quote-bg:rgba(28,25,23,0.03);
+  --card-shadow:0 1px 3px rgba(28,25,23,0.06);
+  --card-shadow-hover:0 8px 24px rgba(28,25,23,0.1);
+}
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0c0a09;--bg-alt:#1c1917;--bg-code:#0a0908;
+    --fg:#e7e5e4;--fg-2:#a8a29e;--fg-3:#78716c;
+    --accent:#fb923c;--accent-2:#fdba74;--accent-glow:rgba(251,146,60,0.1);
+    --green:#4ade80;--green-bg:rgba(74,222,128,0.08);--red-bg:rgba(248,113,113,0.08);
+    --blue:#60a5fa;--blue-bg:rgba(96,165,250,0.08);
+    --border:#292524;--border-2:#3d3835;
+    --tag-bg:rgba(251,146,60,0.12);--tag-fg:var(--accent);
+    --quote-bg:rgba(255,255,255,0.03);
+    --card-shadow:0 1px 3px rgba(0,0,0,0.2);
+    --card-shadow-hover:0 8px 24px rgba(0,0,0,0.35);
+  }
+}
+[data-theme="dark"]{
+  --bg:#0c0a09;--bg-alt:#1c1917;--bg-code:#0a0908;
+  --fg:#e7e5e4;--fg-2:#a8a29e;--fg-3:#78716c;
+  --accent:#fb923c;--accent-2:#fdba74;--accent-glow:rgba(251,146,60,0.1);
+  --green:#4ade80;--green-bg:rgba(74,222,128,0.08);--red-bg:rgba(248,113,113,0.08);
+  --blue:#60a5fa;--blue-bg:rgba(96,165,250,0.08);
+  --border:#292524;--border-2:#3d3835;
+  --tag-bg:rgba(251,146,60,0.12);--tag-fg:var(--accent);
+  --quote-bg:rgba(255,255,255,0.03);
+  --card-shadow:0 1px 3px rgba(0,0,0,0.2);
+  --card-shadow-hover:0 8px 24px rgba(0,0,0,0.35);
+}
+
+/* ─── Base ─── */
+html{scroll-behavior:smooth;font-size:17px}
+body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;background:var(--bg);color:var(--fg-2);line-height:1.7;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none;transition:color .15s}
+a:hover{color:var(--accent-2);text-decoration:underline}
+code{font-family:'SF Mono',ui-monospace,'Cascadia Code','Fira Code',monospace;font-size:0.82em;background:var(--tag-bg);color:var(--tag-fg);padding:0.15em 0.4em;border-radius:4px}
+
+/* ─── Scroll Progress ─── */
+.progress{position:fixed;top:0;left:0;height:2.5px;background:linear-gradient(90deg,var(--accent),var(--accent-2));z-index:999;width:0;transition:width 80ms}
+
+/* ─── Theme Toggle ─── */
+.theme-toggle{position:fixed;top:1rem;right:1rem;z-index:100;background:var(--bg-alt);border:1px solid var(--border);border-radius:50%;width:42px;height:42px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1.15rem;transition:all .25s;box-shadow:var(--card-shadow)}
+.theme-toggle:hover{background:var(--border);transform:rotate(30deg)}
+
+/* ─── Nav ─── */
+.nav{position:sticky;top:0;z-index:90;background:var(--bg);border-bottom:1px solid var(--border);overflow-x:auto;-webkit-overflow-scrolling:touch;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.nav-inner{display:flex;gap:0;max-width:960px;margin:0 auto;padding:0 1.5rem}
+.nav a{padding:0.7rem 0.9rem;font-size:0.72rem;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;color:var(--fg-3);white-space:nowrap;border-bottom:2px solid transparent;transition:color .2s,border-color .2s}
+.nav a:hover,.nav a.active{color:var(--accent);border-bottom-color:var(--accent);text-decoration:none}
+
+/* ─── Containers ─── */
+.wrap{max-width:780px;margin:0 auto;padding:0 1.5rem}
+.wrap-wide{max-width:960px;margin:0 auto;padding:0 1.5rem}
+
+/* ─── Hero ─── */
+.hero{padding:7rem 0 4rem;background:var(--bg);position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;top:-120px;right:-80px;width:400px;height:400px;background:radial-gradient(circle,var(--accent-glow) 0%,transparent 70%);pointer-events:none}
+.hero-tag{font-family:'SF Mono',ui-monospace,monospace;font-size:0.68rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:1.2rem;opacity:0;animation:fadeUp .6s .1s forwards}
+h1{font-size:clamp(2.6rem,6vw,4.2rem);font-weight:900;color:var(--fg);line-height:1.08;letter-spacing:-0.03em;margin-bottom:1.2rem;opacity:0;animation:fadeUp .6s .2s forwards}
+h1 .highlight{color:var(--accent);position:relative}
+h1 .highlight::after{content:'';position:absolute;bottom:-2px;left:0;right:0;height:3px;background:var(--accent);border-radius:2px;opacity:0.4}
+.hero-deck{font-size:1.18rem;color:var(--fg-2);max-width:55ch;line-height:1.7;margin-bottom:2rem;opacity:0;animation:fadeUp .6s .3s forwards}
+.hero-meta{display:flex;flex-wrap:wrap;gap:1.3rem;font-size:0.78rem;color:var(--fg-3);opacity:0;animation:fadeUp .6s .45s forwards}
+.hero-meta span{display:flex;align-items:center;gap:0.4em}
+.hero-meta b{color:var(--fg)}
+
+/* ─── Section ─── */
+section{padding:4.5rem 0 4rem}
+section:nth-child(even of section){background:var(--bg-alt)}
+section:nth-child(odd of section){background:var(--bg)}
+.sn{font-size:4.5rem;font-weight:900;color:var(--accent);opacity:0.3;line-height:1;margin-bottom:0.15rem;font-family:'SF Mono',ui-monospace,monospace;letter-spacing:-0.04em}
+h2{font-size:clamp(1.7rem,3.5vw,2.4rem);font-weight:800;color:var(--fg);line-height:1.18;margin-bottom:1.3rem;letter-spacing:-0.015em}
+h3{font-size:1.08rem;font-weight:700;color:var(--fg);margin:2rem 0 0.7rem}
+h4{font-size:0.68rem;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--accent);font-family:'SF Mono',ui-monospace,monospace;margin-bottom:0.6rem}
+section p{max-width:65ch;margin-bottom:1rem;color:var(--fg-2)}
+section p strong{color:var(--fg)}
+
+/* ─── Stats ─── */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:1rem;margin:2rem 0}
+.stat{text-align:center;padding:1.4rem 0.6rem;border:1px solid var(--border);border-radius:10px;transition:all .25s;background:var(--bg)}
+section:nth-child(even of section) .stat{background:var(--bg-alt)}
+.stat:hover{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-glow)}
+.stat-val{font-size:2.2rem;font-weight:900;color:var(--accent);transition:transform .25s}
+.stat:hover .stat-val{transform:scale(1.08)}
+.stat-lbl{font-size:0.7rem;font-weight:600;color:var(--fg-3);text-transform:uppercase;letter-spacing:0.05em;margin-top:0.25rem;font-family:'SF Mono',ui-monospace,monospace}
+
+/* ─── Code Block ─── */
+.code-block{margin:2rem 0;border-radius:12px;overflow:hidden;box-shadow:var(--card-shadow)}
+.code-header{display:flex;align-items:center;gap:0.6rem;padding:0.7rem 1.2rem;background:#252220;font-size:0.7rem;color:#78716c;font-family:'SF Mono',ui-monospace,monospace}
+.code-dots{display:flex;gap:6px}
+.code-dots span{width:10px;height:10px;border-radius:50%}
+.code-dots span:nth-child(1){background:#ef4444}
+.code-dots span:nth-child(2){background:#eab308}
+.code-dots span:nth-child(3){background:#22c55e}
+.code-header .code-filename{margin-left:auto;opacity:0.7}
+.code-body{padding:1.4rem 1.5rem;background:var(--bg-code);overflow-x:auto}
+.code-body pre{margin:0;font-family:'SF Mono',ui-monospace,'Cascadia Code','Fira Code',monospace;font-size:0.82rem;line-height:1.8;color:#a8a29e}
+.code-body .kw{color:#c084fc}
+.code-body .fn{color:#60a5fa}
+.code-body .str{color:#fb923c}
+.code-body .cm{color:#57534e;font-style:italic}
+.code-body .op{color:#a8a29e}
+.code-body .var{color:#e7e5e4}
+.code-body .dec{color:#4ade80}
+.code-body .result{color:#78716c;border-left:2px solid #3d3835;padding-left:1rem;margin-top:0.4rem;display:block}
+
+/* ─── Architecture Diagram ─── */
+/* Container: uses page bg, not forced dark */
+.arch{margin:2.5rem 0;padding:2.5rem 1.5rem 2rem;background:var(--bg-alt);border:1px solid var(--border);border-radius:14px;overflow:hidden}
+.arch *{box-sizing:border-box}
+/* Tier = one horizontal row */
+.arch-tier{display:flex;align-items:flex-start;justify-content:center;gap:0.6rem;position:relative}
+/* Connector: vertical line between tiers */
+.arch-conn{display:flex;justify-content:center;padding:0.3rem 0}
+.arch-conn-line{width:2px;height:20px;background:var(--border-2)}
+.arch-conn-label{font-size:0.65rem;color:var(--fg-3);font-family:'SF Mono',ui-monospace,monospace;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;text-align:center;padding:0.3rem 0}
+/* ── Node base ── */
+.arch-box{padding:0.55rem 1.2rem;border-radius:8px;font-family:'SF Mono',ui-monospace,monospace;font-size:0.82rem;font-weight:700;white-space:nowrap;text-align:center;line-height:1.3;cursor:default;transition:transform .2s,box-shadow .2s;position:relative}
+.arch-box:hover{transform:translateY(-1px)}
+.arch-box .arch-sub{font-size:0.62rem;font-weight:400;margin-top:2px;opacity:0.7}
+/* ── Node colors: theme-aware ── */
+/* Orange = entry point / highlight */
+.arch-box.n-orange{background:var(--accent);color:#fff;box-shadow:0 2px 8px rgba(220,74,26,0.2)}
+[data-theme="dark"] .arch-box.n-orange{box-shadow:0 2px 8px rgba(251,146,60,0.25)}
+/* Blue = HTTP / Gate layer */
+.arch-box.n-blue{background:#2563eb;color:#fff;box-shadow:0 2px 8px rgba(37,99,235,0.2)}
+[data-theme="dark"] .arch-box.n-blue{background:#3b82f6}
+/* Slate = core runtime components */
+.arch-box.n-slate{background:var(--fg);color:var(--bg);box-shadow:0 1px 4px rgba(0,0,0,0.1)}
+/* Purple = session / connection management */
+.arch-box.n-purple{background:#7c3aed;color:#fff;box-shadow:0 2px 8px rgba(124,58,237,0.2)}
+[data-theme="dark"] .arch-box.n-purple{background:#8b5cf6}
+/* Green = caster / SDK */
+.arch-box.n-green{background:#16a34a;color:#fff;box-shadow:0 2px 8px rgba(22,163,74,0.2)}
+[data-theme="dark"] .arch-box.n-green{background:#22c55e;color:#052e16}
+/* Arrow between nodes in same tier */
+.arch-arr{color:var(--fg-3);font-size:1rem;flex-shrink:0;user-select:none;line-height:1;margin-top:0.5rem}
+/* Full-width separator with label */
+.arch-sep{display:flex;align-items:center;gap:0.8rem;padding:0.55rem 0}
+.arch-sep::before,.arch-sep::after{content:'';flex:1;height:1px;background:var(--border-2)}
+.arch-sep-text{font-size:0.65rem;color:var(--fg-3);font-family:'SF Mono',ui-monospace,monospace;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap}
+/* Sub-badge row */
+.arch-badges{display:flex;gap:0.35rem;flex-wrap:wrap;justify-content:center;margin-top:0.3rem}
+.arch-bdg{font-size:0.62rem;padding:0.2rem 0.5rem;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;font-weight:600}
+/* Badge colors — high contrast on any theme */
+.arch-bdg.g-blue{background:rgba(37,99,235,0.12);color:#2563eb}
+[data-theme="dark"] .arch-bdg.g-blue{background:rgba(96,165,250,0.15);color:#93bbfd}
+.arch-bdg.g-green{background:rgba(22,163,74,0.1);color:#16a34a}
+[data-theme="dark"] .arch-bdg.g-green{background:rgba(74,222,128,0.12);color:#86efac}
+.arch-bdg.g-purple{background:rgba(124,58,237,0.1);color:#7c3aed}
+[data-theme="dark"] .arch-bdg.g-purple{background:rgba(139,92,246,0.15);color:#c4b5fd}
+.arch-bdg.g-orange{background:rgba(220,74,26,0.1);color:#c2410c}
+[data-theme="dark"] .arch-bdg.g-orange{background:rgba(251,146,60,0.12);color:#fdba74}
+/* Auto dark mode overrides for arch */
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]) .arch-box.n-orange{box-shadow:0 2px 8px rgba(251,146,60,0.25)}
+  :root:not([data-theme="light"]) .arch-box.n-blue{background:#3b82f6}
+  :root:not([data-theme="light"]) .arch-box.n-purple{background:#8b5cf6}
+  :root:not([data-theme="light"]) .arch-box.n-green{background:#22c55e;color:#052e16}
+  :root:not([data-theme="light"]) .arch-bdg.g-blue{background:rgba(96,165,250,0.15);color:#93bbfd}
+  :root:not([data-theme="light"]) .arch-bdg.g-green{background:rgba(74,222,128,0.12);color:#86efac}
+  :root:not([data-theme="light"]) .arch-bdg.g-purple{background:rgba(139,92,246,0.15);color:#c4b5fd}
+  :root:not([data-theme="light"]) .arch-bdg.g-orange{background:rgba(251,146,60,0.12);color:#fdba74}
+}
+/* Annotation block */
+.arch-ann{display:flex;flex-direction:column;align-items:center;padding:0.55rem 0.8rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);min-width:100px}
+.arch-ann-title{font-size:0.6rem;color:var(--fg-3);text-transform:uppercase;letter-spacing:0.07em;font-family:'SF Mono',ui-monospace,monospace;font-weight:600;margin-bottom:0.3rem}
+/* Two-column annotations */
+.arch-detail{display:flex;justify-content:center;gap:2rem;margin-top:0.2rem;flex-wrap:wrap}
+
+/* ─── Layer Stack (for 4-layer architecture) ─── */
+.layer-stack{display:flex;flex-direction:column;gap:0;margin:2rem 0}
+.layer{display:flex;align-items:stretch;border:1px solid var(--border);transition:all .25s;position:relative;overflow:hidden}
+.layer:first-child{border-radius:10px 10px 0 0}
+.layer:last-child{border-radius:0 0 10px 10px}
+.layer:not(:last-child){border-bottom:none}
+.layer:hover{z-index:1;box-shadow:var(--card-shadow-hover)}
+.layer-num{display:flex;align-items:center;justify-content:center;min-width:52px;font-family:'SF Mono',ui-monospace,monospace;font-size:0.92rem;font-weight:800;color:var(--accent);opacity:0.6;background:var(--accent-glow);border-right:1px solid var(--border);flex-shrink:0}
+.layer-content{padding:1.1rem 1.3rem;flex:1;min-width:0}
+.layer-title{font-weight:700;color:var(--fg);font-size:0.95rem;margin-bottom:0.2rem}
+.layer-sub{font-size:0.7rem;color:var(--fg-3);font-family:'SF Mono',ui-monospace,monospace;margin-bottom:0.35rem}
+.layer-desc{font-size:0.85rem;color:var(--fg-2);line-height:1.55}
+
+/* ─── Flow Diagram ─── */
+.flow{margin:2rem 0}
+.flow-step{display:flex;gap:1rem;margin-bottom:0}
+.flow-rail{display:flex;flex-direction:column;align-items:center;width:22px;flex-shrink:0}
+.flow-dot{width:12px;height:12px;border-radius:50%;background:var(--accent);flex-shrink:0;margin-top:5px;box-shadow:0 0 0 3px var(--accent-glow)}
+.flow-line{width:2px;flex:1;background:linear-gradient(180deg,var(--accent),var(--border));min-height:24px}
+.flow-body{padding-bottom:1.5rem}
+.flow-title{font-weight:700;color:var(--fg);font-size:0.95rem}
+.flow-desc{color:var(--fg-2);font-size:0.88rem;margin-top:0.25rem;line-height:1.6}
+
+/* ─── Quote ─── */
+.quote{border-left:3px solid var(--accent);padding:1.2rem 0 1.2rem 1.5rem;margin:2rem 0;background:var(--quote-bg);border-radius:0 8px 8px 0}
+.quote p{font-style:italic;color:var(--fg-2);margin:0;max-width:60ch;line-height:1.7;font-size:1.02rem}
+.quote cite{display:block;margin-top:0.6rem;font-size:0.78rem;color:var(--fg-3);font-style:normal}
+
+/* ─── Callout ─── */
+.callout{padding:1.1rem 1.4rem;border-radius:10px;margin:1.8rem 0;font-size:0.92rem;line-height:1.65}
+.callout-green{background:var(--green-bg);color:var(--green);border-left:3px solid var(--green)}
+.callout-accent{background:var(--tag-bg);color:var(--fg-2);border-left:3px solid var(--accent)}
+.callout strong{font-weight:700}
+
+/* ─── Table ─── */
+.table-wrap{overflow-x:auto;margin:1.8rem 0;border-radius:10px;border:1px solid var(--border)}
+table{width:100%;border-collapse:collapse;font-size:0.86rem}
+th{text-align:left;padding:0.75rem 1rem;font-weight:700;color:var(--fg);border-bottom:2px solid var(--border);font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;background:var(--accent-glow)}
+td{padding:0.65rem 1rem;border-bottom:1px solid var(--border);color:var(--fg-2);vertical-align:top}
+tr:last-child td{border-bottom:none}
+.row-hl{background:var(--accent-glow)}
+.row-hl td{color:var(--fg);font-weight:600}
+
+/* ─── Card Grid ─── */
+.card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin:1.5rem 0}
+.card{padding:1.4rem;border:1px solid var(--border);border-radius:10px;background:var(--bg);transition:all .25s;box-shadow:var(--card-shadow)}
+section:nth-child(even of section) .card{background:var(--bg-alt)}
+.card:hover{border-color:var(--accent);box-shadow:var(--card-shadow-hover);transform:translateY(-2px)}
+.card-name{font-weight:700;color:var(--fg);font-size:0.95rem}
+.card-sub{font-size:0.7rem;color:var(--fg-3);margin-top:0.15rem;font-family:'SF Mono',ui-monospace,monospace}
+.card-desc{font-size:0.85rem;color:var(--fg-2);margin-top:0.5rem;line-height:1.6}
+
+/* ─── Scenario Card ─── */
+.scenario-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1.2rem;margin:1.8rem 0}
+.scenario{padding:1.6rem;border:1px solid var(--border);border-radius:12px;background:var(--bg);transition:all .3s;box-shadow:var(--card-shadow);position:relative;overflow:hidden}
+section:nth-child(even of section) .scenario{background:var(--bg-alt)}
+.scenario::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--accent),transparent);opacity:0;transition:opacity .3s}
+.scenario:hover{border-color:var(--accent);box-shadow:var(--card-shadow-hover);transform:translateY(-3px)}
+.scenario:hover::before{opacity:1}
+.scenario-icon{font-size:2rem;margin-bottom:0.8rem}
+.scenario-title{font-weight:700;color:var(--fg);font-size:1.02rem;margin-bottom:0.5rem}
+.scenario-desc{font-size:0.85rem;color:var(--fg-2);line-height:1.6}
+.scenario-tags{display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.8rem}
+
+/* ─── Tags ─── */
+.tag{display:inline-block;font-size:0.66rem;font-weight:600;padding:0.2rem 0.55rem;border-radius:4px;background:var(--tag-bg);color:var(--tag-fg);font-family:'SF Mono',ui-monospace,monospace;letter-spacing:0.02em;transition:background .2s}
+
+/* ─── Two Column ─── */
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin:1.5rem 0}
+@media(max-width:600px){.two-col{grid-template-columns:1fr}}
+.col{padding:1.3rem;border-radius:10px;border:1px solid var(--border)}
+.col h4{margin-bottom:0.8rem}
+.col ul{list-style:none;padding:0}
+.col li{padding:0.4rem 0 0.4rem 1.5rem;position:relative;font-size:0.88rem;line-height:1.55}
+.pros{border-color:rgba(21,128,61,0.2)} .pros li::before{content:"+";position:absolute;left:0;color:var(--green);font-weight:800;font-size:1.05em;font-family:'SF Mono',ui-monospace,monospace}
+.cons{border-color:rgba(220,74,26,0.2)} .cons li::before{content:"\2212";position:absolute;left:0.1rem;color:var(--accent);font-weight:800;font-size:1.05em;font-family:'SF Mono',ui-monospace,monospace}
+
+/* ─── Verdict ─── */
+.verdict{border:2px solid var(--accent);border-radius:12px;padding:2rem 2.2rem;margin:2.5rem 0;position:relative;overflow:hidden}
+.verdict::before{content:'';position:absolute;top:0;left:0;right:0;height:100%;background:var(--accent-glow);pointer-events:none}
+.verdict h3{color:var(--accent);margin-top:0;position:relative}
+.verdict p{color:var(--fg-2);max-width:65ch;position:relative}
+
+/* ─── Message Sequence (for protocol section) ─── */
+.msg-seq{margin:2rem 0;display:flex;flex-direction:column;gap:0.7rem}
+.msg-row{display:flex;align-items:center;gap:0.8rem;padding:0.7rem 1rem;border-radius:10px;background:var(--bg);border:1px solid var(--border);transition:all .2s}
+section:nth-child(even of section) .msg-row{background:var(--bg-alt)}
+.msg-row:hover{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-glow)}
+.msg-num{font-family:'SF Mono',ui-monospace,monospace;font-size:0.72rem;font-weight:700;color:var(--accent);opacity:0.7;min-width:1.5rem}
+.msg-dir{display:flex;align-items:center;gap:0.35rem;min-width:170px;font-family:'SF Mono',ui-monospace,monospace;font-size:0.72rem;flex-shrink:0}
+.msg-from,.msg-to{padding:0.15rem 0.45rem;border-radius:4px;font-weight:600;font-size:0.68rem}
+.msg-from.caster,.msg-to.caster{background:rgba(96,165,250,0.12);color:var(--blue)}
+.msg-from.runtime,.msg-to.runtime{background:var(--accent-glow);color:var(--accent)}
+.msg-from.both,.msg-to.both{background:rgba(168,162,158,0.1);color:var(--fg-3)}
+.msg-arrow{color:var(--fg-3);font-size:0.8rem}
+.msg-name{font-weight:700;color:var(--fg);font-size:0.88rem}
+.msg-desc{font-size:0.82rem;color:var(--fg-3);margin-left:auto;text-align:right;max-width:340px;line-height:1.4}
+
+/* ─── Reveal Animation ─── */
+.reveal{opacity:0.06;transform:translateY(24px);transition:opacity .65s cubic-bezier(.22,1,.36,1),transform .65s cubic-bezier(.22,1,.36,1)}
+.reveal.visible{opacity:1;transform:translateY(0)}
+.reveal:nth-child(2){transition-delay:.05s}
+.reveal:nth-child(3){transition-delay:.1s}
+.reveal:nth-child(4){transition-delay:.15s}
+.reveal:nth-child(5){transition-delay:.2s}
+
+@media(prefers-reduced-motion:reduce){
+  .reveal{opacity:1;transform:none;transition:none}
+  h1,.hero-tag,.hero-deck,.hero-meta{opacity:1;animation:none}
+  .stat:hover .stat-val{transform:none}
+  .scenario:hover,.card:hover,.layer:hover{transform:none;box-shadow:var(--card-shadow)}
+}
+@keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+
+/* ─── Mobile ─── */
+@media(max-width:640px){
+  html{font-size:15px}
+  .hero{padding:4.5rem 0 2.5rem}
+  section{padding:3rem 0 2.5rem}
+  .sn{font-size:3rem}
+  .stats{grid-template-columns:repeat(2,1fr);gap:0.7rem}
+  .card-grid{grid-template-columns:1fr}
+  .scenario-grid{grid-template-columns:1fr}
+  .hero-meta{flex-direction:column;gap:0.5rem}
+  .nav-inner{padding:0 0.5rem}
+  .nav a{padding:0.6rem 0.55rem;font-size:0.64rem}
+  .arch{padding:1.5rem 0.6rem}
+  .arch-tier{gap:0.3rem;flex-wrap:wrap}
+  .arch-box{padding:0.4rem 0.7rem;font-size:0.7rem}
+  .arch-box .arch-sub{font-size:0.56rem}
+  .arch-detail{gap:0.8rem}
+  .arch-sep-text{font-size:0.55rem}
+  .msg-desc{display:none}
+  .msg-dir{min-width:130px}
+  .layer-num{min-width:40px;font-size:0.8rem}
+}
+
+/* ─── Footer ─── */
+.footer{padding:2.5rem 0;text-align:center;font-size:0.75rem;color:var(--fg-3);border-top:1px solid var(--border)}
+.footer a{color:var(--fg-3)}
+</style>
+</head>
+<body>
+
+<!-- Scroll Progress -->
+<div class="progress" id="progress"></div>
+
+<!-- Theme Toggle -->
+<button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+  <span id="theme-icon">&#9684;</span>
+</button>
+
+<!-- Nav -->
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="#what">是什么</a>
+    <a href="#problem">解决什么</a>
+    <a href="#how">怎么做到</a>
+    <a href="#protocol">协议设计</a>
+    <a href="#compare">横向对比</a>
+    <a href="#scenarios">最佳场景</a>
+    <a href="#limits">边界</a>
+    <a href="#verdict">结论</a>
+  </div>
+</nav>
+
+<!-- ════════════════════ Hero ════════════════════ -->
+<header class="hero">
+  <div class="wrap">
+    <div class="hero-tag">Technical Deep Dive &middot; 2026</div>
+    <h1>Rune：<span class="highlight">定义函数</span>，获得一切</h1>
+    <p class="hero-deck">协议优先的分布式函数执行框架。写一个函数，自动获得 HTTP 端点、流式推送、异步任务、DAG 编排、负载均衡 &mdash; 全部开箱即用，零胶水代码。</p>
+    <div class="hero-meta">
+      <span><b>版本</b> v1.0.0</span>
+      <span><b>Runtime</b> Rust</span>
+      <span><b>SDK</b> Python &middot; TypeScript &middot; Rust</span>
+      <span><b>协议</b> gRPC Bidirectional Stream</span>
+    </div>
+  </div>
+</header>
+
+<!-- ════════════════════ 01 是什么 ════════════════════ -->
+<section id="what">
+  <div class="wrap">
+    <div class="sn reveal">01</div>
+    <h2 class="reveal">Rune 到底是什么？</h2>
+    <p class="reveal">一句话概括：<strong>你写函数，框架替你搞定其余所有分布式执行的事情。</strong></p>
+    <p class="reveal">想象你有一个 Python 函数做翻译、一个 TypeScript 函数做图片生成、一个 Rust 函数做数据处理。传统方式下，你需要为每个函数搭建 HTTP 服务、处理负载均衡、实现流式推送、管理异步任务&hellip;&hellip;这些「胶水代码」的工作量往往是业务逻辑的十倍。</p>
+    <p class="reveal">Rune 的做法：<strong>把函数的「执行」和「暴露」彻底分离。</strong>函数作者（Caster）只关心业务逻辑，通过统一的 Wire Protocol 向中央 Runtime 注册。Runtime 自动完成 HTTP 路由、调度、并发背压、工作流编排。</p>
+
+    <div class="stats reveal">
+      <div class="stat"><div class="stat-val" data-target="549">549</div><div class="stat-lbl">单元测试</div></div>
+      <div class="stat"><div class="stat-val">8</div><div class="stat-lbl">Rust Crate</div></div>
+      <div class="stat"><div class="stat-val">3</div><div class="stat-lbl">语言 SDK</div></div>
+      <div class="stat"><div class="stat-val">18</div><div class="stat-lbl">协议保证</div></div>
+      <div class="stat"><div class="stat-val">5</div><div class="stat-lbl">调度策略</div></div>
+    </div>
+
+    <h3 class="reveal">一个最小的例子</h3>
+    <p class="reveal">用 Python 写一个翻译函数，注册到 Rune：</p>
+
+    <div class="code-block reveal">
+      <div class="code-header">
+        <div class="code-dots"><span></span><span></span><span></span></div>
+        <span class="code-filename">translate_caster.py</span>
+      </div>
+      <div class="code-body">
+<pre><span class="kw">from</span> <span class="var">rune_sdk</span> <span class="kw">import</span> <span class="var">Caster</span>
+
+<span class="var">caster</span> <span class="op">=</span> <span class="fn">Caster</span>(<span class="str">"localhost:50070"</span>)
+
+<span class="dec">@caster.rune</span>(<span class="str">"translate"</span>, gate=<span class="str">"/translate"</span>)
+<span class="kw">async def</span> <span class="fn">translate</span>(ctx, input):
+    data <span class="op">=</span> json.<span class="fn">loads</span>(input)
+    result <span class="op">=</span> <span class="fn">do_translate</span>(data[<span class="str">"text"</span>], data[<span class="str">"lang"</span>])
+    <span class="kw">return</span> json.<span class="fn">dumps</span>({<span class="str">"translated"</span>: result})
+
+caster.<span class="fn">run</span>()
+<span class="result"><span class="cm"># 自动获得 &darr;</span>
+<span class="cm"># POST /translate           &rarr; 同步调用</span>
+<span class="cm"># POST /translate?stream    &rarr; SSE 流式推送</span>
+<span class="cm"># POST /translate?async     &rarr; 异步任务（返回 task_id）</span>
+<span class="cm"># + 负载均衡 / 心跳检测 / 自动重连 / 并发控制 ...</span></span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ 02 解决什么 ════════════════════ -->
+<section id="problem">
+  <div class="wrap">
+    <div class="sn reveal">02</div>
+    <h2 class="reveal">解决了什么问题？</h2>
+    <p class="reveal">Rune 瞄准的是一个反复出现的痛点：<strong>函数到服务之间巨大的「基础设施鸿沟」。</strong></p>
+
+    <h3 class="reveal">传统方式的五大痛点</h3>
+    <div class="flow reveal">
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div><div class="flow-line"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">胶水代码爆炸</div>
+          <div class="flow-desc">写一个函数 20 行，为它搭 HTTP 服务 200 行。加上错误处理、超时、重试、日志、监控&hellip; 胶水代码是业务代码的 10 倍，且每个函数都要重复。</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div><div class="flow-line"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">多语言团队的协作地狱</div>
+          <div class="flow-desc">AI 团队用 Python，前端用 TypeScript，基础设施用 Rust/Go。每种语言各搞一套 HTTP 框架、部署流程、监控体系，互相调用还要对齐协议。</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div><div class="flow-line"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">流式和异步是二等公民</div>
+          <div class="flow-desc">同步调用很简单，但加 SSE 流式？重写 handler。加异步任务？再搭一套消息队列 + 状态管理。三种模式三套代码，三倍维护成本。</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div><div class="flow-line"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">编排靠硬编码</div>
+          <div class="flow-desc">「先调 A，结果传 B，B 和 C 并行，根据 B 的输出决定是否调 D」&mdash; 全靠 if/else 和 Promise.all 硬写，出错无法追踪，改动牵一发动全身。</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">状态管理的黑洞</div>
+          <div class="flow-desc">函数执行一半超时了、连接断了、请求取消了 &mdash; 信号量归还了吗？并发计数减了吗？资源释放了吗？大多数框架的答案是「不保证」。</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout callout-accent reveal">
+      <strong>核心洞察：</strong>90% 的分布式函数执行需求都遵循同一模式 &mdash; 注册函数、路由请求、管理连接、控制并发。Rune 把这个模式固化为一套协议和运行时，让你永远只需要写那 20 行业务逻辑。
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ 03 怎么做到 ════════════════════ -->
+<section id="how">
+  <div class="wrap">
+    <div class="sn reveal">03</div>
+    <h2 class="reveal">架构：怎么做到的？</h2>
+    <p class="reveal">四层分离，每层只做一件事。可以独立使用，也可以自由组合。</p>
+
+    <!-- ── 可视化架构图 ── -->
+    <div class="arch reveal">
+
+      <!-- Client -->
+      <div class="arch-tier">
+        <div class="arch-box n-orange" style="min-width:180px">Client<div class="arch-sub">HTTP &middot; CLI &middot; SDK</div></div>
+      </div>
+      <div class="arch-conn"><div class="arch-conn-line"></div></div>
+
+      <!-- Gate -->
+      <div class="arch-tier">
+        <div class="arch-box n-blue" style="min-width:360px">
+          Gate &mdash; HTTP 网关
+          <div class="arch-badges">
+            <span class="arch-bdg g-blue">Auth</span>
+            <span class="arch-bdg g-blue">Rate Limit</span>
+            <span class="arch-bdg g-blue">Schema</span>
+            <span class="arch-bdg g-blue">File Broker</span>
+          </div>
+        </div>
+      </div>
+      <div class="arch-conn"><div class="arch-conn-line"></div></div>
+
+      <!-- Core: Relay → Resolver → Invoker -->
+      <div class="arch-conn-label">Runtime Core</div>
+      <div class="arch-tier">
+        <div class="arch-box n-slate" style="min-width:130px">Relay<div class="arch-sub">注册表</div></div>
+        <div class="arch-arr">&rarr;</div>
+        <div class="arch-box n-slate" style="min-width:130px">Resolver<div class="arch-sub">调度策略</div></div>
+        <div class="arch-arr">&rarr;</div>
+        <div class="arch-box n-slate" style="min-width:130px">Invoker<div class="arch-sub">统一调用</div></div>
+      </div>
+      <div class="arch-detail">
+        <div class="arch-ann">
+          <div class="arch-ann-title">Invoker 分发</div>
+          <div class="arch-badges"><span class="arch-bdg g-orange">Local</span><span class="arch-bdg g-orange">Remote</span></div>
+        </div>
+      </div>
+      <div class="arch-conn"><div class="arch-conn-line"></div></div>
+
+      <!-- Protocol separator -->
+      <div class="arch-sep">
+        <span class="arch-sep-text">gRPC Bidirectional Stream &mdash; Rune Wire Protocol</span>
+      </div>
+      <div class="arch-conn"><div class="arch-conn-line"></div></div>
+
+      <!-- Session Manager -->
+      <div class="arch-tier">
+        <div class="arch-box n-purple" style="min-width:300px">
+          Session Manager
+          <div class="arch-badges">
+            <span class="arch-bdg g-purple">Heartbeat</span>
+            <span class="arch-bdg g-purple">Semaphore</span>
+            <span class="arch-bdg g-purple">Reconnect</span>
+          </div>
+        </div>
+      </div>
+      <div class="arch-conn"><div class="arch-conn-line"></div></div>
+
+      <!-- Casters -->
+      <div class="arch-tier">
+        <div class="arch-box n-green">Python</div>
+        <div class="arch-box n-green">TypeScript</div>
+        <div class="arch-box n-green">Rust</div>
+      </div>
+      <div class="arch-conn-label" style="margin-top:0.3rem">Caster SDK</div>
+
+    </div>
+
+    <!-- ── 四层架构 ── -->
+    <h3 class="reveal">四层架构</h3>
+    <div class="layer-stack reveal">
+      <div class="layer">
+        <div class="layer-num">0</div>
+        <div class="layer-content">
+          <div class="layer-title">协议层</div>
+          <div class="layer-sub">rune.proto &middot; Rune Wire Protocol</div>
+          <div class="layer-desc">一份 Protocol Buffer 定义 Caster 与 Runtime 的所有交互。语言无关 &mdash; 任何实现 RWP 的客户端都可以接入。</div>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-num">1</div>
+        <div class="layer-content">
+          <div class="layer-title">运行时核心</div>
+          <div class="layer-sub">rune-core &middot; ~3000 行 Rust</div>
+          <div class="layer-desc">Relay（注册表：谁在哪）、Resolver（调度：选谁执行）、Invoker（统一调用：屏蔽本地/远程差异）、SessionManager（连接管理：心跳/并发/重连）。</div>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-num">2</div>
+        <div class="layer-content">
+          <div class="layer-title">HTTP 网关（可选）</div>
+          <div class="layer-sub">rune-gate &middot; ~1500 行 Rust &middot; Axum</div>
+          <div class="layer-desc">自动路由映射、sync/stream(SSE)/async 三模式、Schema 校验、OpenAPI 生成、文件传输。Gate 是一层「皮肤」，不是核心 &mdash; 纯 gRPC 场景可以不用它。</div>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-num">3</div>
+        <div class="layer-content">
+          <div class="layer-title">扩展层</div>
+          <div class="layer-sub">rune-flow &middot; rune-store &middot; rune-schema</div>
+          <div class="layer-desc">DAG 工作流引擎、SQLite 持久化、JSON Schema 校验。独立 crate，按需引入。Flow 复用同一个 Invoker 接口，函数被直接调用还是作为 Flow 步骤，行为完全一致。</div>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="reveal">核心设计决策</h3>
+    <div class="table-wrap reveal">
+      <table>
+        <thead><tr><th>决策</th><th>为什么</th></tr></thead>
+        <tbody>
+          <tr><td><strong>gRPC 双向流</strong></td><td>Runtime 需要主动向 Caster 推送请求、取消、心跳。HTTP 是单向的，WebSocket 没有类型安全和代码生成。</td></tr>
+          <tr><td><strong>bytes 不是 string</strong></td><td>热路径省掉 UTF-8 校验，不绑定 JSON。未来可以传 MessagePack / CBOR / Protobuf。</td></tr>
+          <tr><td><strong>Invoker 统一本地/远程</strong></td><td>上层不关心函数在哪。重试、超时、metrics 在 Invoker 上包装，一次加全部受益。</td></tr>
+          <tr><td><strong>Relay &#8800; Resolver</strong></td><td>数据和策略分离。更换调度算法不影响注册逻辑，反之亦然。</td></tr>
+          <tr class="row-hl"><td><strong>协议保证是合约</strong></td><td>18 条行为保证写入文档并用回归测试锁定。违反即 bug，不可商量。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ 04 协议设计 ════════════════════ -->
+<section id="protocol">
+  <div class="wrap">
+    <div class="sn reveal">04</div>
+    <h2 class="reveal">Rune Wire Protocol：协议即灵魂</h2>
+    <p class="reveal">Rune 自称「协议优先」。整个框架的核心不是 Runtime 的 Rust 代码，而是那份 <code>.proto</code> 文件定义的 <strong>Rune Wire Protocol (RWP)</strong>。所有 SDK 只需实现这个协议，就能接入任意语言。</p>
+
+    <h3 class="reveal">为什么是双向流？</h3>
+    <p class="reveal">传统 RPC 是「Client 请求，Server 响应」。但 Rune 的场景不同 &mdash; Runtime 需要<em>主动</em>向 Caster 推送执行请求、取消指令、心跳检测。两端都能主动说话，天然适合 gRPC 双向流。</p>
+
+    <h3 class="reveal">协议消息全景</h3>
+    <div class="msg-seq reveal">
+      <div class="msg-row">
+        <div class="msg-num">1</div>
+        <div class="msg-dir"><span class="msg-from caster">Caster</span><span class="msg-arrow">&rarr;</span><span class="msg-to runtime">Runtime</span></div>
+        <div class="msg-name">CasterAttach</div>
+        <div class="msg-desc">声明提供的 Rune、并发容量、调度标签</div>
+      </div>
+      <div class="msg-row">
+        <div class="msg-num">2</div>
+        <div class="msg-dir"><span class="msg-from runtime">Runtime</span><span class="msg-arrow">&rarr;</span><span class="msg-to caster">Caster</span></div>
+        <div class="msg-name">AttachAck</div>
+        <div class="msg-desc">确认注册 / 拒绝（如路由冲突）</div>
+      </div>
+      <div class="msg-row">
+        <div class="msg-num">3</div>
+        <div class="msg-dir"><span class="msg-from both">Both</span><span class="msg-arrow">&harr;</span><span class="msg-to both">Both</span></div>
+        <div class="msg-name">Heartbeat</div>
+        <div class="msg-desc">双向心跳，超时 = Caster 已死</div>
+      </div>
+      <div class="msg-row">
+        <div class="msg-num">4</div>
+        <div class="msg-dir"><span class="msg-from runtime">Runtime</span><span class="msg-arrow">&rarr;</span><span class="msg-to caster">Caster</span></div>
+        <div class="msg-name">ExecuteRequest</div>
+        <div class="msg-desc">推送执行请求（rune_name + input + context）</div>
+      </div>
+      <div class="msg-row">
+        <div class="msg-num">5a</div>
+        <div class="msg-dir"><span class="msg-from caster">Caster</span><span class="msg-arrow">&rarr;</span><span class="msg-to runtime">Runtime</span></div>
+        <div class="msg-name">ExecuteResult</div>
+        <div class="msg-desc">一次性结果返回</div>
+      </div>
+      <div class="msg-row">
+        <div class="msg-num">5b</div>
+        <div class="msg-dir"><span class="msg-from caster">Caster</span><span class="msg-arrow">&rarr;</span><span class="msg-to runtime">Runtime</span></div>
+        <div class="msg-name">StreamEvent* &rarr; StreamEnd</div>
+        <div class="msg-desc">流式：多次推送数据块 + 结束信号</div>
+      </div>
+      <div class="msg-row">
+        <div class="msg-num">6</div>
+        <div class="msg-dir"><span class="msg-from runtime">Runtime</span><span class="msg-arrow">&rarr;</span><span class="msg-to caster">Caster</span></div>
+        <div class="msg-name">CancelRequest</div>
+        <div class="msg-desc">取消执行，释放 GPU 等昂贵资源</div>
+      </div>
+      <div class="msg-row">
+        <div class="msg-num">7</div>
+        <div class="msg-dir"><span class="msg-from caster">Caster</span><span class="msg-arrow">&rarr;</span><span class="msg-to runtime">Runtime</span></div>
+        <div class="msg-name">CasterDetach</div>
+        <div class="msg-desc">优雅断开（区分于崩溃断连）</div>
+      </div>
+    </div>
+
+    <h3 class="reveal">状态收敛保证</h3>
+    <p class="reveal">协议设计中最精妙的部分是<strong>状态收敛</strong>：无论发生什么异常（超时、取消、断连、迟到响应），Runtime 的内部状态<em>总是</em>最终归于一致。</p>
+    <div class="callout callout-green reveal">
+      <strong>保证 #7 &mdash; No State Pollution：</strong>迟到的 Result 或 StreamEnd（在超时/取消/断连已清理完状态之后到达的）被静默忽略。不会返回幽灵信号量，不会腐蚀运行时状态。
+    </div>
+    <div class="callout callout-accent reveal">
+      <strong>保证 #8 &mdash; Strict max_concurrent：</strong>Caster 声明的并发容量通过 Semaphore 严格执行。无论任何错误路径，permit 计数永远不会超过声明值。
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ 05 横向对比 ════════════════════ -->
+<section id="compare">
+  <div class="wrap-wide">
+    <div class="sn reveal">05</div>
+    <h2 class="reveal">Rune vs 已有方案</h2>
+    <p class="reveal">Rune 不是第一个简化分布式函数执行的框架。但它的定位独特 &mdash; 融合 Serverless、RPC、工作流引擎三者的核心能力于一个协议。</p>
+
+    <div class="table-wrap reveal">
+      <table>
+        <thead>
+          <tr><th>维度</th><th>Rune</th><th>Lambda / 云函数</th><th>gRPC 直连</th><th>Temporal / Airflow</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>定位</strong></td><td>分布式函数执行框架</td><td>Serverless 平台</td><td>RPC 框架</td><td>工作流引擎</td></tr>
+          <tr><td><strong>执行位置</strong></td><td>你自己的机器/容器</td><td>云厂商沙箱</td><td>你自己的服务</td><td>Worker 进程</td></tr>
+          <tr><td><strong>调用模式</strong></td><td>sync + stream + async 三合一</td><td>主要 sync</td><td>unary + stream</td><td>async 为主</td></tr>
+          <tr class="row-hl"><td><strong>函数 &rarr; HTTP</strong></td><td>自动（声明 gate_path）</td><td>需要 API Gateway</td><td>不自带 HTTP</td><td>不适用</td></tr>
+          <tr><td><strong>多语言</strong></td><td>协议统一，3 语言 SDK</td><td>语言各自独立</td><td>proto 生成</td><td>SDK 独立</td></tr>
+          <tr><td><strong>编排</strong></td><td>内置 DAG (Flow)</td><td>需 Step Functions</td><td>无</td><td>核心能力</td></tr>
+          <tr><td><strong>冷启动</strong></td><td>无</td><td>毫秒~秒级</td><td>无</td><td>依赖 Worker</td></tr>
+          <tr><td><strong>GPU / 长任务</strong></td><td>天然支持</td><td>受限</td><td>支持</td><td>支持</td></tr>
+          <tr><td><strong>供应商锁定</strong></td><td>无</td><td>强</td><td>无</td><td>弱</td></tr>
+          <tr><td><strong>连接管理</strong></td><td>自动心跳/重连/背压</td><td>平台管理</td><td>自行实现</td><td>Worker 心跳</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout callout-accent reveal">
+      <strong>关键差异：</strong>Rune 不是 Serverless，不是 RPC 框架，不是工作流引擎 &mdash; 它把三者的核心能力融合在<strong>一个协议</strong>里。你不需要 API Gateway + Lambda + Step Functions + CloudWatch 四件套。一个 Runtime，全包。
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ 06 最佳场景 ════════════════════ -->
+<section id="scenarios">
+  <div class="wrap">
+    <div class="sn reveal">06</div>
+    <h2 class="reveal">得天独厚的场景</h2>
+    <p class="reveal">在这些场景下，Rune 相比其他方案有结构性优势。</p>
+
+    <div class="scenario-grid reveal">
+      <div class="scenario">
+        <div class="scenario-icon">&#x1F9E0;</div>
+        <div class="scenario-title">AI/ML 模型推理服务化</div>
+        <div class="scenario-desc">AI 团队用 Python 写推理代码，Rune 自动给出 HTTP 端点。<strong>流式输出</strong>天然适配 LLM 逐 token 生成。GPU Worker 声明 <code>max_concurrent=2</code> 做背压，标签路由 <code>gpu=a100</code> 实现硬件感知调度。零冷启动，不改一行推理代码。</div>
+        <div class="scenario-tags">
+          <span class="tag">流式推送</span><span class="tag">GPU 调度</span><span class="tag">背压控制</span><span class="tag">零冷启动</span>
+        </div>
+      </div>
+      <div class="scenario">
+        <div class="scenario-icon">&#x1F517;</div>
+        <div class="scenario-title">多语言微服务统一入口</div>
+        <div class="scenario-desc">Python 写 AI 能力、TypeScript 写业务逻辑、Rust 写性能热路径 &mdash; 三种语言通过同一个 Wire Protocol 注册到同一个 Runtime，对外暴露统一 HTTP API。不再为每种语言维护独立的框架和部署流程。</div>
+        <div class="scenario-tags">
+          <span class="tag">多语言统一</span><span class="tag">统一入口</span><span class="tag">协议标准化</span>
+        </div>
+      </div>
+      <div class="scenario">
+        <div class="scenario-icon">&#x1F500;</div>
+        <div class="scenario-title">复杂业务管线编排</div>
+        <div class="scenario-desc">用 DAG Flow 编排多步骤管线：文档解析 &rarr; 翻译和摘要并行 &rarr; 条件分支决定是否人工校对 &rarr; 存储。Flow 的 input_mapping 自动串联上下游数据，单步失败不影响已完成分支的结果。</div>
+        <div class="scenario-tags">
+          <span class="tag">DAG 编排</span><span class="tag">并行执行</span><span class="tag">条件分支</span><span class="tag">故障隔离</span>
+        </div>
+      </div>
+      <div class="scenario">
+        <div class="scenario-icon">&#x26A1;</div>
+        <div class="scenario-title">内部工具 / 能力平台</div>
+        <div class="scenario-desc">数据导出、邮件发送、报表生成 &mdash; 注册为 Rune，统一通过 CLI 或 HTTP 调用。API Key 双层隔离，Rate Limiting 防滥用，调用日志和统计开箱即用。</div>
+        <div class="scenario-tags">
+          <span class="tag">认证隔离</span><span class="tag">频率限制</span><span class="tag">调用审计</span><span class="tag">CLI</span>
+        </div>
+      </div>
+      <div class="scenario">
+        <div class="scenario-icon">&#x1F4E1;</div>
+        <div class="scenario-title">实时流式处理</div>
+        <div class="scenario-desc">处理函数通过 StreamSender 实时推送中间结果，前端通过 SSE 实时接收。实时日志分析、流式报告生成、逐行代码审查 &mdash; 这是<strong>真流式</strong>，第一个事件在 handler 产生输出时立即发出。</div>
+        <div class="scenario-tags">
+          <span class="tag">SSE 流式</span><span class="tag">真实时</span><span class="tag">低延迟</span>
+        </div>
+      </div>
+      <div class="scenario">
+        <div class="scenario-icon">&#x1F3D7;&#xFE0F;</div>
+        <div class="scenario-title">长时间异步任务</div>
+        <div class="scenario-desc">视频转码、大文件处理、批量迁移 &mdash; 以 <code>?async</code> 提交后立即返回 task_id，随时轮询状态，结果持久化到 SQLite。Caster 断连重连后任务不丢失。</div>
+        <div class="scenario-tags">
+          <span class="tag">异步任务</span><span class="tag">持久化</span><span class="tag">断点续传</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="quote reveal">
+      <p>&ldquo;Rune 的甜蜜点：你有一堆不同语言写的函数，需要以最少的胶水代码把它们变成可路由、可编排、可监控的服务。它不替代 K8s 或 Lambda，而是填补「函数写完了到服务上线」之间的空白。&rdquo;</p>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ 07 不适用 ════════════════════ -->
+<section id="limits">
+  <div class="wrap">
+    <div class="sn reveal">07</div>
+    <h2 class="reveal">边界在哪？</h2>
+    <p class="reveal">清醒认识边界，比盲目吹捧更有价值。</p>
+
+    <div class="two-col reveal">
+      <div class="col pros">
+        <h4>适合</h4>
+        <ul>
+          <li>函数级别的分布式执行</li>
+          <li>多语言团队统一协作</li>
+          <li>sync + stream + async 多模式</li>
+          <li>GPU / 长任务 / AI 推理</li>
+          <li>中小规模 DAG 编排</li>
+          <li>快速把函数变成 HTTP API</li>
+          <li>自托管、无供应商锁定</li>
+        </ul>
+      </div>
+      <div class="col cons">
+        <h4>不适合</h4>
+        <ul>
+          <li>超大规模集群编排（Kubernetes）</li>
+          <li>事务性长工作流（Temporal）</li>
+          <li>纯 RPC 通信（gRPC 直连更轻量）</li>
+          <li>事件驱动（Kafka / RabbitMQ）</li>
+          <li>极端低延迟（多一跳中转）</li>
+          <li>弹性伸缩（Serverless 更成熟）</li>
+          <li>已有服务网格的大型组织</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout callout-accent reveal">
+      <strong>经验法则：</strong>2&ndash;50 人团队，2&ndash;3 种语言，需要快速把能力服务化并编排 &mdash; Rune 是最小阻力路径。千节点集群或 exactly-once 事务 &mdash; 你需要更重的基础设施。
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════ 08 结论 ════════════════════ -->
+<section id="verdict">
+  <div class="wrap">
+    <div class="sn reveal">08</div>
+    <h2 class="reveal">结论</h2>
+
+    <div class="verdict reveal">
+      <h3>Rune = 函数到服务的最短路径</h3>
+      <p>核心价值：<strong>消除从「写了一个函数」到「它成为可路由、可监控、可编排的生产服务」之间的全部摩擦。</strong></p>
+      <p style="margin-top:1rem">独特之处不在于某个单一能力 &mdash; 流式、编排、负载均衡别人也有 &mdash; 而在于<strong>这些能力全部融合在一个统一协议和运行时里</strong>，让函数作者只需关心 20 行业务逻辑。</p>
+      <p style="margin-top:1rem">多语言团队、AI/ML 服务化、内部能力平台 &mdash; 这些场景下，Rune 提供「写函数就行，其余全包」的解决方案。以前你需要 API Gateway + RPC 框架 + 工作流引擎 + 监控系统四件套，现在一个 Runtime 搞定。</p>
+    </div>
+
+    <h3 class="reveal">三句话</h3>
+    <div class="flow reveal">
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div><div class="flow-line"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">是什么</div>
+          <div class="flow-desc">协议优先的分布式函数执行框架。定义函数，获得路由、流式、异步、编排 &mdash; 全部开箱即用。</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div><div class="flow-line"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">解决什么</div>
+          <div class="flow-desc">消除函数到服务的基础设施鸿沟。90% 的胶水代码从此不需要你写。</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">给谁用</div>
+          <div class="flow-desc">多语言能力需要快速服务化的团队 &mdash; AI/ML 推理、内部工具平台、多步骤管线编排。</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="quote reveal">
+      <p>&ldquo;一个符文就是一段力量。你只需要刻下符文，力量自然释放。&rdquo;</p>
+      <cite>&mdash; Rune，源自古北欧符文的设计哲学</cite>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<div class="footer">
+  <p>Rune Deep Dive &middot; 2026 &middot; Based on Rune v1.0.0</p>
+</div>
+
+<!-- ─── Scripts ─── -->
+<script>
+// Theme
+const toggle=document.getElementById('theme-toggle'),icon=document.getElementById('theme-icon');
+function setTheme(t){document.documentElement.setAttribute('data-theme',t);icon.innerHTML=t==='dark'?'&#9728;':'&#9684;';localStorage.setItem('rune-theme',t)}
+toggle.addEventListener('click',()=>{const c=document.documentElement.getAttribute('data-theme');setTheme(c==='dark'?'light':'dark')});
+const saved=localStorage.getItem('rune-theme');if(saved)setTheme(saved);
+
+// Progress bar
+const bar=document.getElementById('progress');
+window.addEventListener('scroll',()=>{const h=document.documentElement.scrollHeight-window.innerHeight;if(h>0)bar.style.width=(window.scrollY/h*100)+'%'},{passive:true});
+
+// Reveal
+const reveals=document.querySelectorAll('.reveal');
+const rObs=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('visible');rObs.unobserve(e.target)}})},{threshold:0.1});
+reveals.forEach(el=>rObs.observe(el));
+
+// Nav active
+const navLinks=document.querySelectorAll('.nav a');
+const secs=document.querySelectorAll('section[id]');
+const nObs=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){navLinks.forEach(l=>l.classList.remove('active'));const a=document.querySelector('.nav a[href="#'+e.target.id+'"]');if(a)a.classList.add('active')}})},{threshold:0.25,rootMargin:'-80px 0px -50% 0px'});
+secs.forEach(s=>nObs.observe(s));
+
+// Stat counter
+function animateNum(el){
+  const txt=el.textContent.trim(),m=txt.match(/^[~]?(\d+)/);if(!m)return;
+  const tgt=+m[1],pfx=txt.startsWith('~')?'~':'',sfx=txt.replace(/^[~]?\d+/,''),dur=900,st=performance.now();
+  (function tick(now){const t=Math.min((now-st)/dur,1),ease=1-Math.pow(1-t,4);el.textContent=pfx+Math.round(tgt*ease)+sfx;if(t<1)requestAnimationFrame(tick)})(st);
+}
+const sVals=document.querySelectorAll('.stat-val');
+const sObs=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){animateNum(e.target);sObs.unobserve(e.target)}})},{threshold:0.5});
+sVals.forEach(el=>sObs.observe(el));
+</script>
+</body>
+</html>
