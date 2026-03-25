@@ -154,6 +154,15 @@ impl Default for LogConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TlsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // AppConfig — top-level configuration
 // ---------------------------------------------------------------------------
@@ -170,6 +179,7 @@ pub struct AppConfig {
     pub rate_limit: RateLimitConfig,
     pub log: LogConfig,
     pub telemetry: TelemetryConfig,
+    pub tls: TlsConfig,
 }
 
 impl Default for AppConfig {
@@ -184,6 +194,7 @@ impl Default for AppConfig {
             rate_limit: RateLimitConfig::default(),
             log: LogConfig::default(),
             telemetry: TelemetryConfig::default(),
+            tls: TlsConfig::default(),
         }
     }
 }
@@ -345,6 +356,14 @@ impl AppConfig {
                 self.telemetry.prometheus_port = Some(port);
             }
         }
+
+        // TLS
+        if let Ok(v) = std::env::var("RUNE_TLS__CERT_PATH") {
+            self.tls.cert_path = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Ok(v) = std::env::var("RUNE_TLS__KEY_PATH") {
+            self.tls.key_path = if v.is_empty() { None } else { Some(v) };
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -369,5 +388,41 @@ impl AppConfig {
 
     pub fn default_timeout(&self) -> Duration {
         Duration::from_secs(self.session.max_request_timeout_secs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_config_default_is_disabled() {
+        let config = TlsConfig::default();
+        assert!(config.cert_path.is_none());
+        assert!(config.key_path.is_none());
+    }
+
+    #[test]
+    fn tls_config_from_toml() {
+        let toml_str = r#"
+        [tls]
+        cert_path = "/etc/rune/cert.pem"
+        key_path = "/etc/rune/key.pem"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.tls.cert_path.as_deref(), Some("/etc/rune/cert.pem"));
+        assert_eq!(config.tls.key_path.as_deref(), Some("/etc/rune/key.pem"));
+    }
+
+    #[test]
+    fn tls_config_partial_is_err_or_none() {
+        // 只配置 cert 没配置 key，应该能解析但在启动时会报错
+        let toml_str = r#"
+        [tls]
+        cert_path = "/etc/rune/cert.pem"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.tls.cert_path.is_some());
+        assert!(config.tls.key_path.is_none());
     }
 }

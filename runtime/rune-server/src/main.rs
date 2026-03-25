@@ -230,26 +230,74 @@ async fn main() -> anyhow::Result<()> {
 
     let http_router = gate::build_router(gate_state, None);
 
-    let http_listener = tokio::net::TcpListener::bind(running.config.http_addr()).await?;
-    tracing::info!("gate listening on {}", running.config.http_addr());
+    // Determine whether TLS is active (disabled in dev mode even if configured)
+    let tls_enabled = !config.server.dev_mode
+        && config.tls.cert_path.is_some()
+        && config.tls.key_path.is_some();
+
+    if tls_enabled {
+        tracing::info!("TLS enabled for HTTP and gRPC servers");
+    } else if !config.server.dev_mode
+        && (config.tls.cert_path.is_some() || config.tls.key_path.is_some())
+    {
+        tracing::warn!(
+            "TLS partially configured (need both tls.cert_path and tls.key_path); \
+             falling back to plaintext"
+        );
+    }
 
     // Issue #4 fix: use watch channel to coordinate graceful shutdown signals
     // for both HTTP and gRPC servers.
     let (shutdown_tx, mut http_shutdown_rx) = tokio::sync::watch::channel(false);
     let mut grpc_shutdown_rx = shutdown_tx.subscribe();
 
-    let http_handle = tokio::spawn(async move {
-        axum::serve(http_listener, http_router)
-            .with_graceful_shutdown(async move {
-                while !*http_shutdown_rx.borrow_and_update() {
-                    if http_shutdown_rx.changed().await.is_err() {
+    let http_addr = running.config.http_addr();
+    // Handle for axum-server graceful shutdown (only used in TLS mode)
+    let axum_server_handle = axum_server::Handle::new();
+    let axum_server_handle_clone = axum_server_handle.clone();
+
+    let http_handle = if tls_enabled {
+        let cert_path = config.tls.cert_path.clone().unwrap();
+        let key_path = config.tls.key_path.clone().unwrap();
+        let rustls_config =
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
+        tracing::info!("HTTPS gate listening on {}", http_addr);
+        // Spawn a task that watches the shutdown channel and triggers graceful shutdown
+        let handle_for_shutdown = axum_server_handle_clone;
+        tokio::spawn({
+            let mut rx = http_shutdown_rx;
+            async move {
+                while !*rx.borrow_and_update() {
+                    if rx.changed().await.is_err() {
                         break;
                     }
                 }
-            })
-            .await
-            .unwrap();
-    });
+                handle_for_shutdown.graceful_shutdown(None);
+            }
+        });
+        tokio::spawn(async move {
+            axum_server::bind_rustls(http_addr, rustls_config)
+                .handle(axum_server_handle)
+                .serve(http_router.into_make_service())
+                .await
+                .unwrap();
+        })
+    } else {
+        let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
+        tracing::info!("HTTP gate listening on {}", http_addr);
+        tokio::spawn(async move {
+            axum::serve(http_listener, http_router)
+                .with_graceful_shutdown(async move {
+                    while !*http_shutdown_rx.borrow_and_update() {
+                        if http_shutdown_rx.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+        })
+    };
 
     // ── gRPC ──
     let grpc_service = RuneGrpcService {
@@ -257,21 +305,45 @@ async fn main() -> anyhow::Result<()> {
         session_mgr: Arc::clone(&running.session_mgr),
     };
 
-    tracing::info!("grpc listening on {}", running.config.grpc_addr());
-
-    let grpc_handle = tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(RuneServiceServer::new(grpc_service))
-            .serve_with_shutdown(running.config.grpc_addr(), async move {
-                while !*grpc_shutdown_rx.borrow_and_update() {
-                    if grpc_shutdown_rx.changed().await.is_err() {
-                        break;
+    let grpc_addr = running.config.grpc_addr();
+    let grpc_handle = if tls_enabled {
+        let cert_path = config.tls.cert_path.clone().unwrap();
+        let key_path = config.tls.key_path.clone().unwrap();
+        let cert = tokio::fs::read(&cert_path).await?;
+        let key = tokio::fs::read(&key_path).await?;
+        let identity = tonic::transport::Identity::from_pem(cert, key);
+        tracing::info!("gRPCS listening on {}", grpc_addr);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))
+                .expect("invalid TLS configuration for gRPC")
+                .add_service(RuneServiceServer::new(grpc_service))
+                .serve_with_shutdown(grpc_addr, async move {
+                    while !*grpc_shutdown_rx.borrow_and_update() {
+                        if grpc_shutdown_rx.changed().await.is_err() {
+                            break;
+                        }
                     }
-                }
-            })
-            .await
-            .unwrap();
-    });
+                })
+                .await
+                .unwrap();
+        })
+    } else {
+        tracing::info!("gRPC listening on {}", grpc_addr);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(RuneServiceServer::new(grpc_service))
+                .serve_with_shutdown(grpc_addr, async move {
+                    while !*grpc_shutdown_rx.borrow_and_update() {
+                        if grpc_shutdown_rx.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+        })
+    };
 
     // ── Wait for shutdown signal ──
     tokio::signal::ctrl_c().await?;

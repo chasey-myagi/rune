@@ -12,7 +12,7 @@ rune-store = { path = "../rune-store" }
 clap = { version = "4", features = ["derive"] }
 serde_json.workspace = true
 tokio.workspace = true
-tonic.workspace = true
+tonic = { workspace = true, features = ["tls"] }
 bytes.workspace = true
 anyhow.workspace = true
 axum.workspace = true
@@ -27,6 +27,7 @@ opentelemetry-otlp = { version = "0.31.1", features = ["grpc-tonic"] }
 tracing-opentelemetry = "0.32.1"
 metrics = "0.24.3"
 metrics-exporter-prometheus = "0.18.1"
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
