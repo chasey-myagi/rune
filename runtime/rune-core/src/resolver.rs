@@ -128,9 +128,8 @@ impl Resolver for PriorityResolver {
             // Build a temporary vec of top-tier entries for inner resolver
             let top_tier: Vec<RuneEntry> = top_indices.iter().map(|&i| candidates[i].clone()).collect();
             let picked = self.inner.pick(rune_name, &top_tier)?;
-            // Safe index lookup: find which element in top_tier was picked.
-            // picked's lifetime is tied to top_tier; ptr::eq works because both
-            // references point into the same Vec allocation.
+            // Safe index lookup: match by (name, caster_id) value equality,
+            // which is robust even if inner resolver clones or rebinds references.
             let inner_idx = top_tier.iter().position(|e| {
                 e.config.name == picked.config.name && e.caster_id == picked.caster_id
             }).unwrap_or(0);
