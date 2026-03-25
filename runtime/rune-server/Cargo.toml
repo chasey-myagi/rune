@@ -18,9 +18,15 @@ anyhow.workspace = true
 axum.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "registry"] }
 rand = "0.9"
 hex = "0.4"
+opentelemetry = "0.31.0"
+opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.1", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.32.1"
+metrics = "0.24.3"
+metrics-exporter-prometheus = "0.18.1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

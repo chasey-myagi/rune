@@ -7,4 +7,5 @@ pub mod app;
 pub mod auth;
 pub mod config;
 pub mod grpc_service;
+pub mod telemetry;
 pub mod time_utils;

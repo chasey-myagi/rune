@@ -8,6 +8,7 @@ use rune_core::auth::{KeyVerifier, NoopVerifier};
 use rune_core::config::AppConfig;
 use rune_core::grpc_service::RuneGrpcService;
 use rune_core::rune::{RuneConfig, RuneError, GateConfig, make_handler};
+use rune_core::telemetry::TelemetryConfig;
 use rune_flow::dag::{FlowDefinition, StepDefinition};
 use rune_flow::engine::FlowEngine;
 use rune_gate::gate;
@@ -28,8 +29,6 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-
     // ── CLI + Config ──
     let cli = Cli::parse();
     let mut config = AppConfig::load(cli.config.as_deref())?;
@@ -37,6 +36,9 @@ async fn main() -> anyhow::Result<()> {
         config.apply_dev_mode();
     }
     config.apply_env_overrides();
+
+    // ── Telemetry (tracing + metrics) ──
+    let _tracer_provider = init_telemetry(&config.telemetry);
 
     tracing::info!(dev_mode = config.server.dev_mode, "loading configuration");
 
@@ -292,5 +294,79 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("drain complete, shutting down");
 
+    // Flush pending OpenTelemetry spans before exit
+    if let Some(provider) = _tracer_provider {
+        if let Err(e) = provider.shutdown() {
+            eprintln!("OpenTelemetry tracer shutdown error: {e:?}");
+        }
+    }
+
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry initialization
+// ---------------------------------------------------------------------------
+
+/// Initialize tracing subscriber and optional metrics exporter.
+///
+/// - Without any configuration: behaves identically to `tracing_subscriber::fmt::init()`.
+/// - With `otlp_endpoint`: adds an OpenTelemetry OTLP tracing layer on top of fmt.
+/// - With `prometheus_port`: starts a Prometheus `/metrics` HTTP listener.
+///
+/// Returns the `SdkTracerProvider` (if created) so the caller can flush spans
+/// on shutdown via `provider.shutdown()`.
+fn init_telemetry(
+    config: &TelemetryConfig,
+) -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_otlp::WithExportConfig as _;
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let fmt_layer = tracing_subscriber::fmt::layer();
+
+    let provider = if let Some(ref endpoint) = config.otlp_endpoint {
+        // OTLP gRPC exporter -> OpenTelemetry tracing layer
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
+            .expect("failed to build OTLP span exporter");
+
+        let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .build();
+
+        let tracer = tracer_provider.tracer("rune-server");
+        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .with(otel_layer)
+            .init();
+
+        tracing::info!(otlp_endpoint = endpoint, "OpenTelemetry tracing enabled");
+        Some(tracer_provider)
+    } else {
+        // No OTLP — plain fmt subscriber (same as original behavior)
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
+        None
+    };
+
+    // Prometheus metrics exporter (independent of tracing)
+    if let Some(port) = config.prometheus_port {
+        metrics_exporter_prometheus::PrometheusBuilder::new()
+            .with_http_listener(([0, 0, 0, 0], port))
+            .install()
+            .expect("failed to install Prometheus metrics exporter");
+        tracing::info!(port, "Prometheus metrics exporter started");
+    }
+
+    provider
 }

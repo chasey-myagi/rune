@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::telemetry::TelemetryConfig;
+
 // ---------------------------------------------------------------------------
 // Sub-config structs
 // ---------------------------------------------------------------------------
@@ -167,6 +169,7 @@ pub struct AppConfig {
     pub resolver: ResolverConfig,
     pub rate_limit: RateLimitConfig,
     pub log: LogConfig,
+    pub telemetry: TelemetryConfig,
 }
 
 impl Default for AppConfig {
@@ -180,6 +183,7 @@ impl Default for AppConfig {
             resolver: ResolverConfig::default(),
             rate_limit: RateLimitConfig::default(),
             log: LogConfig::default(),
+            telemetry: TelemetryConfig::default(),
         }
     }
 }
@@ -328,6 +332,18 @@ impl AppConfig {
         env_override_string!("RUNE_LOG__LEVEL", self.log.level);
         if let Ok(v) = std::env::var("RUNE_LOG__FILE") {
             self.log.file = if v.is_empty() { None } else { Some(v) };
+        }
+
+        // Telemetry
+        if let Ok(v) = std::env::var("RUNE_TELEMETRY__OTLP_ENDPOINT") {
+            self.telemetry.otlp_endpoint = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Ok(v) = std::env::var("RUNE_TELEMETRY__PROMETHEUS_PORT") {
+            if v.is_empty() {
+                self.telemetry.prometheus_port = None;
+            } else if let Ok(port) = v.parse::<u16>() {
+                self.telemetry.prometheus_port = Some(port);
+            }
         }
     }
 
