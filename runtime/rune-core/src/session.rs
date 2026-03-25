@@ -48,6 +48,7 @@ pub struct SessionManager {
 pub(crate) struct CasterState {
     pub(crate) outbound: mpsc::Sender<SessionMessage>,
     pub(crate) pending: Arc<DashMap<String, PendingRequest>>,
+    pub(crate) timeout_handles: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
     pub(crate) semaphore: Arc<Semaphore>,
     pub(crate) connected_at: Instant,
 }
@@ -123,6 +124,7 @@ impl SessionManager {
         self.sessions.insert(caster_id.to_string(), CasterState {
             outbound: tx,
             pending: Arc::new(DashMap::new()),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             connected_at: Instant::now(),
         });
@@ -137,6 +139,7 @@ impl SessionManager {
         let mut caster_id: Option<String> = None;
         let mut state = SessionState::Attaching;
         let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
+        let timeout_handles: Arc<DashMap<String, tokio::task::JoinHandle<()>>> = Arc::new(DashMap::new());
         let last_heartbeat_ms = Arc::new(AtomicU64::new(now_ms()));
         let semaphore = Arc::new(Semaphore::new(0)); // Attach adds permits
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -210,6 +213,7 @@ impl SessionManager {
                     self.sessions.insert(id.clone(), CasterState {
                         outbound: outbound_tx.clone(),
                         pending: Arc::clone(&pending),
+                        timeout_handles: Arc::clone(&timeout_handles),
                         semaphore: Arc::clone(&semaphore),
                         connected_at: Instant::now(),
                     });
@@ -259,6 +263,7 @@ impl SessionManager {
                 Some(session_message::Payload::Result(result)) if state == SessionState::Active => {
                     let req_id = result.request_id.clone();
                     if let Some((_, p)) = pending.remove(&req_id) {
+                        abort_timeout_handle(&timeout_handles, &req_id);
                         // permit auto-returned when PendingRequest is dropped
                         let outcome = match result.status() {
                             Status::Completed => Ok(Bytes::from(result.output)),
@@ -286,6 +291,7 @@ impl SessionManager {
                 Some(session_message::Payload::StreamEnd(end)) if state == SessionState::Active => {
                     let req_id = end.request_id.clone();
                     if let Some((_, p)) = pending.remove(&req_id) {
+                        abort_timeout_handle(&timeout_handles, &req_id);
                         // permit auto-returned when PendingRequest is dropped
                         if let PendingResponse::Stream(tx) = p.tx {
                             if end.status() != Status::Completed {
@@ -317,6 +323,11 @@ impl SessionManager {
             tracing::info!(caster_id = %id, "cleaning up disconnected caster");
             self.sessions.remove(id);
             relay.remove_caster(id);
+            // Abort all outstanding timeout tasks for this session
+            let th_keys: Vec<String> = timeout_handles.iter().map(|e| e.key().clone()).collect();
+            for key in th_keys {
+                abort_timeout_handle(&timeout_handles, &key);
+            }
             let keys: Vec<String> = pending.iter().map(|e| e.key().clone()).collect();
             for req_id in keys {
                 if let Some((_, p)) = pending.remove(&req_id) {
@@ -345,22 +356,12 @@ impl SessionManager {
             _permit: permit,
         });
 
-        // Per-request timeout: spawn a task that fires after the request's timeout
-        let timeout_pending = Arc::clone(&session.pending);
-        let timeout_req_id = request_id.to_string();
-        let req_timeout = timeout;
-        tokio::spawn(async move {
-            tokio::time::sleep(req_timeout).await;
-            // If still pending when timeout fires, remove and send error
-            if let Some((_, p)) = timeout_pending.remove(&timeout_req_id) {
-                tracing::warn!(request_id = %timeout_req_id, "request timed out");
-                match p.tx {
-                    PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
-                    PendingResponse::Stream(tx) => { let _ = tx.send(Err(RuneError::Timeout)).await; }
-                }
-            }
-            // If already removed (completed/cancelled), this is a no-op
-        });
+        spawn_request_timeout(
+            Arc::clone(&session.pending),
+            Arc::clone(&session.timeout_handles),
+            request_id.to_string(),
+            timeout,
+        );
 
         let msg = SessionMessage {
             payload: Some(session_message::Payload::Execute(ExecuteRequest {
@@ -372,6 +373,7 @@ impl SessionManager {
         };
 
         if session.outbound.send(msg).await.is_err() {
+            abort_timeout_handle(&session.timeout_handles, request_id);
             session.pending.remove(request_id);
             // permit auto-returned when PendingRequest is dropped
             return Err(RuneError::Unavailable);
@@ -395,22 +397,12 @@ impl SessionManager {
             _permit: permit,
         });
 
-        // Per-request timeout: spawn a task that fires after the request's timeout
-        let timeout_pending = Arc::clone(&session.pending);
-        let timeout_req_id = request_id.to_string();
-        let req_timeout = timeout;
-        tokio::spawn(async move {
-            tokio::time::sleep(req_timeout).await;
-            // If still pending when timeout fires, remove and send error
-            if let Some((_, p)) = timeout_pending.remove(&timeout_req_id) {
-                tracing::warn!(request_id = %timeout_req_id, "request timed out");
-                match p.tx {
-                    PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
-                    PendingResponse::Stream(tx) => { let _ = tx.send(Err(RuneError::Timeout)).await; }
-                }
-            }
-            // If already removed (completed/cancelled), this is a no-op
-        });
+        spawn_request_timeout(
+            Arc::clone(&session.pending),
+            Arc::clone(&session.timeout_handles),
+            request_id.to_string(),
+            timeout,
+        );
 
         let msg = SessionMessage {
             payload: Some(session_message::Payload::Execute(ExecuteRequest {
@@ -422,6 +414,7 @@ impl SessionManager {
         };
 
         if session.outbound.send(msg).await.is_err() {
+            abort_timeout_handle(&session.timeout_handles, request_id);
             session.pending.remove(request_id);
             // permit auto-returned when PendingRequest is dropped
             return Err(RuneError::Unavailable);
@@ -447,6 +440,7 @@ impl SessionManager {
     pub async fn cancel(&self, caster_id: &str, request_id: &str, reason: &str) -> Result<(), RuneError> {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
         if let Some((_, p)) = session.pending.remove(request_id) {
+            abort_timeout_handle(&session.timeout_handles, request_id);
             // permit auto-returned when PendingRequest is dropped
             let err = Err(RuneError::Cancelled);
             match p.tx {
@@ -461,6 +455,47 @@ impl SessionManager {
         };
         let _ = session.outbound.send(msg).await;
         Ok(())
+    }
+}
+
+/// Spawn a timeout task for a pending request and track its handle.
+///
+/// When the timeout fires, the task removes the pending entry and sends a
+/// `RuneError::Timeout` to the caller. If the request has already completed
+/// (removed from `pending`), the task is a no-op. The returned `JoinHandle`
+/// is stored in `timeout_handles` so it can be aborted when the request
+/// completes normally, avoiding ghost tasks that sleep until expiry.
+fn spawn_request_timeout(
+    pending: Arc<DashMap<String, PendingRequest>>,
+    timeout_handles: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
+    request_id: String,
+    timeout: Duration,
+) {
+    let handles_clone = Arc::clone(&timeout_handles);
+    let req_id_clone = request_id.clone();
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(timeout).await;
+        // If still pending when timeout fires, remove and send error
+        if let Some((_, p)) = pending.remove(&req_id_clone) {
+            tracing::warn!(request_id = %req_id_clone, "request timed out");
+            match p.tx {
+                PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
+                PendingResponse::Stream(tx) => { let _ = tx.send(Err(RuneError::Timeout)).await; }
+            }
+        }
+        // Clean up our own handle entry
+        handles_clone.remove(&req_id_clone);
+    });
+    timeout_handles.insert(request_id, handle);
+}
+
+/// Abort and remove a timeout task for the given request, if one exists.
+fn abort_timeout_handle(
+    timeout_handles: &DashMap<String, tokio::task::JoinHandle<()>>,
+    request_id: &str,
+) {
+    if let Some((_, handle)) = timeout_handles.remove(request_id) {
+        handle.abort();
     }
 }
 
@@ -504,6 +539,7 @@ mod tests {
         mgr.sessions.insert(caster_id.clone(), CasterState {
             outbound: tx,
             pending: Arc::clone(&pending),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::clone(&semaphore),
             connected_at: Instant::now(),
         });
@@ -658,12 +694,14 @@ mod tests {
         mgr.sessions.insert("caster-1".to_string(), CasterState {
             outbound: tx.clone(),
             pending: Arc::new(DashMap::new()),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::new(Semaphore::new(1)),
             connected_at: Instant::now(),
         });
         mgr.sessions.insert("caster-2".to_string(), CasterState {
             outbound: tx,
             pending: Arc::new(DashMap::new()),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::new(Semaphore::new(1)),
             connected_at: Instant::now(),
         });
@@ -724,6 +762,7 @@ mod tests {
         mgr.sessions.insert("caster-A".to_string(), CasterState {
             outbound: tx1,
             pending: Arc::clone(&pending1),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::clone(&sem1),
             connected_at: Instant::now(),
         });
@@ -734,6 +773,7 @@ mod tests {
         mgr.sessions.insert("caster-B".to_string(), CasterState {
             outbound: tx2,
             pending: Arc::clone(&pending2),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::clone(&sem2),
             connected_at: Instant::now(),
         });
@@ -966,6 +1006,7 @@ mod tests {
             mgr.sessions.insert(format!("caster-{}", i), CasterState {
                 outbound: tx,
                 pending: Arc::clone(&pending),
+                timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::clone(&sem),
                 connected_at: Instant::now(),
             });
@@ -1062,6 +1103,7 @@ mod tests {
         mgr.sessions.insert("reconnect-caster".to_string(), CasterState {
             outbound: tx1,
             pending: Arc::clone(&pending1),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::clone(&sem1),
             connected_at: Instant::now(),
         });
@@ -1081,6 +1123,7 @@ mod tests {
         mgr.sessions.insert("reconnect-caster".to_string(), CasterState {
             outbound: tx2,
             pending: Arc::clone(&pending2),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::clone(&sem2),
             connected_at: Instant::now(),
         });
@@ -1106,6 +1149,7 @@ mod tests {
         mgr.sessions.insert("one-permit".to_string(), CasterState {
             outbound: tx,
             pending: Arc::new(DashMap::new()),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::clone(&sem),
             connected_at: Instant::now(),
         });
@@ -1346,6 +1390,7 @@ mod tests {
             mgr.sessions.insert(format!("caster-{}", i), CasterState {
                 outbound: tx,
                 pending: Arc::new(DashMap::new()),
+                timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::new(Semaphore::new(10)),
                 connected_at: Instant::now(),
             });
@@ -1373,6 +1418,7 @@ mod tests {
         mgr.sessions.insert("caster-q".to_string(), CasterState {
             outbound: tx,
             pending: Arc::new(DashMap::new()),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::clone(&sem),
             connected_at: Instant::now(),
         });
@@ -1396,6 +1442,7 @@ mod tests {
         mgr.sessions.insert("dying-caster".to_string(), CasterState {
             outbound: tx,
             pending: Arc::clone(&pending),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::clone(&semaphore),
             connected_at: Instant::now(),
         });
@@ -1426,6 +1473,7 @@ mod tests {
         mgr.sessions.insert("dying-stream".to_string(), CasterState {
             outbound: tx,
             pending: Arc::clone(&pending),
+            timeout_handles: Arc::new(DashMap::new()),
             semaphore: Arc::clone(&semaphore),
             connected_at: Instant::now(),
         });

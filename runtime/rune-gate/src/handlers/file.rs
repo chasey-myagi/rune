@@ -28,7 +28,7 @@ pub async fn download_file(
                     ),
                 ),
             ];
-            match stored.data() {
+            match stored.data_async().await {
                 Ok(data) => (StatusCode::OK, headers, data).into_response(),
                 Err(_) => error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,

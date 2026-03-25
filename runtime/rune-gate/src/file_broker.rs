@@ -37,12 +37,28 @@ pub struct StoredFile {
 }
 
 impl StoredFile {
-    /// Retrieve file payload. Memory files return a cheap clone; disk files
-    /// perform a blocking read.
+    /// Retrieve file payload (sync). Memory files return a cheap clone; disk
+    /// files perform a blocking read. Prefer [`data_async`](Self::data_async)
+    /// when called from an async / tokio context.
     pub fn data(&self) -> std::io::Result<Bytes> {
         match &self.storage {
             FileStorage::Memory(data) => Ok(data.clone()),
             FileStorage::Disk { path } => Ok(Bytes::from(std::fs::read(path)?)),
+        }
+    }
+
+    /// Async version of [`data`](Self::data) that off-loads the blocking disk
+    /// read to [`tokio::task::spawn_blocking`] so it never stalls a tokio
+    /// worker thread.
+    pub async fn data_async(&self) -> std::io::Result<Bytes> {
+        match &self.storage {
+            FileStorage::Memory(data) => Ok(data.clone()),
+            FileStorage::Disk { path } => {
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || std::fs::read(&path).map(Bytes::from))
+                    .await
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+            }
         }
     }
 }
@@ -212,15 +228,20 @@ impl FileBroker {
         }
     }
 
-    /// If the storage is a disk file, delete it. Errors are logged but ignored.
+    /// If the storage is a disk file, delete it on a blocking thread so we
+    /// never stall a tokio worker. The deletion is fire-and-forget; errors are
+    /// logged but ignored.
     fn cleanup_disk(storage: &FileStorage) {
         if let FileStorage::Disk { path } = storage {
-            if let Err(e) = std::fs::remove_file(path) {
-                // Not found is fine — file may have been cleaned already.
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(path = %path.display(), error = %e, "failed to remove spilled file");
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    // Not found is fine — file may have been cleaned already.
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(path = %path.display(), error = %e, "failed to remove spilled file");
+                    }
                 }
-            }
+            });
         }
     }
 }
@@ -230,8 +251,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[test]
-    fn small_file_stays_in_memory() {
+    #[tokio::test]
+    async fn small_file_stays_in_memory() {
         let dir = TempDir::new().unwrap();
         let broker = FileBroker::with_disk_dir(dir.path().to_path_buf());
         let data = Bytes::from(vec![0u8; 1024]); // 1KB — 小文件
@@ -239,12 +260,13 @@ mod tests {
 
         let stored = broker.get(&file_id).unwrap();
         assert_eq!(stored.data().unwrap(), data);
+        assert_eq!(stored.data_async().await.unwrap(), data);
         // 磁盘目录应该没有文件
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
-    #[test]
-    fn large_file_spills_to_disk() {
+    #[tokio::test]
+    async fn large_file_spills_to_disk() {
         let dir = TempDir::new().unwrap();
         let broker = FileBroker::with_disk_dir(dir.path().to_path_buf());
         let data = Bytes::from(vec![42u8; 5 * 1024 * 1024]); // 5MB — 大文件
@@ -252,12 +274,13 @@ mod tests {
 
         let stored = broker.get(&file_id).unwrap();
         assert_eq!(stored.data().unwrap(), data);
+        assert_eq!(stored.data_async().await.unwrap(), data);
         // 磁盘目录应该有 1 个文件
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
-    #[test]
-    fn expired_disk_file_cleaned_up() {
+    #[tokio::test]
+    async fn expired_disk_file_cleaned_up() {
         let dir = TempDir::new().unwrap();
         let mut broker = FileBroker::with_disk_dir(dir.path().to_path_buf());
         broker.ttl_secs = 0; // 立即过期
@@ -267,19 +290,23 @@ mod tests {
         let file_id = broker.store("large.bin".into(), "application/octet-stream".into(), data, "req3");
 
         // 文件应已过期
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert!(broker.get(&file_id).is_none());
 
         // 触发一次 store 来触发 eviction
         let _ = broker.store("trigger.txt".into(), "text/plain".into(), Bytes::from("x"), "req4");
+
+        // spawn_blocking 是 fire-and-forget，需要等待删除完成
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // 磁盘上大文件应该被清理
         // large.bin 的磁盘文件被删除了（trigger.txt 是小文件，不会写磁盘）
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
-    #[test]
-    fn complete_request_removes_disk_files() {
+    #[tokio::test]
+    async fn complete_request_removes_disk_files() {
         let dir = TempDir::new().unwrap();
         let broker = FileBroker::with_disk_dir(dir.path().to_path_buf());
         let data = Bytes::from(vec![42u8; 5 * 1024 * 1024]); // 5MB
@@ -288,6 +315,10 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 
         broker.complete_request("req5");
+
+        // spawn_blocking 是 fire-and-forget，需要等待删除完成
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // 磁盘文件应该被删除
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);

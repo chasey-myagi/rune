@@ -401,27 +401,42 @@ fn init_telemetry(
 
     let provider = if let Some(ref endpoint) = config.otlp_endpoint {
         // OTLP gRPC exporter -> OpenTelemetry tracing layer
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
+        match opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
             .with_endpoint(endpoint)
             .build()
-            .expect("failed to build OTLP span exporter");
+        {
+            Ok(exporter) => {
+                let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                    .with_batch_exporter(exporter)
+                    .build();
 
-        let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .build();
+                let tracer = tracer_provider.tracer("rune-server");
+                let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-        let tracer = tracer_provider.tracer("rune-server");
-        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(fmt_layer)
+                    .with(otel_layer)
+                    .init();
 
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(fmt_layer)
-            .with(otel_layer)
-            .init();
+                tracing::info!(otlp_endpoint = endpoint, "OpenTelemetry tracing enabled");
+                Some(tracer_provider)
+            }
+            Err(e) => {
+                // Graceful fallback: initialise fmt-only subscriber and continue
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(fmt_layer)
+                    .init();
 
-        tracing::info!(otlp_endpoint = endpoint, "OpenTelemetry tracing enabled");
-        Some(tracer_provider)
+                eprintln!(
+                    "WARNING: failed to initialize OTLP exporter: {e}, \
+                     continuing without tracing"
+                );
+                None
+            }
+        }
     } else {
         // No OTLP — plain fmt subscriber (same as original behavior)
         tracing_subscriber::registry()
@@ -433,11 +448,20 @@ fn init_telemetry(
 
     // Prometheus metrics exporter (independent of tracing)
     if let Some(port) = config.prometheus_port {
-        metrics_exporter_prometheus::PrometheusBuilder::new()
+        match metrics_exporter_prometheus::PrometheusBuilder::new()
             .with_http_listener(([0, 0, 0, 0], port))
             .install()
-            .expect("failed to install Prometheus metrics exporter");
-        tracing::info!(port, "Prometheus metrics exporter started");
+        {
+            Ok(_) => {
+                tracing::info!(port, "Prometheus metrics exporter started");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to start Prometheus exporter, continuing without metrics"
+                );
+            }
+        }
     }
 
     provider

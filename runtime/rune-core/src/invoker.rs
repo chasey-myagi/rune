@@ -390,6 +390,7 @@ mod tests {
         mgr.sessions.insert("caster-1".to_string(), CasterState {
             outbound: tx,
             pending: Arc::clone(&pending),
+            timeout_handles: Arc::new(dashmap::DashMap::new()),
             semaphore: Arc::clone(&semaphore),
             connected_at: std::time::Instant::now(),
         });
@@ -464,6 +465,7 @@ mod tests {
         mgr.sessions.insert("caster-s".to_string(), CasterState {
             outbound: tx,
             pending: Arc::clone(&pending),
+            timeout_handles: Arc::new(dashmap::DashMap::new()),
             semaphore: Arc::clone(&semaphore),
             connected_at: std::time::Instant::now(),
         });
