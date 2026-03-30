@@ -17,7 +17,45 @@
 
 ## 快速开始
 
-### 启动 Runtime
+### Docker（推荐）
+
+```bash
+# 拉取镜像
+docker pull ghcr.io/chasey-myagi/rune-server:latest
+
+# 启动 Runtime
+docker run -d -p 50060:50060 -p 50070:50070 ghcr.io/chasey-myagi/rune-server:latest
+
+# 验证
+curl http://localhost:50060/health  # => ok
+```
+
+或通过 docker-compose（适合下游项目集成）：
+
+```yaml
+services:
+  rune:
+    image: ghcr.io/chasey-myagi/rune-server:latest
+    ports:
+      - "50060:50060"  # HTTP API
+      - "50070:50070"  # gRPC (Caster 连接)
+    environment:
+      RUNE_LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:50060/health"]
+      interval: 10s
+```
+
+**环境变量：**
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `RUNE_HOST` | `0.0.0.0` | 监听地址 |
+| `RUNE_HTTP_PORT` | `50060` | HTTP API 端口 |
+| `RUNE_GRPC_PORT` | `50070` | gRPC 端口 |
+| `RUNE_LOG_LEVEL` | `info` | 日志级别 |
+
+### 从源码启动
 
 ```bash
 # 开发模式（跳过认证，绑定 127.0.0.1）
