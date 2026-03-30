@@ -1,0 +1,16 @@
+services:
+  rune-server:
+    image: ghcr.io/${GITHUB_OWNER:-chasey}/rune-server:latest
+    ports:
+      - "50060:50060"
+      - "50070:50070"
+    environment:
+      RUNE_HTTP_PORT: 50060
+      RUNE_GRPC_PORT: 50070
+      RUNE_LOG_LEVEL: info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:50060/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

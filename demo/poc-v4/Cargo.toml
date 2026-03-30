@@ -7,4 +7,5 @@ members = [
     "rune-flow",
     "rune-server",
     "examples/hello",
+    "examples/demo-server",
 ]
