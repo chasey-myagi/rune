@@ -27,5 +27,9 @@ urlencoding = "2"
 comfy-table = "7"
 chrono = { version = "0.4", features = ["serde"] }
 
+[[test]]
+name = "cli_parse_test"
+path = "tests/unit/cli_parse_test.rs"
+
 [dev-dependencies]
 tempfile = "3"
