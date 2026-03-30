@@ -1,4 +1,9 @@
-mod config;
+//! Demo server with pre-registered example Runes and Flows.
+//! Use this for local development and demonstration.
+//!
+//! ```bash
+//! cargo run -p demo-server
+//! ```
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -6,9 +11,13 @@ use tonic::{Request, Response, Status};
 use rune_proto::rune_service_server::{RuneService, RuneServiceServer};
 use rune_proto::SessionMessage;
 use rune_core::relay::Relay;
+use rune_core::rune::{RuneConfig, RuneError, make_handler};
+use rune_core::invoker::LocalInvoker;
 use rune_core::session::SessionManager;
+use rune_flow::dsl::Flow;
 use rune_flow::engine::FlowEngine;
 use rune_gate::gate::{self, GateState};
+use bytes::Bytes;
 
 struct RuneGrpcService {
     relay: Arc<Relay>,
@@ -46,20 +55,76 @@ impl RuneService for RuneGrpcService {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cfg = config::Config::from_env()?;
+    let host = std::env::var("RUNE_HOST").unwrap_or_else(|_| "0.0.0.0".into());
+    let http_port = std::env::var("RUNE_HTTP_PORT").unwrap_or_else(|_| "50060".into());
+    let grpc_port = std::env::var("RUNE_GRPC_PORT").unwrap_or_else(|_| "50070".into());
+    let log_level = std::env::var("RUNE_LOG_LEVEL").unwrap_or_else(|_| "info".into());
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_new(&cfg.log_level)
+            tracing_subscriber::EnvFilter::try_new(&log_level)
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
         )
         .init();
 
-    tracing::info!(%cfg, "rune-server starting");
+    tracing::info!(
+        host = %host,
+        http_port = %http_port,
+        grpc_port = %grpc_port,
+        log_level = %log_level,
+        "demo-server starting"
+    );
 
     let relay = Arc::new(Relay::new());
     let session_mgr = Arc::new(SessionManager::new());
-    let flow_engine = FlowEngine::new(Arc::clone(&relay));
+
+    // ── Local Runes ──
+
+    // hello: static response
+    relay.register(
+        RuneConfig { name: "hello".into(), description: "local hello".into(), gate_path: Some("/hello".into()) },
+        Arc::new(LocalInvoker::new(make_handler(|_ctx, _input| async {
+            Ok(Bytes::from(r#"{"message":"hello from local rune!"}"#))
+        }))),
+        None,
+    );
+
+    // step_b: add step_b field to JSON
+    relay.register(
+        RuneConfig { name: "step_b".into(), description: "local step_b".into(), gate_path: None },
+        Arc::new(LocalInvoker::new(make_handler(|_ctx, input| async move {
+            let mut v: serde_json::Value = serde_json::from_slice(&input)
+                .map_err(|e| RuneError::InvalidInput(e.to_string()))?;
+            v.as_object_mut().unwrap().insert("step_b".into(), true.into());
+            Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
+        }))),
+        None,
+    );
+
+    tracing::info!("registered local runes: hello, step_b");
+
+    // ── Flow Engine ──
+
+    let mut flow_engine = FlowEngine::new(Arc::clone(&relay));
+
+    // pipeline: step_a (Python) -> step_b (Rust) -> step_c (Python)
+    flow_engine.register(
+        Flow::new("pipeline")
+            .chain(vec!["step_a", "step_b", "step_c"])
+            .build()
+    );
+
+    // single: single step Flow
+    flow_engine.register(
+        Flow::new("single").step("step_a").build()
+    );
+
+    // empty: empty Flow
+    flow_engine.register(
+        Flow::new("empty").build()
+    );
+
+    tracing::info!("registered flows: pipeline, single, empty");
 
     // ── HTTP ──
 
@@ -69,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
         flow_engine: Arc::new(flow_engine),
     };
     let http_router = gate::build_router(gate_state);
-    let http_addr = cfg.http_addr();
+    let http_addr = format!("{}:{}", host, http_port);
 
     let http_listener = tokio::net::TcpListener::bind(&http_addr).await?;
     tracing::info!("gate listening on {}", http_addr);
@@ -80,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── gRPC ──
 
-    let grpc_addr: std::net::SocketAddr = cfg.grpc_addr().parse()?;
+    let grpc_addr = format!("{}:{}", host, grpc_port).parse()?;
     let grpc_service = RuneGrpcService {
         relay: Arc::clone(&relay),
         session_mgr: Arc::clone(&session_mgr),
