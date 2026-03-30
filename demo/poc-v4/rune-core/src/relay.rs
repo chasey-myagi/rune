@@ -59,18 +59,6 @@ impl Relay {
         Some(Arc::clone(&candidates[idx % candidates.len()].invoker))
     }
 
-    /// 根据 gate_path 查找匹配的 Rune，返回 (rune_name, invoker)
-    pub fn resolve_by_gate_path(&self, path: &str) -> Option<(String, Arc<dyn RuneInvoker>)> {
-        for entry in self.entries.iter() {
-            for e in entry.value() {
-                if e.config.gate_path.as_deref() == Some(path) {
-                    return Some((e.config.name.clone(), Arc::clone(&e.invoker)));
-                }
-            }
-        }
-        None
-    }
-
     /// 列出所有已注册 Rune 的名称和 gate_path
     pub fn list(&self) -> Vec<(String, Option<String>)> {
         let mut result = Vec::new();
@@ -142,73 +130,5 @@ mod tests {
         assert!(relay.resolve("x").is_some());
         relay.remove_caster("c1");
         assert!(relay.resolve("x").is_none());
-    }
-
-    #[tokio::test]
-    async fn test_resolve_by_gate_path_match() {
-        let relay = Relay::new();
-        let handler = make_handler(|_ctx, _input| async { Ok(Bytes::from("echo-result")) });
-        let config = RuneConfig {
-            name: "echo".into(),
-            description: "echo rune".into(),
-            gate_path: Some("/echo".into()),
-        };
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
-
-        let result = relay.resolve_by_gate_path("/echo");
-        assert!(result.is_some());
-        let (name, invoker) = result.unwrap();
-        assert_eq!(name, "echo");
-
-        let ctx = RuneContext { rune_name: "echo".into(), request_id: "r1".into() };
-        let output = invoker.invoke(ctx, Bytes::new()).await.unwrap();
-        assert_eq!(output, Bytes::from("echo-result"));
-    }
-
-    #[test]
-    fn test_resolve_by_gate_path_no_match() {
-        let relay = Relay::new();
-        let handler = make_handler(|_ctx, input| async move { Ok(input) });
-        let config = RuneConfig {
-            name: "echo".into(),
-            description: "".into(),
-            gate_path: Some("/echo".into()),
-        };
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
-
-        assert!(relay.resolve_by_gate_path("/nonexistent").is_none());
-    }
-
-    #[test]
-    fn test_resolve_by_gate_path_multiple_runes() {
-        let relay = Relay::new();
-
-        let h1 = make_handler(|_ctx, _input| async { Ok(Bytes::from("a")) });
-        let h2 = make_handler(|_ctx, _input| async { Ok(Bytes::from("b")) });
-
-        let cfg1 = RuneConfig {
-            name: "rune_a".into(),
-            description: "".into(),
-            gate_path: Some("/api/a".into()),
-        };
-        let cfg2 = RuneConfig {
-            name: "rune_b".into(),
-            description: "".into(),
-            gate_path: Some("/api/b".into()),
-        };
-
-        relay.register(cfg1, Arc::new(crate::invoker::LocalInvoker::new(h1)), None);
-        relay.register(cfg2, Arc::new(crate::invoker::LocalInvoker::new(h2)), None);
-
-        let result_a = relay.resolve_by_gate_path("/api/a");
-        assert!(result_a.is_some());
-        assert_eq!(result_a.unwrap().0, "rune_a");
-
-        let result_b = relay.resolve_by_gate_path("/api/b");
-        assert!(result_b.is_some());
-        assert_eq!(result_b.unwrap().0, "rune_b");
-
-        // 不存在的路径
-        assert!(relay.resolve_by_gate_path("/api/c").is_none());
     }
 }
