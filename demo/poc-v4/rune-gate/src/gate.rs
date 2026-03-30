@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use axum::{
     Router, Json,
     extract::{Path, State, Query},
-    http::StatusCode,
+    http::{StatusCode, Uri},
     response::{IntoResponse, Sse, sse::Event},
     routing::{get, post},
 };
@@ -46,7 +46,41 @@ pub fn build_router(state: GateState) -> Router {
         .route("/api/v1/tasks/:id", get(get_task))
         .route("/api/v1/flows", get(list_flows))
         .route("/api/v1/flows/:name/run", post(run_flow))
+        .fallback(dynamic_gate_handler)
         .with_state(state)
+}
+
+/// Fallback handler：根据请求 path 在 Relay 中匹配 gate_path，找到则执行对应 Rune
+async fn dynamic_gate_handler(
+    State(state): State<GateState>,
+    uri: Uri,
+    body: Bytes,
+) -> impl IntoResponse {
+    let path = uri.path();
+
+    let (rune_name, invoker) = match state.relay.resolve_by_gate_path(path) {
+        Some(pair) => pair,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("no rune mapped to {}", path),
+            );
+        }
+    };
+
+    let request_id = unique_request_id();
+    let ctx = RuneContext { rune_name: rune_name.clone(), request_id };
+
+    match invoker.invoke(ctx, body).await {
+        Ok(output) => {
+            match serde_json::from_slice::<serde_json::Value>(&output) {
+                Ok(json) => (StatusCode::OK, Json(json)).into_response(),
+                Err(_) => (StatusCode::OK, output).into_response(),
+            }
+        }
+        Err(e) => map_error(e),
+    }
 }
 
 async fn health() -> &'static str { "ok" }
@@ -254,4 +288,92 @@ fn unique_request_id() -> String {
         .duration_since(std::time::UNIX_EPOCH).unwrap()
         .as_millis() as u64;
     format!("r-{:x}-{:x}", ts, seq)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use bytes::Bytes;
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use rune_core::rune::{RuneConfig, make_handler};
+    use rune_core::invoker::LocalInvoker;
+    use rune_core::relay::Relay;
+    use rune_flow::engine::FlowEngine;
+
+    fn make_test_state() -> GateState {
+        let relay = Arc::new(Relay::new());
+        let tasks = Arc::new(DashMap::new());
+        let flow_engine = Arc::new(FlowEngine::new(Arc::clone(&relay)));
+        GateState { relay, tasks, flow_engine }
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_gate_handler_success() {
+        let state = make_test_state();
+
+        // 注册一个带 gate_path 的 Rune
+        let handler = make_handler(|_ctx, _input| async {
+            Ok(Bytes::from(r#"{"message":"hello from echo"}"#))
+        });
+        let config = RuneConfig {
+            name: "echo".into(),
+            description: "echo rune".into(),
+            gate_path: Some("/echo".into()),
+        };
+        state.relay.register(config, Arc::new(LocalInvoker::new(handler)), None);
+
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .body(Body::from("test input"))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["message"], "hello from echo");
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_gate_handler_not_found() {
+        let state = make_test_state();
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/nonexistent")
+            .body(Body::from(""))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // 确认返回了 JSON error body，而非空 body
+        assert!(json["error"]["message"].as_str().unwrap().contains("/nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn test_explicit_routes_not_affected() {
+        let state = make_test_state();
+        let app = build_router(state);
+
+        // /health 显式路由应该正常工作
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }
