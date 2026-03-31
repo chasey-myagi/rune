@@ -15,22 +15,58 @@
 - **CLI 工具** -- 单二进制管理 Runtime、调用 Rune、管理 Key 和 Flow
 - **SQLite 持久化** -- 异步任务、调用日志、API Key 全部持久化
 
-## 快速开始
+## 安装
 
-### Docker（推荐）
+### CLI（推荐）
 
 ```bash
-# 拉取镜像
-docker pull ghcr.io/chasey-myagi/rune-server:latest
+# macOS / Linux (Homebrew)
+brew install chasey-myagi/tap/rune
 
-# 启动 Runtime
+# 或直接下载二进制
+curl -fsSL https://github.com/chasey-myagi/rune/releases/latest/download/rune-v0.2.0-darwin-arm64.tar.gz | tar xz
+sudo mv rune rune-server /usr/local/bin/
+```
+
+安装后你会得到两个二进制：
+- `rune` — CLI 工具（管理 Runtime + 调用 Rune）
+- `rune-server` — Runtime 服务端
+
+### SDK
+
+```bash
+pip install rune-sdk            # Python
+npm install @rune-sdk/caster    # TypeScript
+```
+
+## 快速开始
+
+```bash
+# 1. 启动 Runtime（自动拉取 Docker 镜像）
+rune start --dev
+
+# 2. 运行你的 Caster（另一个终端）
+python my_caster.py
+
+# 3. 调用
+rune call echo '{"msg": "hello"}'
+
+# 4. 查看状态
+rune status
+rune list
+
+# 5. 结束
+rune stop
+```
+
+### Docker 手动启动（不用 CLI）
+
+```bash
 docker run -d -p 50060:50060 -p 50070:50070 ghcr.io/chasey-myagi/rune-server:latest
-
-# 验证
 curl http://localhost:50060/health  # => ok
 ```
 
-或通过 docker-compose（适合下游项目集成）：
+docker-compose：
 
 ```yaml
 services:
@@ -54,16 +90,6 @@ services:
 | `RUNE_HTTP_PORT` | `50060` | HTTP API 端口 |
 | `RUNE_GRPC_PORT` | `50070` | gRPC 端口 |
 | `RUNE_LOG_LEVEL` | `info` | 日志级别 |
-
-### 从源码启动
-
-```bash
-# 开发模式（跳过认证，绑定 127.0.0.1）
-rune start --dev
-
-# 生产模式（使用 rune.toml 配置）
-rune start --config rune.toml
-```
 
 ### Python Caster 示例
 
@@ -198,23 +224,45 @@ rune-sdk = { path = "sdks/rust" }
 ## CLI
 
 ```bash
-rune start [--dev] [--config <path>]   # 启动 Runtime
-rune stop                               # 停止 Runtime
+# Runtime 生命周期
+rune start [--dev] [--binary <path>]    # 启动 Runtime（Docker-first，或 --binary 本地二进制）
+rune stop [--force] [--timeout 10]      # 停止 Runtime（graceful → SIGKILL）
 rune status                             # 查看 Runtime 状态
+
+# Rune 调用
 rune list                               # 列出在线 Rune
-rune call <name> [input] [--stream] [--async]  # 调用 Rune
-rune task <id>                          # 查询异步任务
-rune key create --type <gate|caster> --label <label>  # 创建 API Key
-rune key list                           # 列出 API Key
-rune key revoke <id>                    # 吊销 API Key
-rune flow register <file>               # 注册 Flow
-rune flow list                          # 列出 Flow
-rune flow run <name> [input]            # 执行 Flow
-rune flow delete <name>                 # 删除 Flow
-rune logs [--rune <name>] [--limit N]   # 查看调用日志
+rune call <name> [input] [--stream|--async] [--timeout 30]  # 调用 Rune
+rune casters                            # 查看已连接 Caster
+
+# 异步任务
+rune task get <id>                      # 查看任务状态和结果
+rune task list [--status <s>] [--rune <name>]  # 列出任务
+rune task wait <id> [--timeout 300]     # 等待任务完成（退避轮询）
+rune task delete <id>                   # 取消/删除任务
+
+# Key 管理
+rune key create --type <gate|caster> --label <label>
+rune key list
+rune key revoke <id>
+
+# Flow 工作流
+rune flow register <file.yaml>          # 注册 Flow（.yaml/.yml/.json）
+rune flow list
+rune flow get <name>                    # 查看 Flow 详情
+rune flow run <name> [input]
+rune flow delete <name>
+
+# 运维
+rune logs [--rune <name>] [--limit 20]  # 查看调用日志
 rune stats                              # 查看调用统计
-rune config init                        # 生成默认配置
+rune config init                        # 生成默认配置 ~/.rune/config.toml
 rune config show                        # 显示当前配置
+rune config path                        # 输出配置文件路径
+
+# 全局选项
+--remote <URL>    # 连接远程 Runtime（或 RUNE_ADDR 环境变量）
+--json            # JSON 输出（机器可读）
+-q, --quiet       # 静默模式
 ```
 
 ## API 端点
@@ -224,6 +272,7 @@ rune config show                        # 显示当前配置
 | GET | `/health` | 健康检查 |
 | GET | `/api/v1/runes` | 列出在线 Rune |
 | POST | `/api/v1/runes/:name/run` | 调用 Rune（debug 端点） |
+| GET | `/api/v1/tasks` | 列出异步任务 |
 | GET | `/api/v1/tasks/:id` | 查询异步任务 |
 | DELETE | `/api/v1/tasks/:id` | 取消异步任务 |
 | GET | `/api/v1/status` | Runtime 状态 |
@@ -313,7 +362,8 @@ Rune 定义了 18 条行为保证契约，任何违反都是 bug。涵盖：
 | v0.5 | 已完成 | TypeScript SDK + CLI 工具 |
 | v0.6 | 已完成 | 高级调度 + Rate Limiting + 优雅停机 + Rust SDK |
 | v0.7 | 已完成 | 文档全面更新 + 稳定化 |
-| v1.0 | 即将发布 | 正式稳定版本 |
+| **v0.2.0** | **已完成** | **CLI 重构：Docker-first Runtime 管理、双模式输出、task 全命令、跨平台发布** |
+| v1.0 | 规划中 | 正式稳定版本 |
 
 ## 文档
 
