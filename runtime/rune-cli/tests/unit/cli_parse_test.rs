@@ -90,10 +90,7 @@ fn stop_force_with_timeout() {
 #[test]
 fn status_default() {
     let cli = parse(&["status"]);
-    match cli.command {
-        Commands::Status { watch } => assert!(!watch),
-        _ => panic!("expected Status"),
-    }
+    assert!(matches!(cli.command, Commands::Status));
 }
 
 // ── List ───────────────────────────────────────────────────────
@@ -101,19 +98,7 @@ fn status_default() {
 #[test]
 fn list_default() {
     let cli = parse(&["list"]);
-    match cli.command {
-        Commands::List { all } => assert!(!all),
-        _ => panic!("expected List"),
-    }
-}
-
-#[test]
-fn list_all() {
-    let cli = parse(&["list", "--all"]);
-    match cli.command {
-        Commands::List { all } => assert!(all),
-        _ => panic!("expected List"),
-    }
+    assert!(matches!(cli.command, Commands::List));
 }
 
 // ── Call ───────────────────────────────────────────────────────
@@ -213,7 +198,7 @@ fn task_get() {
 #[test]
 fn task_list() {
     let cli = parse(&["task", "list"]);
-    assert!(matches!(cli.command, Commands::Task(TaskCommands::List)));
+    assert!(matches!(cli.command, Commands::Task(TaskCommands::List { .. })));
 }
 
 #[test]
@@ -330,28 +315,24 @@ fn logs_default() {
         Commands::Logs {
             rune,
             limit,
-            follow,
         } => {
             assert!(rune.is_none());
             assert_eq!(limit, 20);
-            assert!(!follow);
         }
         _ => panic!("expected Logs"),
     }
 }
 
 #[test]
-fn logs_with_filter_and_follow() {
-    let cli = parse(&["logs", "--rune", "echo", "--limit", "100", "-f"]);
+fn logs_with_filter() {
+    let cli = parse(&["logs", "--rune", "echo", "--limit", "100"]);
     match cli.command {
         Commands::Logs {
             rune,
             limit,
-            follow,
         } => {
             assert_eq!(rune.as_deref(), Some("echo"));
             assert_eq!(limit, 100);
-            assert!(follow);
         }
         _ => panic!("expected Logs"),
     }

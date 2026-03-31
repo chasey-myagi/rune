@@ -30,31 +30,22 @@ pub async fn register(client: &RuneClient, file: &str, json_mode: bool) -> Resul
     if json_mode {
         crate::output::print_json(&result);
     } else {
-        eprintln!("Flow registered successfully");
-        crate::output::print_json(&result);
+        let name = result.get("name").and_then(|v| v.as_str()).unwrap_or(file);
+        eprintln!("Flow '{}' registered successfully.", name);
     }
     Ok(())
 }
 
-pub async fn list(client: &RuneClient, json_mode: bool) -> Result<()> {
+pub async fn list(client: &RuneClient, _json_mode: bool) -> Result<()> {
     let result = client.list_flows().await?;
-    if json_mode {
-        crate::output::print_json(&result);
-    } else {
-        crate::output::print_json(&result);
-    }
+    // TODO(M2): text mode table output
+    crate::output::print_json(&result);
     Ok(())
 }
 
-pub async fn get(client: &RuneClient, name: &str, json_mode: bool) -> Result<()> {
-    let path = client.build_path("/api/v1/flows/{name}", &[("name", name)]);
-    let req = client.get_request(&path);
-    let result = client.send_json(req).await?;
-    if json_mode {
-        crate::output::print_json(&result);
-    } else {
-        crate::output::print_json(&result);
-    }
+pub async fn get(client: &RuneClient, name: &str, _json_mode: bool) -> Result<()> {
+    let result = client.get_flow(name).await?;
+    crate::output::print_json(&result);
     Ok(())
 }
 
@@ -62,14 +53,11 @@ pub async fn run(
     client: &RuneClient,
     name: &str,
     input: Option<&str>,
-    json_mode: bool,
+    _json_mode: bool,
 ) -> Result<()> {
     let result = client.run_flow(name, input).await?;
-    if json_mode {
-        crate::output::print_json(&result);
-    } else {
-        crate::output::print_json(&result);
-    }
+    // TODO(M2): text mode table output
+    crate::output::print_json(&result);
     Ok(())
 }
 

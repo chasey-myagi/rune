@@ -25,11 +25,17 @@ format = "text"
 color = "auto"
 "#;
 
-pub async fn init() -> Result<()> {
+fn config_file_path() -> Result<std::path::PathBuf> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
-    let config_dir = home.join(".rune");
-    let config_path = config_dir.join("config.toml");
+    Ok(home.join(".rune").join("config.toml"))
+}
+
+pub async fn init() -> Result<()> {
+    let config_path = config_file_path()?;
+    let config_dir = config_path
+        .parent()
+        .expect("config path always has a parent");
 
     if config_path.exists() {
         eprintln!(
@@ -50,9 +56,7 @@ pub async fn init() -> Result<()> {
 }
 
 pub async fn show() -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
-    let config_path = home.join(".rune").join("config.toml");
+    let config_path = config_file_path()?;
 
     if !config_path.exists() {
         eprintln!(
@@ -72,9 +76,8 @@ pub async fn show() -> Result<()> {
 }
 
 pub async fn path() -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
-    println!("{}", home.join(".rune").join("config.toml").display());
+    let config_path = config_file_path()?;
+    println!("{}", config_path.display());
     Ok(())
 }
 

@@ -31,11 +31,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::Stop { force, timeout } => {
             rune_cli::commands::stop::run(force, timeout).await
         }
-        Commands::Status { watch } => {
-            rune_cli::commands::status::run(&client, watch, json_mode).await
+        Commands::Status => {
+            rune_cli::commands::status::run(&client, json_mode).await
         }
-        Commands::List { all } => {
-            rune_cli::commands::list::run(&client, all, json_mode).await
+        Commands::List => {
+            rune_cli::commands::list::run(&client, json_mode).await
         }
         Commands::Call {
             name,
@@ -49,9 +49,9 @@ async fn main() -> anyhow::Result<()> {
                 &client,
                 &name,
                 input.as_deref(),
+                input_file.as_deref(),
                 stream,
                 async_mode,
-                input_file.as_deref(),
                 timeout,
                 json_mode,
             )
@@ -61,7 +61,16 @@ async fn main() -> anyhow::Result<()> {
             TaskCommands::Get { id } => {
                 rune_cli::commands::task::get(&client, &id, json_mode).await
             }
-            TaskCommands::List => rune_cli::commands::task::list(&client, json_mode).await,
+            TaskCommands::List { status, rune, limit } => {
+                rune_cli::commands::task::list(
+                    &client,
+                    status.as_deref(),
+                    rune.as_deref(),
+                    limit,
+                    json_mode,
+                )
+                .await
+            }
             TaskCommands::Wait { id, timeout } => {
                 rune_cli::commands::task::wait(&client, &id, timeout, json_mode).await
             }
@@ -97,9 +106,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Logs {
             rune,
             limit,
-            follow,
         } => {
-            rune_cli::commands::logs::run(&client, rune.as_deref(), limit, follow, json_mode).await
+            rune_cli::commands::logs::run(&client, rune.as_deref(), limit, json_mode).await
         }
         Commands::Stats => rune_cli::commands::logs::stats(&client, json_mode).await,
         Commands::Config(cmd) => match cmd {
