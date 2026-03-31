@@ -2383,7 +2383,7 @@ dependencies = [
 
 [[package]]
 name = "rune-core"
-version = "1.0.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2405,7 +2405,7 @@ dependencies = [
 
 [[package]]
 name = "rune-flow"
-version = "1.0.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "rune-core",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "rune-framework"
-version = "1.0.0"
+version = "1.1.1"
 dependencies = [
  "bytes",
  "http",
@@ -2438,7 +2438,7 @@ dependencies = [
 
 [[package]]
 name = "rune-gate"
-version = "1.0.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "bytes",
@@ -2464,7 +2464,7 @@ dependencies = [
 
 [[package]]
 name = "rune-proto"
-version = "1.0.0"
+version = "0.2.0"
 dependencies = [
  "prost 0.13.5",
  "tonic 0.12.3",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "rune-schema"
-version = "1.0.0"
+version = "0.2.0"
 dependencies = [
  "jsonschema",
  "serde",
@@ -2518,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "rune-store"
-version = "1.0.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "hex",
