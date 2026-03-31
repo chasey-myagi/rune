@@ -15,6 +15,7 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
         .route("/health", get(handlers::mgmt::health))
         .route("/api/v1/runes", get(handlers::mgmt::list_runes))
         .route("/api/v1/runes/:name/run", post(handlers::rune::run_rune))
+        .route("/api/v1/tasks", get(handlers::task::list_tasks))
         .route("/api/v1/tasks/:id", get(handlers::task::get_task).delete(handlers::task::delete_task))
         // Management API
         .route("/api/v1/status", get(handlers::mgmt::mgmt_status))

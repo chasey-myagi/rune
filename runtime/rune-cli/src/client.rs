@@ -168,18 +168,23 @@ impl RuneClient {
             anyhow::bail!("Server returned {}: {}", status, body);
         }
 
-        // Read SSE stream: each line that starts with "data: " is an event
+        // Read SSE stream: each line that starts with "data: " is an event.
+        // Use a byte buffer to avoid corrupting multi-byte UTF-8 characters
+        // that may be split across chunk boundaries.
         let mut output = String::new();
         let mut stream = resp.bytes_stream();
-        let mut buffer = String::new();
+        let mut byte_buf: Vec<u8> = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("Error reading stream")?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            byte_buf.extend_from_slice(&chunk);
 
             // Process complete lines
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].trim_end_matches('\r').to_string();
-                buffer = buffer[pos + 1..].to_string();
+            while let Some(pos) = byte_buf.iter().position(|&b| b == b'\n') {
+                let line_bytes = &byte_buf[..pos];
+                let line = String::from_utf8_lossy(line_bytes)
+                    .trim_end_matches('\r')
+                    .to_string();
+                byte_buf = byte_buf[pos + 1..].to_vec();
 
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
@@ -211,6 +216,33 @@ impl RuneClient {
     /// GET /api/v1/tasks/:id
     pub async fn get_task(&self, id: &str) -> Result<Value> {
         let path = self.build_path("/api/v1/tasks/{id}", &[("id", id)]);
+        let req = self.request(reqwest::Method::GET, &path);
+        self.send_json(req).await
+    }
+
+    /// DELETE /api/v1/tasks/:id
+    pub async fn delete_task(&self, id: &str) -> Result<Value> {
+        let path = self.build_path("/api/v1/tasks/{id}", &[("id", id)]);
+        let req = self.request(reqwest::Method::DELETE, &path);
+        self.send_json(req).await
+    }
+
+    /// GET /api/v1/tasks
+    pub async fn list_tasks(
+        &self,
+        status: Option<&str>,
+        rune: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
+        let limit_str = limit.to_string();
+        let mut query_params: Vec<(&str, &str)> = vec![("limit", &limit_str)];
+        if let Some(s) = status {
+            query_params.push(("status", s));
+        }
+        if let Some(r) = rune {
+            query_params.push(("rune", r));
+        }
+        let path = self.build_path_with_query("/api/v1/tasks", &[], &query_params);
         let req = self.request(reqwest::Method::GET, &path);
         self.send_json(req).await
     }
@@ -268,6 +300,13 @@ impl RuneClient {
         let req = self
             .request(reqwest::Method::POST, &path)
             .json(&Self::parse_input(input)?);
+        self.send_json(req).await
+    }
+
+    /// GET /api/v1/flows/:name
+    pub async fn get_flow(&self, name: &str) -> Result<Value> {
+        let path = self.build_path("/api/v1/flows/{name}", &[("name", name)]);
+        let req = self.request(reqwest::Method::GET, &path);
         self.send_json(req).await
     }
 
@@ -408,5 +447,37 @@ mod tests {
     fn test_parse_input_none_returns_empty_object() {
         let val = RuneClient::parse_input(None).unwrap();
         assert_eq!(val, json!({}));
+    }
+
+    #[test]
+    fn test_delete_task_url() {
+        let c = RuneClient::new("http://localhost:3000", None);
+        let url = c.build_path("/api/v1/tasks/{id}", &[("id", "abc-123")]);
+        assert_eq!(url, "/api/v1/tasks/abc-123");
+    }
+
+    #[test]
+    fn test_delete_task_url_encodes_special_chars() {
+        let c = RuneClient::new("http://localhost:3000", None);
+        let url = c.build_path("/api/v1/tasks/{id}", &[("id", "../etc")]);
+        assert_eq!(url, "/api/v1/tasks/..%2Fetc");
+    }
+
+    #[test]
+    fn test_list_tasks_url_no_filters() {
+        let c = RuneClient::new("http://localhost:3000", None);
+        let url = c.build_path_with_query("/api/v1/tasks", &[], &[("limit", "50")]);
+        assert_eq!(url, "/api/v1/tasks?limit=50");
+    }
+
+    #[test]
+    fn test_list_tasks_url_with_status_and_rune() {
+        let c = RuneClient::new("http://localhost:3000", None);
+        let url = c.build_path_with_query(
+            "/api/v1/tasks",
+            &[],
+            &[("limit", "50"), ("status", "running"), ("rune", "my-rune")],
+        );
+        assert_eq!(url, "/api/v1/tasks?limit=50&status=running&rune=my-rune");
     }
 }

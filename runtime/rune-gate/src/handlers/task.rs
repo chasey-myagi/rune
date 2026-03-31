@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -8,6 +8,27 @@ use rune_store::TaskStatus;
 
 use crate::error::error_response;
 use crate::state::GateState;
+
+#[derive(serde::Deserialize, Default)]
+pub struct ListTasksQuery {
+    pub status: Option<String>,
+    pub rune: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+pub async fn list_tasks(
+    State(state): State<GateState>,
+    Query(params): Query<ListTasksQuery>,
+) -> impl IntoResponse {
+    let status = params.status.as_deref().and_then(TaskStatus::from_str);
+    let limit = params.limit.unwrap_or(50).min(500);
+    let offset = params.offset.unwrap_or(0);
+    match state.admin.store.list_tasks(status, params.rune.as_deref(), limit, offset).await {
+        Ok(tasks) => Json(serde_json::json!({"tasks": tasks})).into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string()),
+    }
+}
 
 pub async fn get_task(
     State(state): State<GateState>,
@@ -44,12 +65,19 @@ pub async fn delete_task(
                     .rune.session_mgr
                     .cancel_by_request_id(&id, "cancelled by user")
                     .await;
-                let _ = state.admin.store.update_task_status(
+                if let Err(e) = state.admin.store.update_task_status(
                     &id,
                     TaskStatus::Cancelled,
                     None,
                     Some("cancelled by user"),
-                ).await;
+                ).await {
+                    tracing::error!("Failed to update task status in store: {}", e);
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL",
+                        &format!("cancel signal sent but store update failed: {}", e),
+                    );
+                }
                 (
                     StatusCode::OK,
                     Json(serde_json::json!({"task_id": id, "status": "cancelled"})),

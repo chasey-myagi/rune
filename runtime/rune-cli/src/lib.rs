@@ -6,8 +6,27 @@ pub mod config;
 pub mod output;
 pub mod runtime;
 
+fn long_about() -> String {
+    format!(
+        "\x1b[33;1m  ᚱ\x1b[0m\n\
+         \x1b[36m     ____\n\
+         \x1b[36m    / __ \\__  ______  ___\n\
+         \x1b[36m   / /_/ / / / / __ \\/ _ \\\n\
+         \x1b[36m  / _, _/ /_/ / / / /  __/\n\
+         \x1b[36m /_/ |_|\\__,_/_/ /_/\\___/\x1b[0m\n\
+         \x1b[2m  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n\
+         \x1b[2m  Define functions. Get APIs + Workflows + Distributed Execution.\x1b[0m"
+    )
+}
+
 #[derive(Parser, Debug)]
-#[command(name = "rune", about = "Rune Runtime CLI", version)]
+#[command(
+    name = "rune",
+    about = "Rune Runtime CLI",
+    long_about = long_about(),
+    version,
+    after_help = "\x1b[2mDocs: https://github.com/chasey-myagi/rune\x1b[0m"
+)]
 pub struct Cli {
     /// Connect to a remote Runtime instance
     #[arg(long, global = true, env = "RUNE_ADDR")]
@@ -70,18 +89,10 @@ pub enum Commands {
     },
 
     /// Show Runtime status
-    Status {
-        /// Continuously refresh (every 2s)
-        #[arg(long)]
-        watch: bool,
-    },
+    Status,
 
     /// List online Runes
-    List {
-        /// Include offline Runes
-        #[arg(long, short)]
-        all: bool,
-    },
+    List,
 
     /// Call a Rune
     Call {
@@ -132,10 +143,6 @@ pub enum Commands {
         /// Number of log entries to show
         #[arg(long, default_value = "20")]
         limit: u32,
-
-        /// Follow mode (tail -f style)
-        #[arg(long, short)]
-        follow: bool,
     },
 
     /// Show runtime statistics
@@ -155,7 +162,19 @@ pub enum TaskCommands {
     },
 
     /// List all tasks
-    List,
+    List {
+        /// Filter by status (pending, running, completed, failed, cancelled)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Filter by Rune name
+        #[arg(long)]
+        rune: Option<String>,
+
+        /// Maximum number of tasks to show
+        #[arg(long, default_value = "50")]
+        limit: u32,
+    },
 
     /// Wait for task to complete (blocking)
     Wait {
