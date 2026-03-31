@@ -14,7 +14,7 @@ class Rune < Formula
     end
     on_intel do
       url "https://github.com/chasey-myagi/rune/releases/download/v@@VERSION@@/rune-v@@VERSION@@-darwin-amd64.tar.gz"
-      sha256 "@@SHA256_DARWIN_X86_64@@"
+      sha256 "@@SHA256_DARWIN_AMD64@@"
     end
   end
 
@@ -25,7 +25,7 @@ class Rune < Formula
     end
     on_intel do
       url "https://github.com/chasey-myagi/rune/releases/download/v@@VERSION@@/rune-v@@VERSION@@-linux-amd64.tar.gz"
-      sha256 "@@SHA256_LINUX_X86_64@@"
+      sha256 "@@SHA256_LINUX_AMD64@@"
     end
   end
 
