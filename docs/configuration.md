@@ -1,32 +1,106 @@
 # Rune 配置参考
 
-Runtime 通过 TOML 配置文件控制行为。
+Rune 有两套独立的配置体系：
 
-## 配置文件加载优先级
+| 配置 | 文件 | 控制对象 |
+|------|------|----------|
+| **CLI 配置** | `~/.rune/config.toml` | `rune` CLI 工具的行为（启动模式、镜像、端口映射等） |
+| **Runtime 配置** | `rune.toml`（或 `--config` 指定） | `rune-server` 进程的行为（认证、调度、存储、TLS 等） |
 
-1. CLI 显式指定：`rune start --config /path/to/rune.toml`
+两者互不影响。CLI 配置决定「如何启动 Runtime」，Runtime 配置决定「Runtime 启动后如何运行」。
+
+---
+
+## 1. CLI 配置（`~/.rune/config.toml`）
+
+CLI 配置控制 `rune start` 的行为：使用 Docker 还是本地二进制、映射哪些端口、输出格式等。
+
+### 生成与查看
+
+```bash
+rune config init   # 生成默认配置到 ~/.rune/config.toml
+rune config show   # 显示当前配置内容
+rune config path   # 打印配置文件路径
+```
+
+### 完整字段
+
+```toml
+[runtime]
+# 启动模式: "docker"（默认）或 "binary"
+mode = "docker"
+
+# Docker 镜像
+image = "ghcr.io/chasey-myagi/rune-server"
+tag = "latest"
+
+# 端口映射（映射到宿主机的端口）
+http_port = 50060
+grpc_port = 50070
+
+# 使用本地二进制时取消注释：
+# binary = "/usr/local/bin/rune-server"
+
+[auth]
+# enabled = false
+
+[output]
+format = "text"    # 输出格式
+color = "auto"     # 颜色：auto / always / never
+```
+
+#### `[runtime]` 字段说明
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `mode` | string | `"docker"` | 启动模式。`docker` 使用容器，`binary` 使用本地二进制 |
+| `image` | string | `"ghcr.io/chasey-myagi/rune-server"` | Docker 镜像地址 |
+| `tag` | string | `"latest"` | Docker 镜像 tag |
+| `http_port` | u16 | `50060` | 映射到宿主机的 HTTP 端口 |
+| `grpc_port` | u16 | `50070` | 映射到宿主机的 gRPC 端口 |
+| `binary` | string? | -- | 本地 `rune-server` 二进制路径（`mode = "binary"` 时使用） |
+
+#### `[output]` 字段说明
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `format` | string | `"text"` | 输出格式 |
+| `color` | string | `"auto"` | 颜色输出模式 |
+
+---
+
+## 2. Runtime 配置（`rune.toml`）
+
+Runtime 配置控制 `rune-server` 进程的所有运行时行为。
+
+### 加载路径优先级
+
+1. 命令行指定：`rune-server --config /path/to/rune.toml`
 2. 当前目录：`./rune.toml`
-3. 用户配置：`~/.config/rune/rune.toml`
+3. 用户配置目录：`~/.config/rune/rune.toml`
 4. 内置默认值
 
-## 环境变量覆盖
+找到第一个存在的文件即停止搜索。如果都不存在，使用内置默认值。
+
+### 环境变量覆盖
 
 所有配置项均可通过环境变量覆盖，格式为 `RUNE_{SECTION}__{FIELD}`（双下划线分隔 section 和 field）。
 
 环境变量优先级高于配置文件。无效值会被静默忽略。
 
-## 开发模式
+### 开发模式
 
-`rune start --dev` 会自动应用以下覆盖：
+`rune-server --dev` 会自动应用以下覆盖：
 
 - `server.dev_mode = true`
 - `server.grpc_host = 127.0.0.1`
 - `server.http_host = 127.0.0.1`
 - `auth.enabled = false`
+- Store 使用内存数据库（当 `db_path` 为默认值 `"rune.db"` 时）
+- Rate limit 关闭
+- TLS 强制禁用（即使配置了证书路径）
 
 ---
-
-## 完整配置参考
 
 ### `[server]` -- 服务器
 
@@ -45,6 +119,7 @@ Runtime 通过 TOML 配置文件控制行为。
 |------|------|--------|----------|------|
 | `enabled` | bool | `true` | `RUNE_AUTH__ENABLED` | 是否启用 API Key 认证 |
 | `exempt_routes` | string[] | `["/health"]` | -- | 免认证路由列表 |
+| `hmac_secret` | string? | `null` | `RUNE_AUTH__HMAC_SECRET` | HMAC 密钥，用于 API Key 哈希。设置后使用 HMAC-SHA256 替代 SHA-256，已有 SHA-256 key 自动兼容。未设置且非 dev 模式时生成临时随机密钥（重启后失效） |
 
 ### `[store]` -- 持久化
 
@@ -87,18 +162,67 @@ Runtime 通过 TOML 配置文件控制行为。
 
 | 字段 | 类型 | 默认值 | 环境变量 | 说明 |
 |------|------|--------|----------|------|
-| `requests_per_minute` | u32 | `600` | `RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE` | 每分钟最大请求数（全局） |
+| `requests_per_minute` | u32 | `600` | `RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE` | 每分钟最大请求数（全局）。dev 模式下不生效 |
 
 ### `[log]` -- 日志
 
 | 字段 | 类型 | 默认值 | 环境变量 | 说明 |
 |------|------|--------|----------|------|
-| `level` | string | `"info"` | `RUNE_LOG__LEVEL` | 日志级别（trace/debug/info/warn/error） |
-| `file` | string? | `null` | `RUNE_LOG__FILE` | 日志文件路径，null 则输出到 stderr |
+| `level` | string | `"info"` | `RUNE_LOG__LEVEL` | 日志级别（trace / debug / info / warn / error） |
+| `file` | string? | `null` | `RUNE_LOG__FILE` | 日志文件路径，`null` 则输出到 stderr。注意：文件日志尚未实现，当前始终输出到 stderr |
+
+### `[telemetry]` -- 遥测
+
+| 字段 | 类型 | 默认值 | 环境变量 | 说明 |
+|------|------|--------|----------|------|
+| `otlp_endpoint` | string? | `null` | `RUNE_TELEMETRY__OTLP_ENDPOINT` | OTLP gRPC 端点（如 `"http://localhost:4317"`）。设置后启用 OpenTelemetry tracing layer |
+| `prometheus_port` | u16? | `null` | `RUNE_TELEMETRY__PROMETHEUS_PORT` | Prometheus `/metrics` 端点监听端口。设置后在 `0.0.0.0:<port>` 启动 metrics exporter |
+
+当两个字段均为 `null` 时，系统仅使用 `tracing_subscriber::fmt` 输出日志到 stderr。
+
+### `[tls]` -- TLS 加密
+
+| 字段 | 类型 | 默认值 | 环境变量 | 说明 |
+|------|------|--------|----------|------|
+| `cert_path` | string? | `null` | `RUNE_TLS__CERT_PATH` | TLS 证书文件路径（PEM 格式） |
+| `key_path` | string? | `null` | `RUNE_TLS__KEY_PATH` | TLS 私钥文件路径（PEM 格式） |
+
+必须同时设置 `cert_path` 和 `key_path` 才能启用 TLS。只设置其中一个会回退到明文传输并输出警告。启用后 HTTP 和 gRPC 服务器均使用 TLS。dev 模式下 TLS 强制禁用。
 
 ---
 
-## 完整示例
+## 3. 环境变量完整列表
+
+| 环境变量 | 对应配置 | 类型 |
+|----------|----------|------|
+| `RUNE_SERVER__GRPC_HOST` | `server.grpc_host` | IP |
+| `RUNE_SERVER__GRPC_PORT` | `server.grpc_port` | u16 |
+| `RUNE_SERVER__HTTP_HOST` | `server.http_host` | IP |
+| `RUNE_SERVER__HTTP_PORT` | `server.http_port` | u16 |
+| `RUNE_SERVER__DEV_MODE` | `server.dev_mode` | bool |
+| `RUNE_SERVER__DRAIN_TIMEOUT_SECS` | `server.drain_timeout_secs` | u64 |
+| `RUNE_AUTH__ENABLED` | `auth.enabled` | bool |
+| `RUNE_AUTH__HMAC_SECRET` | `auth.hmac_secret` | string |
+| `RUNE_STORE__DB_PATH` | `store.db_path` | string |
+| `RUNE_STORE__LOG_RETENTION_DAYS` | `store.log_retention_days` | u32 |
+| `RUNE_SESSION__HEARTBEAT_INTERVAL_SECS` | `session.heartbeat_interval_secs` | u64 |
+| `RUNE_SESSION__HEARTBEAT_TIMEOUT_SECS` | `session.heartbeat_timeout_secs` | u64 |
+| `RUNE_SESSION__MAX_REQUEST_TIMEOUT_SECS` | `session.max_request_timeout_secs` | u64 |
+| `RUNE_GATE__MAX_UPLOAD_SIZE_MB` | `gate.max_upload_size_mb` | u64 |
+| `RUNE_RESOLVER__STRATEGY` | `resolver.strategy` | string |
+| `RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE` | `rate_limit.requests_per_minute` | u32 |
+| `RUNE_LOG__LEVEL` | `log.level` | string |
+| `RUNE_LOG__FILE` | `log.file` | string |
+| `RUNE_TELEMETRY__OTLP_ENDPOINT` | `telemetry.otlp_endpoint` | string |
+| `RUNE_TELEMETRY__PROMETHEUS_PORT` | `telemetry.prometheus_port` | u16 |
+| `RUNE_TLS__CERT_PATH` | `tls.cert_path` | string |
+| `RUNE_TLS__KEY_PATH` | `tls.key_path` | string |
+
+空字符串值会将 `Option<T>` 字段重置为 `None`。非 `Option` 字段的无效值会被静默忽略。
+
+---
+
+## 4. 完整 Runtime 配置示例
 
 ```toml
 [server]
@@ -112,6 +236,7 @@ drain_timeout_secs = 15
 [auth]
 enabled = true
 exempt_routes = ["/health"]
+# hmac_secret = "your-secret-here"
 
 [store]
 db_path = "rune.db"
@@ -135,11 +260,12 @@ requests_per_minute = 600
 [log]
 level = "info"
 # file = "/var/log/rune/runtime.log"
-```
 
-## 生成默认配置
+[telemetry]
+# otlp_endpoint = "http://localhost:4317"
+# prometheus_port = 9090
 
-```bash
-rune config init    # 在当前目录生成 rune.toml
-rune config show    # 显示当前生效的完整配置
+[tls]
+# cert_path = "/etc/rune/cert.pem"
+# key_path = "/etc/rune/key.pem"
 ```

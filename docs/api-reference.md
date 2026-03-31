@@ -126,6 +126,36 @@ POST /translate?async=true   -- 异步任务
 
 ## 异步任务
 
+### `GET /api/v1/tasks`
+
+列出异步任务。支持按状态、Rune 名称过滤和分页。
+
+**查询参数**:
+- `status` -- 按任务状态过滤（可选）。取值：`pending` | `running` | `completed` | `failed` | `cancelled`
+- `rune` -- 按 Rune 名称过滤（可选）
+- `limit` -- 返回条数，默认 50，最大 500（可选）
+- `offset` -- 偏移量，默认 0（可选）
+
+**响应**: `200 OK`
+
+```json
+{
+  "tasks": [
+    {
+      "task_id": "r-18e8f3a1b-0",
+      "rune_name": "translate",
+      "status": "completed",
+      "input": "{\"text\": \"hello\"}",
+      "output": "{\"translated\": \"你好\"}",
+      "error": null,
+      "created_at": "2026-03-23T10:00:00Z",
+      "started_at": "2026-03-23T10:00:00Z",
+      "completed_at": "2026-03-23T10:00:01Z"
+    }
+  ]
+}
+```
+
 ### `GET /api/v1/tasks/:id`
 
 查询异步任务状态。
@@ -278,9 +308,11 @@ POST /translate?async=true   -- 异步任务
 
 ## API Key 管理
 
+> **权限要求**: 以下所有 Key 管理端点（创建、列出、吊销）均需要 **admin key** 认证。使用非 admin 类型的 key 会返回 `403 FORBIDDEN`。开发模式下跳过权限检查。
+
 ### `POST /api/v1/keys`
 
-创建新的 API Key。
+创建新的 API Key。**需要 admin key。**
 
 **请求体**:
 
@@ -291,7 +323,7 @@ POST /translate?async=true   -- 异步任务
 }
 ```
 
-- `key_type` -- `gate`（HTTP 调用）或 `caster`（gRPC 连接）
+- `key_type` -- `gate`（HTTP 调用）、`caster`（gRPC 连接）或 `admin`（管理操作）
 - `label` -- 人类可读标签
 
 **响应**: `201 Created`
@@ -314,7 +346,7 @@ POST /translate?async=true   -- 异步任务
 
 ### `GET /api/v1/keys`
 
-列出所有 API Key（不包含原始 key 值）。
+列出所有 API Key（不包含原始 key 值）。**需要 admin key。**
 
 **响应**: `200 OK`
 
@@ -335,7 +367,7 @@ POST /translate?async=true   -- 异步任务
 
 ### `DELETE /api/v1/keys/:id`
 
-吊销 API Key。吊销后该 Key 立即失效。
+吊销 API Key。吊销后该 Key 立即失效。**需要 admin key。**
 
 **路径参数**:
 - `id` -- Key ID（数字）
