@@ -1,0 +1,11 @@
+target/
+.git/
+.claude/
+docs/
+sdks/
+examples/
+benchmarks/
+tests/
+demo/
+packaging/
+*.md

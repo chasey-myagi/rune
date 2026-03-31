@@ -6,34 +6,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rune 是一个「定义函数，获得 API + 工作流 + 分布式执行」的框架。开放协议 + Rust 参考实现，支持任何语言通过 gRPC (Caster) 注册并执行函数 (Rune)。
 
-当前状态：POC 阶段（demo/poc-v1 到 poc-v4 四版迭代），尚未进入正式框架开发。
+当前版本：v0.2.0。CLI 已重构，Docker-first Runtime 管理，跨平台发布。
 
 ## 构建与测试
 
 ```bash
-# 构建某个 POC（以最新 v4 为例）
-cd demo/poc-v4 && cargo build
+# 构建全部
+cargo build
+
+# 构建指定 crate
+cargo build -p rune-server
+cargo build -p rune-cli
 
 # 运行所有测试
-cd demo/poc-v4 && cargo test
+cargo test
 
-# 运行单个 crate 的测试
-cd demo/poc-v4 && cargo test -p rune-core
-cd demo/poc-v4 && cargo test -p rune-flow
+# 运行指定 crate 测试
+cargo test -p rune-core
+cargo test -p rune-gate
+cargo test -p rune-cli
+cargo test -p rune-flow
 
 # 运行单个测试
-cd demo/poc-v4 && cargo test -p rune-flow -- test_engine_execute_chain
+cargo test -p rune-flow -- test_engine_execute_chain
 
 # 启动服务器（HTTP :50060, gRPC :50070）
-cd demo/poc-v4 && cargo run -p rune-server
+cargo run -p rune-server -- --dev
 
-# Proto 编译（tonic-build，cargo build 时自动执行）
-# proto 源文件在 demo/poc-vN/proto/rune/wire/v1/rune.proto
+# CLI 启动 Runtime（Docker 模式）
+cargo run -p rune-cli -- start --dev
 ```
 
 Python Caster（示例客户端）：
 ```bash
-cd demo/poc-v4/examples/python-caster && python caster.py
+cd examples/python-caster && python main.py
 ```
 
 ## 架构
@@ -45,20 +51,31 @@ cd demo/poc-v4/examples/python-caster && python caster.py
 | **Rune** | 最小执行单元，`(RuneContext, Bytes) → Result<Bytes, RuneError>` |
 | **Caster** | 远程执行者，通过 gRPC 双向流 (`Session`) 连接 Runtime |
 | **Gate** | HTTP 入口层，自动把 Rune 映射为 REST API（sync / SSE stream / async task） |
-| **Relay** | 注册表 + 轮询路由（POC 中 Relay + Resolver 合一，正式版将拆分） |
+| **Relay** | 注册表 + 路由调度（Resolver 选择 Caster） |
 | **Invoker** | 统一调用接口 trait，`LocalInvoker`（进程内）和 `RemoteInvoker`（gRPC）对上层透明 |
-| **Flow** | 工作流引擎，多个 Rune 按 Chain 顺序执行 |
+| **Flow** | DAG 工作流引擎，多个 Rune 按有向无环图执行 |
 | **SessionManager** | gRPC 会话管理，处理心跳、超时、取消、流式、容量控制 |
 
-### Workspace 结构（以 poc-v4 为例）
+### Workspace 结构
 
 ```
-rune-proto   → proto 定义 + tonic 生成代码（Layer 0）
-rune-core    → Rune / Invoker / Relay / SessionManager（Layer 1）
-rune-gate    → HTTP API 层，axum 路由（Layer 2）
-rune-flow    → Flow DSL + Chain 执行引擎（Layer 3 Extension）
-rune-server  → 组装一切的二进制入口
-examples/    → hello (Rust) + python-caster (Python)
+runtime/
+├── rune-proto   → proto 定义 + tonic 生成代码（Layer 0）
+├── rune-core    → Rune / Invoker / Relay / SessionManager（Layer 1）
+├── rune-gate    → HTTP API 层，axum 路由（Layer 2）
+├── rune-flow    → DAG 工作流引擎（Layer 3 Extension）
+├── rune-schema  → JSON Schema 校验 + OpenAPI 生成
+├── rune-store   → SQLite 持久化（任务, 日志, Key）
+├── rune-server  → Runtime 入口二进制
+└── rune-cli     → CLI 工具
+
+sdks/
+├── python       → Python Caster SDK (PyPI: rune-sdk)
+├── typescript   → TypeScript Caster SDK (NPM: @rune-sdk/caster)
+└── rust         → Rust Caster SDK
+
+examples/        → 示例代码（Python/TypeScript/Rust Caster）
+proto/           → Wire Protocol 定义 (.proto)
 ```
 
 ### 关键抽象
@@ -81,20 +98,11 @@ HTTP Request → Gate (axum)
 
 `proto/rune/wire/v1/rune.proto` — 单一 `Session` 双向流，用 `oneof payload` 区分消息类型。字段编号留间隔 (10/20/30) 预留扩展。协议纯增量演进，从未删字段。
 
-## POC 版本差异
-
-- **v1**: 基础骨架（Relay / Invoker / Session / Gate）
-- **v2**: 并发控制、心跳、超时、取消、per-session pending
-- **v3**: 流式（StreamEvent/StreamEnd）、SSE、async task
-- **v4**: Flow 引擎（Chain DAG）、Flow API 端点
-
-每个 poc-vN 是独立完整的 workspace，可独立构建运行。
-
 ## Docker
 
 ```bash
-# 本地构建镜像
-cd demo/poc-v4 && docker build -t rune-server:local .
+# 本地构建镜像（从项目根目录）
+docker build -t rune-server:local .
 
 # 运行
 docker run -d -p 50060:50060 -p 50070:50070 rune-server:local
@@ -127,10 +135,6 @@ git tag -a v0.x.x -m "描述"
 git push origin v0.x.x
 ```
 
-tag `v*` 推送后 CI 自动构建多架构镜像（amd64 + arm64）并发布到 ghcr.io。
-
-## 已知问题（来自代码评审）
-
-- v3 Gate 的 SSE 是「假流式」——先同步拿全量再切 chunk 模拟推送，未接入 SessionManager 的真 `execute_stream()`
-- `session.rs` 的 `handle_session` 方法职责过重（心跳/超时/取消/流式/容量控制），正式版需拆分为独立组件
-- Relay 的 `remove_caster` 是 O(n) 全表扫描，正式版需加反向索引
+tag `v*` 推送后 CI 自动：
+- 构建多架构 Docker 镜像（amd64 + arm64）发布到 ghcr.io
+- 跨平台编译 CLI + Runtime 二进制，上传到 GitHub Releases
