@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from rune_sdk import Caster, RuneConfig, RuneContext, FileAttachment, StreamSender
+from rune import Caster, RuneConfig, RuneContext, FileAttachment, StreamSender
 
 
 # ============================================================

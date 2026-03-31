@@ -7,7 +7,7 @@
     "start": "tsx main.ts"
   },
   "dependencies": {
-    "@rune-sdk/caster": "file:../../sdks/typescript"
+    "@rune-framework/caster": "file:../../sdks/typescript"
   },
   "devDependencies": {
     "tsx": "^4.7.0",

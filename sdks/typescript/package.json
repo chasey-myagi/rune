@@ -1,5 +1,5 @@
 {
-  "name": "@rune-sdk/caster",
+  "name": "@rune-framework/caster",
   "version": "1.0.0",
   "type": "module",
   "main": "dist/index.js",

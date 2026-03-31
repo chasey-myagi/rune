@@ -6,7 +6,7 @@ Official Rust Caster SDK for the Rune framework.
 
 ```toml
 [dependencies]
-rune-sdk = { path = "sdks/rust" }
+rune-framework = { path = "sdks/rust" }
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 ```
@@ -14,7 +14,7 @@ bytes = "1"
 ## 快速开始
 
 ```rust
-use rune_sdk::{Caster, CasterConfig, RuneConfig, RuneContext, GateConfig};
+use rune_framework::{Caster, CasterConfig, RuneConfig, RuneContext, GateConfig};
 use bytes::Bytes;
 
 #[tokio::main]
@@ -68,7 +68,7 @@ let caster = Caster::new(config);
 ### Unary Handler
 
 ```rust
-use rune_sdk::{RuneConfig, GateConfig};
+use rune_framework::{RuneConfig, GateConfig};
 
 caster.rune(
     RuneConfig {
@@ -104,7 +104,7 @@ caster.rune(
 ### Unary Handler with Files
 
 ```rust
-use rune_sdk::FileAttachment;
+use rune_framework::FileAttachment;
 
 caster.rune_with_files(
     RuneConfig {
@@ -125,7 +125,7 @@ caster.rune_with_files(
 ### Streaming Handler
 
 ```rust
-use rune_sdk::StreamSender;
+use rune_framework::StreamSender;
 
 caster.stream_rune(
     RuneConfig {
@@ -175,7 +175,7 @@ caster.rune(
 
         // 取消感知
         if ctx.cancellation.is_cancelled() {
-            return Err(rune_sdk::SdkError::Cancelled);
+            return Err(rune_framework::SdkError::Cancelled);
         }
 
         Ok(input)
@@ -189,7 +189,7 @@ caster.rune(
 tokio::select! {
     result = do_long_work() => { Ok(result?) }
     _ = ctx.cancellation.cancelled() => {
-        Err(rune_sdk::SdkError::Cancelled)
+        Err(rune_framework::SdkError::Cancelled)
     }
 }
 ```
@@ -199,7 +199,7 @@ tokio::select! {
 SDK 使用 `SdkResult<T>` 类型（`Result<T, SdkError>`）：
 
 ```rust
-use rune_sdk::{SdkError, SdkResult};
+use rune_framework::{SdkError, SdkResult};
 
 // SdkError variants:
 // - DuplicateRune(String)   -- 重复注册

@@ -1,9 +1,9 @@
-//! Unit tests for rune-sdk, following test-matrix Part 1.
+//! Unit tests for rune-framework, following test-matrix Part 1.
 //!
 //! Naming: test_uXX_description
 
 use bytes::Bytes;
-use rune_sdk::{
+use rune_framework::{
     Caster, CasterConfig, FileAttachment, GateConfig, RuneConfig, RuneContext, SdkError,
     StreamSender,
 };

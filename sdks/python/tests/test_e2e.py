@@ -16,7 +16,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from rune_sdk import Caster, RuneContext, FileAttachment, StreamSender
+from rune import Caster, RuneContext, FileAttachment, StreamSender
 
 # ---------------------------------------------------------------------------
 # Skip unless E2E is explicitly enabled

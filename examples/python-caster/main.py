@@ -6,14 +6,14 @@ Usage:
     1. Start the Rune server: cargo run -p rune-server
     2. Run this caster: python examples/python-caster/main.py
 
-Requires: pip install rune-sdk (from sdks/python/)
+Requires: pip install rune-framework (from sdks/python/)
 """
 import asyncio
 import json
 import logging
 import time
 
-from rune_sdk import Caster, RuneContext, FileAttachment
+from rune import Caster, RuneContext, FileAttachment
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 

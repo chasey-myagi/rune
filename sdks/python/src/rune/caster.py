@@ -19,7 +19,7 @@ from .handler import RegisteredRune, OnceHandler
 from . import _proto  # noqa: F401
 from ._proto.rune.wire.v1 import rune_pb2, rune_pb2_grpc
 
-logger = logging.getLogger("rune_sdk")
+logger = logging.getLogger("rune_framework")
 
 
 class Caster:

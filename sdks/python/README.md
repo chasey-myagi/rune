@@ -5,7 +5,7 @@ Official Python Caster SDK for the Rune framework.
 ## 安装
 
 ```bash
-pip install rune-sdk
+pip install rune-framework
 ```
 
 要求 Python >= 3.10。
@@ -13,7 +13,7 @@ pip install rune-sdk
 ## 快速开始
 
 ```python
-from rune_sdk import Caster
+from rune_framework import Caster
 
 caster = Caster("localhost:50070")
 

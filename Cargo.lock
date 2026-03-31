@@ -2417,6 +2417,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rune-framework"
+version = "1.0.0"
+dependencies = [
+ "bytes",
+ "http",
+ "prost 0.13.5",
+ "reqwest",
+ "rune-proto",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.12.3",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "rune-gate"
 version = "1.0.0"
 dependencies = [
@@ -2462,28 +2482,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "rune-sdk"
-version = "1.0.0"
-dependencies = [
- "bytes",
- "http",
- "prost 0.13.5",
- "reqwest",
- "rune-proto",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic 0.12.3",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "rune-server"
-version = "1.0.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2572,7 +2572,7 @@ name = "rust-caster-example"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "rune-sdk",
+ "rune-framework",
  "serde_json",
  "tokio",
  "tracing",

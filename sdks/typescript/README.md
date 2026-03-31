@@ -5,13 +5,13 @@ Official TypeScript Caster SDK for the Rune framework.
 ## 安装
 
 ```bash
-npm install @rune-sdk/caster
+npm install @rune-framework/caster
 ```
 
 ## 快速开始
 
 ```typescript
-import { Caster } from '@rune-sdk/caster';
+import { Caster } from '@rune-framework/caster';
 
 const caster = new Caster({ key: 'rk_xxx' });
 
@@ -177,7 +177,7 @@ import {
   type RuneHandlerWithFiles,
   type StreamRuneHandler,
   type StreamRuneHandlerWithFiles,
-} from '@rune-sdk/caster';
+} from '@rune-framework/caster';
 ```
 
 ## 开发

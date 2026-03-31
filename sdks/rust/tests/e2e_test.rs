@@ -1,12 +1,12 @@
-//! E2E tests for rune-sdk, following test-matrix Part 2.
+//! E2E tests for rune-framework, following test-matrix Part 2.
 //!
 //! All tests require a running `rune-server --dev` on localhost:50070/50060.
-//! Run with: `cargo test -p rune-sdk -- --ignored`
+//! Run with: `cargo test -p rune-framework -- --ignored`
 //!
 //! Naming: test_eXX_description
 
 use bytes::Bytes;
-use rune_sdk::{
+use rune_framework::{
     Caster, CasterConfig, FileAttachment, GateConfig, RuneConfig, RuneContext, SdkError,
     StreamSender,
 };

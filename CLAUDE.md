@@ -70,8 +70,8 @@ runtime/
 └── rune-cli     → CLI 工具
 
 sdks/
-├── python       → Python Caster SDK (PyPI: rune-sdk)
-├── typescript   → TypeScript Caster SDK (NPM: @rune-sdk/caster)
+├── python       → Python Caster SDK (PyPI: rune-framework)
+├── typescript   → TypeScript Caster SDK (NPM: @rune-framework/caster)
 └── rust         → Rust Caster SDK
 
 examples/        → 示例代码（Python/TypeScript/Rust Caster）

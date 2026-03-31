@@ -4,7 +4,7 @@
 //!
 //! # Example
 //! ```rust,no_run
-//! use rune_sdk::{Caster, CasterConfig, RuneConfig, RuneContext};
+//! use rune_framework::{Caster, CasterConfig, RuneConfig, RuneContext};
 //! use bytes::Bytes;
 //!
 //! #[tokio::main]

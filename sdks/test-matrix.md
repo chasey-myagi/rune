@@ -204,7 +204,7 @@ def runtime():
 @pytest.fixture
 async def caster(runtime):
     """创建 Caster 并连接"""
-    from rune_sdk import Caster
+    from rune import Caster
     c = Caster("localhost:50070")
     # 注册测试 rune...
     task = asyncio.create_task(c.run())

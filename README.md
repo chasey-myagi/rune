@@ -35,8 +35,8 @@ sudo mv rune rune-server /usr/local/bin/
 ### SDK
 
 ```bash
-pip install rune-sdk            # Python
-npm install @rune-sdk/caster    # TypeScript
+pip install rune-framework            # Python
+npm install @rune-framework/caster    # TypeScript
 ```
 
 ## 快速开始
@@ -95,11 +95,11 @@ services:
 ### Python Caster 示例
 
 ```bash
-pip install rune-sdk
+pip install rune-framework
 ```
 
 ```python
-from rune_sdk import Caster
+from rune import Caster
 
 caster = Caster("localhost:50070")
 
@@ -123,7 +123,7 @@ caster.run()
 ### TypeScript Caster 示例
 
 ```typescript
-import { Caster } from '@rune-sdk/caster';
+import { Caster } from '@rune-framework/caster';
 
 const caster = new Caster({ key: 'rk_xxx' });
 
@@ -182,10 +182,10 @@ Runtime (Rust)
 
 ## SDK
 
-### Python (`rune-sdk`)
+### Python (`rune-framework`)
 
 ```bash
-pip install rune-sdk
+pip install rune-framework
 ```
 
 - `Caster` -- 连接 Runtime，注册 handler
@@ -195,10 +195,10 @@ pip install rune-sdk
 - 自动重连 + 指数退避
 - 完整协议参与（attach, heartbeat, execute, cancel, reconnect）
 
-### TypeScript (`@rune-sdk/caster`)
+### TypeScript (`@rune-framework/caster`)
 
 ```bash
-npm install @rune-sdk/caster
+npm install @rune-framework/caster
 ```
 
 - `Caster` -- 连接 Runtime，注册 handler
@@ -208,11 +208,11 @@ npm install @rune-sdk/caster
 - `AbortSignal` 取消感知
 - 自动重连 + 指数退避
 
-### Rust (`rune-sdk`)
+### Rust (`rune-framework`)
 
 ```toml
 [dependencies]
-rune-sdk = { path = "sdks/rust" }
+rune-framework = { path = "sdks/rust" }
 ```
 
 - `Caster` -- 连接 Runtime，注册 handler

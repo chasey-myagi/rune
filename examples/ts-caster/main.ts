@@ -6,8 +6,8 @@
  *   2. npm install && npx tsx main.ts
  */
 
-import { Caster } from "@rune-sdk/caster";
-import type { RuneContext, StreamSender } from "@rune-sdk/caster";
+import { Caster } from "@rune-framework/caster";
+import type { RuneContext, StreamSender } from "@rune-framework/caster";
 
 const caster = new Caster({
   key: process.env.RUNE_KEY ?? "dev-key",

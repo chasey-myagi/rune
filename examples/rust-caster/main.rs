@@ -5,8 +5,8 @@
 //!   2. Run this caster: cargo run -p rust-caster-example
 
 use bytes::Bytes;
-use rune_sdk::{Caster, CasterConfig, RuneConfig, RuneContext, StreamSender};
-use rune_sdk::config::GateConfig;
+use rune_framework::{Caster, CasterConfig, RuneConfig, RuneContext, StreamSender};
+use rune_framework::config::GateConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         |_ctx: RuneContext, input: Bytes| async move {
             let data: serde_json::Value =
-                serde_json::from_slice(&input).map_err(|e| rune_sdk::SdkError::Other(e.to_string()))?;
+                serde_json::from_slice(&input).map_err(|e| rune_framework::SdkError::Other(e.to_string()))?;
             let text = data.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let result = serde_json::json!({ "result": text.to_uppercase() });
             Ok(Bytes::from(serde_json::to_vec(&result).unwrap()))
