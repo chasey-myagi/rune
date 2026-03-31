@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::convert::Infallible;
 use axum::{
     Router, Json,
-    extract::{Path, State, Query},
+    body::Body,
+    extract::{Path, State, Query, DefaultBodyLimit},
     http::StatusCode,
     response::{IntoResponse, Sse, sse::Event},
     routing::{get, post},
@@ -46,7 +47,58 @@ pub fn build_router(state: GateState) -> Router {
         .route("/api/v1/tasks/:id", get(get_task))
         .route("/api/v1/flows", get(list_flows))
         .route("/api/v1/flows/:name/run", post(run_flow))
+        .fallback(dynamic_gate_handler)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2MB 全局 body 限制
         .with_state(state)
+}
+
+// TODO: 正式版应根据 GateConfig.method 过滤 HTTP method
+async fn dynamic_gate_handler(
+    State(state): State<GateState>,
+    req: axum::http::Request<Body>,
+) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+
+    // 以 /api/ 开头的路径不应走 gate_path 匹配 — 这是拼错的 API 端点
+    if path.starts_with("/api/") {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            &format!("unknown API endpoint: {}", path),
+        );
+    }
+
+    let (rune_name, invoker) = match state.relay.resolve_by_gate_path(&path) {
+        Some(found) => found,
+        None => return error_response(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            &format!("no rune mapped to path '{}'", path),
+        ),
+    };
+
+    const MAX_BODY_SIZE: usize = 2 * 1024 * 1024; // 2MB
+    let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY_SIZE).await {
+        Ok(b) => b,
+        Err(_) => return error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "PAYLOAD_TOO_LARGE",
+            "request body too large",
+        ),
+    };
+
+    let request_id = unique_request_id();
+    let ctx = RuneContext { rune_name, request_id };
+
+    match invoker.invoke(ctx, body_bytes).await {
+        Ok(output) => {
+            match serde_json::from_slice::<serde_json::Value>(&output) {
+                Ok(json) => (StatusCode::OK, Json(json)).into_response(),
+                Err(_) => (StatusCode::OK, output).into_response(),
+            }
+        }
+        Err(e) => map_error(e),
+    }
 }
 
 async fn health() -> &'static str { "ok" }
@@ -252,6 +304,447 @@ fn unique_request_id() -> String {
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap()
-        .as_millis() as u64;
+        .as_secs();
     format!("r-{:x}-{:x}", ts, seq)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use rune_core::rune::{RuneConfig, make_handler};
+    use rune_core::invoker::LocalInvoker;
+    use tower::ServiceExt;
+
+    fn test_state() -> GateState {
+        let relay = Arc::new(Relay::new());
+        let flow_engine = Arc::new(FlowEngine::new(Arc::clone(&relay)));
+        GateState {
+            relay,
+            tasks: Arc::new(DashMap::new()),
+            flow_engine,
+        }
+    }
+
+    fn register_echo_rune(relay: &Relay, name: &str, gate_path: Option<&str>) {
+        let handler = make_handler(|_ctx, input| async move {
+            let body: serde_json::Value = serde_json::from_slice(&input)
+                .unwrap_or(serde_json::Value::Null);
+            let resp = serde_json::json!({"echo": body});
+            Ok(Bytes::from(serde_json::to_vec(&resp).unwrap()))
+        });
+        let config = RuneConfig {
+            name: name.into(),
+            description: "".into(),
+            gate_path: gate_path.map(|s| s.to_string()),
+        };
+        relay.register(config, Arc::new(LocalInvoker::new(handler)), None);
+    }
+
+    async fn body_to_json(body: Body) -> serde_json::Value {
+        let bytes = body.collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    async fn body_to_bytes(body: Body) -> Bytes {
+        body.collect().await.unwrap().to_bytes()
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_success() {
+        let state = test_state();
+        register_echo_rune(&state.relay, "echo", Some("/echo"));
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"hello":"world"}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_to_json(resp.into_body()).await;
+        assert_eq!(json["echo"]["hello"], "world");
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_not_found_json() {
+        let state = test_state();
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/nonexistent")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let json = body_to_json(resp.into_body()).await;
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+        assert!(
+            json["error"]["message"].as_str().unwrap().contains("/nonexistent"),
+            "error message should contain the request path"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_explicit_routes_unaffected() {
+        let state = test_state();
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_to_bytes(resp.into_body()).await;
+        assert_eq!(&bytes[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_invoker_error_mapping() {
+        let state = test_state();
+        let handler = make_handler(|_ctx, _input| async move {
+            Err(rune_core::rune::RuneError::InvalidInput("bad input".into()))
+        });
+        let config = RuneConfig {
+            name: "bad".into(),
+            description: "".into(),
+            gate_path: Some("/bad".into()),
+        };
+        state.relay.register(config, Arc::new(LocalInvoker::new(handler)), None);
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/bad")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_non_json_response() {
+        let state = test_state();
+        let handler = make_handler(|_ctx, _input| async move {
+            Ok(Bytes::from("plain text"))
+        });
+        let config = RuneConfig {
+            name: "plain".into(),
+            description: "".into(),
+            gate_path: Some("/plain".into()),
+        };
+        state.relay.register(config, Arc::new(LocalInvoker::new(handler)), None);
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/plain")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_to_bytes(resp.into_body()).await;
+        assert_eq!(&bytes[..], b"plain text");
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_body_passthrough() {
+        let state = test_state();
+        // Handler that returns input as-is (raw bytes, not JSON)
+        let handler = make_handler(|_ctx, input| async move {
+            Ok(input)
+        });
+        let config = RuneConfig {
+            name: "passthrough".into(),
+            description: "".into(),
+            gate_path: Some("/passthrough".into()),
+        };
+        state.relay.register(config, Arc::new(LocalInvoker::new(handler)), None);
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/passthrough")
+            .body(Body::from("raw body content"))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_to_bytes(resp.into_body()).await;
+        assert_eq!(&bytes[..], b"raw body content");
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_get_method() {
+        let state = test_state();
+        register_echo_rune(&state.relay, "echo", Some("/echo"));
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/echo")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_to_json(resp.into_body()).await;
+        // GET with empty body → echo handler receives null
+        assert_eq!(json["echo"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_query_string_ignored() {
+        let state = test_state();
+        register_echo_rune(&state.relay, "echo", Some("/echo"));
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/echo?foo=bar&baz=1")
+            .body(Body::from("{}"))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ========== P0: map_error full branch coverage ==========
+
+    fn clone_rune_error(e: &RuneError) -> RuneError {
+        match e {
+            RuneError::NotFound(s) => RuneError::NotFound(s.clone()),
+            RuneError::Unavailable => RuneError::Unavailable,
+            RuneError::Timeout => RuneError::Timeout,
+            RuneError::ExecutionFailed { code, message } => RuneError::ExecutionFailed { code: code.clone(), message: message.clone() },
+            RuneError::Internal(e) => RuneError::Internal(anyhow::anyhow!("{}", e)),
+            RuneError::InvalidInput(s) => RuneError::InvalidInput(s.clone()),
+        }
+    }
+
+    async fn invoke_error_rune(error: RuneError, gate_path: &str) -> axum::response::Response {
+        let state = test_state();
+        let err_clone = clone_rune_error(&error);
+        let handler = make_handler(move |_ctx, _input| {
+            let e = clone_rune_error(&err_clone);
+            async move { Err(e) }
+        });
+        let config = RuneConfig {
+            name: "err".into(),
+            description: "".into(),
+            gate_path: Some(gate_path.into()),
+        };
+        state.relay.register(config, Arc::new(LocalInvoker::new(handler)), None);
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(gate_path)
+            .body(Body::empty())
+            .unwrap();
+        app.oneshot(req).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_error_not_found() {
+        let resp = invoke_error_rune(RuneError::NotFound("x".into()), "/err-nf").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let json = body_to_json(resp.into_body()).await;
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_error_unavailable() {
+        let resp = invoke_error_rune(RuneError::Unavailable, "/err-ua").await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json = body_to_json(resp.into_body()).await;
+        assert_eq!(json["error"]["code"], "UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_error_timeout() {
+        let resp = invoke_error_rune(RuneError::Timeout, "/err-to").await;
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        let json = body_to_json(resp.into_body()).await;
+        assert_eq!(json["error"]["code"], "TIMEOUT");
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_error_execution_failed() {
+        let resp = invoke_error_rune(
+            RuneError::ExecutionFailed { code: "E01".into(), message: "boom".into() },
+            "/err-ef",
+        ).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = body_to_json(resp.into_body()).await;
+        assert_eq!(json["error"]["code"], "EXECUTION_FAILED");
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_error_internal() {
+        let resp = invoke_error_rune(
+            RuneError::Internal(anyhow::anyhow!("oops")),
+            "/err-int",
+        ).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = body_to_json(resp.into_body()).await;
+        assert_eq!(json["error"]["code"], "INTERNAL");
+    }
+
+    // ========== P0: body size limit ==========
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_body_too_large() {
+        let state = test_state();
+        register_echo_rune(&state.relay, "echo", Some("/echo"));
+        let app = build_router(state);
+
+        // 3MB body exceeds 2MB limit
+        let large_body = vec![b'x'; 3 * 1024 * 1024];
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .body(Body::from(large_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let json = body_to_json(resp.into_body()).await;
+        assert_eq!(json["error"]["code"], "PAYLOAD_TOO_LARGE");
+    }
+
+    // ========== P1: builtin route priority ==========
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_builtin_route_priority() {
+        let state = test_state();
+        // Register a rune with gate_path="/health" — should NOT override the explicit /health route
+        register_echo_rune(&state.relay, "health_rune", Some("/health"));
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_to_bytes(resp.into_body()).await;
+        assert_eq!(&bytes[..], b"ok", "explicit /health route should take priority over fallback");
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_body_exact_limit() {
+        let state = test_state();
+        register_echo_rune(&state.relay, "echo", Some("/echo"));
+        let app = build_router(state);
+
+        // Exactly 2MB body should be accepted
+        let exact_body = vec![b'x'; 2 * 1024 * 1024];
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .body(Body::from(exact_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "exactly 2MB body should be accepted");
+    }
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_body_one_over_limit() {
+        let state = test_state();
+        register_echo_rune(&state.relay, "echo", Some("/echo"));
+        let app = build_router(state);
+
+        // 2MB + 1 byte should be rejected
+        let over_body = vec![b'x'; 2 * 1024 * 1024 + 1];
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .body(Body::from(over_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "2MB+1 body should be rejected");
+        let json = body_to_json(resp.into_body()).await;
+        assert_eq!(json["error"]["code"], "PAYLOAD_TOO_LARGE");
+    }
+
+    // ========== Issue 2 regression: body size limit on /api/v1/runes/:name/run ==========
+
+    #[tokio::test]
+    async fn test_fix_run_rune_body_too_large() {
+        let state = test_state();
+        register_echo_rune(&state.relay, "echo", None);
+        let app = build_router(state);
+
+        // 3MB body exceeds global 2MB limit
+        let large_body = vec![b'x'; 3 * 1024 * 1024];
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/runes/echo/run")
+            .body(Body::from(large_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn test_fix_run_flow_body_too_large() {
+        let state = test_state();
+        let app = build_router(state);
+
+        // 3MB body exceeds global 2MB limit
+        let large_body = vec![b'x'; 3 * 1024 * 1024];
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/flows/test/run")
+            .body(Body::from(large_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    // ========== Issue: /api/ prefix should not fall through to gate_path matching ==========
+
+    #[tokio::test]
+    async fn test_fix_dynamic_gate_api_prefix_not_gate_path() {
+        let state = test_state();
+        let app = build_router(state);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/v1/typo")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let json = body_to_json(resp.into_body()).await;
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("unknown API endpoint"),
+            "should say 'unknown API endpoint', got: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("no rune mapped"),
+            "should NOT say 'no rune mapped', got: {}",
+            msg
+        );
+    }
 }

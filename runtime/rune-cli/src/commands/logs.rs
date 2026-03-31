@@ -1,23 +1,29 @@
 use anyhow::Result;
 
-use super::super::client::RuneClient;
+use crate::client::RuneClient;
 
-/// Retrieve logs, optionally filtered by Rune name.
-pub async fn logs(client: &RuneClient, rune: Option<&str>, limit: u32) -> Result<()> {
+pub async fn run(
+    client: &RuneClient,
+    rune: Option<&str>,
+    limit: u32,
+    _follow: bool,
+    json_mode: bool,
+) -> Result<()> {
     let result = client.get_logs(rune, limit).await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&result).unwrap_or_default()
-    );
+    if json_mode {
+        crate::output::print_json(&result);
+    } else {
+        crate::output::print_json(&result);
+    }
     Ok(())
 }
 
-/// Show runtime statistics.
-pub async fn stats(client: &RuneClient) -> Result<()> {
+pub async fn stats(client: &RuneClient, json_mode: bool) -> Result<()> {
     let result = client.get_stats().await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&result).unwrap_or_default()
-    );
+    if json_mode {
+        crate::output::print_json(&result);
+    } else {
+        crate::output::print_json(&result);
+    }
     Ok(())
 }

@@ -872,9 +872,11 @@ dependencies = [
 name = "rune-gate"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "bytes",
  "dashmap",
+ "http-body-util",
  "rune-core",
  "rune-flow",
  "rune-proto",
@@ -882,6 +884,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "tower 0.5.3",
  "tracing",
 ]
 

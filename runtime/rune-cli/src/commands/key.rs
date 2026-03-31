@@ -1,33 +1,38 @@
 use anyhow::Result;
 
-use super::super::client::RuneClient;
+use crate::client::RuneClient;
 
-/// Create a new API key.
-pub async fn create(client: &RuneClient, key_type: &str, label: &str) -> Result<()> {
+pub async fn create(
+    client: &RuneClient,
+    key_type: &str,
+    label: &str,
+    json_mode: bool,
+) -> Result<()> {
     let result = client.create_key(key_type, label).await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&result).unwrap_or_default()
-    );
+    if json_mode {
+        crate::output::print_json(&result);
+    } else {
+        crate::output::print_json(&result); // placeholder -- future task adds formatted output
+    }
     Ok(())
 }
 
-/// List all API keys.
-pub async fn list(client: &RuneClient) -> Result<()> {
+pub async fn list(client: &RuneClient, json_mode: bool) -> Result<()> {
     let result = client.list_keys().await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&result).unwrap_or_default()
-    );
+    if json_mode {
+        crate::output::print_json(&result);
+    } else {
+        crate::output::print_json(&result);
+    }
     Ok(())
 }
 
-/// Revoke an API key by ID.
-pub async fn revoke(client: &RuneClient, key_id: &str) -> Result<()> {
+pub async fn revoke(client: &RuneClient, key_id: &str, json_mode: bool) -> Result<()> {
     let result = client.revoke_key(key_id).await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&result).unwrap_or_default()
-    );
+    if json_mode {
+        crate::output::print_json(&result);
+    } else {
+        crate::output::print_json(&result);
+    }
     Ok(())
 }

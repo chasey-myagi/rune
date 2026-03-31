@@ -53,7 +53,7 @@ impl RuneClient {
     }
 
     /// Build a request with optional Authorization header.
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    pub fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.http.request(method, &url);
         if let Some(ref key) = self.api_key {
@@ -62,17 +62,24 @@ impl RuneClient {
         req
     }
 
-    /// Parse an input string as JSON, or wrap it in `{"input": ...}`.
-    fn parse_input(input: Option<&str>) -> Value {
+    /// Convenience: build a GET request for a path.
+    pub fn get_request(&self, path: &str) -> reqwest::RequestBuilder {
+        self.request(reqwest::Method::GET, path)
+    }
+
+    /// Parse an input string as JSON. Returns error if not valid JSON.
+    fn parse_input(input: Option<&str>) -> Result<Value> {
         match input {
-            Some(s) => serde_json::from_str(s).unwrap_or_else(|_| json!({ "input": s })),
-            None => json!({}),
+            Some(s) => {
+                serde_json::from_str(s).map_err(|e| anyhow::anyhow!("Invalid JSON input: {}", e))
+            }
+            None => Ok(json!({})),
         }
     }
 
     /// Send a request and parse the JSON response. Provides clear error messages
     /// for both connection failures and non-2xx responses.
-    async fn send_json(&self, req: reqwest::RequestBuilder) -> Result<Value> {
+    pub async fn send_json(&self, req: reqwest::RequestBuilder) -> Result<Value> {
         let resp = req
             .send()
             .await
@@ -134,11 +141,11 @@ impl RuneClient {
         let path = self.build_path("/api/v1/runes/{name}/run", &[("name", name)]);
         let req = self
             .request(reqwest::Method::POST, &path)
-            .json(&Self::parse_input(input));
+            .json(&Self::parse_input(input)?);
         self.send_json(req).await
     }
 
-    /// POST /api/v1/runes/:name/run?stream=true — prints SSE events to stdout
+    /// POST /api/v1/runes/:name/run?stream=true -- prints SSE events to stdout
     pub async fn call_rune_stream(&self, name: &str, input: Option<&str>) -> Result<String> {
         let path = self.build_path_with_query(
             "/api/v1/runes/{name}/run",
@@ -147,7 +154,7 @@ impl RuneClient {
         );
         let resp = self
             .request(reqwest::Method::POST, &path)
-            .json(&Self::parse_input(input))
+            .json(&Self::parse_input(input)?)
             .send()
             .await
             .with_context(|| format!("Failed to connect to Runtime at {}", self.base_url))?;
@@ -197,7 +204,7 @@ impl RuneClient {
         );
         let req = self
             .request(reqwest::Method::POST, &path)
-            .json(&Self::parse_input(input));
+            .json(&Self::parse_input(input)?);
         self.send_json(req).await
     }
 
@@ -205,6 +212,14 @@ impl RuneClient {
     pub async fn get_task(&self, id: &str) -> Result<Value> {
         let path = self.build_path("/api/v1/tasks/{id}", &[("id", id)]);
         let req = self.request(reqwest::Method::GET, &path);
+        self.send_json(req).await
+    }
+
+    // ── Casters ────────────────────────────────────────────────────────
+
+    /// GET /api/v1/casters
+    pub async fn casters(&self) -> Result<Value> {
+        let req = self.request(reqwest::Method::GET, "/api/v1/casters");
         self.send_json(req).await
     }
 
@@ -252,7 +267,7 @@ impl RuneClient {
         let path = self.build_path("/api/v1/flows/{name}/run", &[("name", name)]);
         let req = self
             .request(reqwest::Method::POST, &path)
-            .json(&Self::parse_input(input));
+            .json(&Self::parse_input(input)?);
         self.send_json(req).await
     }
 
@@ -310,5 +325,88 @@ mod tests {
         );
         assert_eq!(body["key_type"], "gate");
         assert_eq!(body["label"], "my-key");
+    }
+
+    // ── Security: URL path segment encoding (migrated from tests/client_test.rs) ──
+
+    #[test]
+    fn test_url_encodes_rune_name_with_slash() {
+        let c = RuneClient::new("http://localhost:3000", None);
+        let url = c.build_path("/api/v1/runes/{name}/run", &[("name", "../admin")]);
+        assert_eq!(url, "/api/v1/runes/..%2Fadmin/run");
+    }
+
+    #[test]
+    fn test_url_encodes_rune_name_with_special_chars() {
+        let c = RuneClient::new("http://localhost:3000", None);
+        let url = c.build_path("/api/v1/runes/{name}/run", &[("name", "hello world")]);
+        assert_eq!(url, "/api/v1/runes/hello%20world/run");
+    }
+
+    #[test]
+    fn test_url_encodes_flow_name() {
+        let c = RuneClient::new("http://localhost:3000", None);
+        let url = c.build_path("/api/v1/flows/{name}/run", &[("name", "my/flow")]);
+        assert_eq!(url, "/api/v1/flows/my%2Fflow/run");
+    }
+
+    #[test]
+    fn test_url_encodes_key_id() {
+        let c = RuneClient::new("http://localhost:3000", None);
+        let url = c.build_path("/api/v1/keys/{id}", &[("id", "key/../../../etc")]);
+        assert_eq!(url, "/api/v1/keys/key%2F..%2F..%2F..%2Fetc");
+    }
+
+    #[test]
+    fn test_url_encodes_query_param_rune_name() {
+        let c = RuneClient::new("http://localhost:3000", None);
+        let url = c.build_path_with_query(
+            "/api/v1/logs",
+            &[],
+            &[("limit", "50"), ("rune", "evil&admin=true")],
+        );
+        assert_eq!(url, "/api/v1/logs?limit=50&rune=evil%26admin%3Dtrue");
+    }
+
+    #[test]
+    fn test_client_base_url() {
+        let c = RuneClient::new("http://127.0.0.1:3000", None);
+        assert_eq!(c.base_url, "http://127.0.0.1:3000");
+    }
+
+    #[test]
+    fn test_client_base_url_trailing_slash_stripped() {
+        let c = RuneClient::new("http://127.0.0.1:3000/", None);
+        assert_eq!(c.base_url, "http://127.0.0.1:3000");
+    }
+
+    #[test]
+    fn test_client_no_api_key() {
+        let c = RuneClient::new("http://localhost:3000", None);
+        assert!(c.api_key.is_none());
+    }
+
+    #[test]
+    fn test_client_with_api_key() {
+        let c = RuneClient::new("http://localhost:3000", Some("secret-key"));
+        assert_eq!(c.api_key.as_deref(), Some("secret-key"));
+    }
+
+    #[test]
+    fn test_parse_input_valid_json() {
+        let val = RuneClient::parse_input(Some(r#"{"key":"val"}"#)).unwrap();
+        assert_eq!(val["key"], "val");
+    }
+
+    #[test]
+    fn test_parse_input_invalid_json_returns_error() {
+        let result = RuneClient::parse_input(Some("not json"));
+        assert!(result.is_err(), "non-JSON input must return error");
+    }
+
+    #[test]
+    fn test_parse_input_none_returns_empty_object() {
+        let val = RuneClient::parse_input(None).unwrap();
+        assert_eq!(val, json!({}));
     }
 }
