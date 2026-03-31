@@ -76,7 +76,7 @@ services:
       - "50060:50060"  # HTTP API
       - "50070:50070"  # gRPC (Caster 连接)
     environment:
-      RUNE_LOG_LEVEL: info
+      RUNE_LOG__LEVEL: info
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:50060/health"]
       interval: 10s
@@ -86,10 +86,11 @@ services:
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `RUNE_HOST` | `0.0.0.0` | 监听地址 |
-| `RUNE_HTTP_PORT` | `50060` | HTTP API 端口 |
-| `RUNE_GRPC_PORT` | `50070` | gRPC 端口 |
-| `RUNE_LOG_LEVEL` | `info` | 日志级别 |
+| `RUNE_SERVER__HTTP_HOST` | `0.0.0.0` | HTTP 监听地址 |
+| `RUNE_SERVER__HTTP_PORT` | `50060` | HTTP API 端口 |
+| `RUNE_SERVER__GRPC_HOST` | `0.0.0.0` | gRPC 监听地址 |
+| `RUNE_SERVER__GRPC_PORT` | `50070` | gRPC 端口 |
+| `RUNE_LOG__LEVEL` | `info` | 日志级别 |
 
 ### Python Caster 示例
 
@@ -154,7 +155,7 @@ rune call generate '{"prompt": "write a poem"}' --stream
 # 异步调用
 rune call translate '{"text": "hello", "lang": "zh"}' --async
 # 查询异步任务
-rune task <task-id>
+rune task get <task-id>
 ```
 
 ## 架构

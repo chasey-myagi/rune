@@ -113,7 +113,7 @@ curl http://localhost:50060/health  # => ok
 
 镜像发布到 `ghcr.io/chasey-myagi/rune-server`，CI 由 `.github/workflows/docker-publish.yml` 驱动。
 
-环境变量：`RUNE_HOST`(0.0.0.0) / `RUNE_HTTP_PORT`(50060) / `RUNE_GRPC_PORT`(50070) / `RUNE_LOG_LEVEL`(info)
+环境变量：`RUNE_SERVER__HTTP_HOST`(0.0.0.0) / `RUNE_SERVER__HTTP_PORT`(50060) / `RUNE_SERVER__GRPC_PORT`(50070) / `RUNE_LOG__LEVEL`(info)
 
 ## 发版流程
 

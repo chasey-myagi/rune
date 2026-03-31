@@ -121,8 +121,8 @@ async fn start_binary(
         // In foreground mode, exec directly -- don't write state
         let status = tokio::process::Command::new(path)
             .args(if dev { vec!["--dev"] } else { vec![] })
-            .env("RUNE_HTTP_PORT", http_port.to_string())
-            .env("RUNE_GRPC_PORT", grpc_port.to_string())
+            .env("RUNE_SERVER__HTTP_PORT", http_port.to_string())
+            .env("RUNE_SERVER__GRPC_PORT", grpc_port.to_string())
             .status()
             .await?;
 

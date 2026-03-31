@@ -15,10 +15,11 @@ RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib
 
 COPY --from=builder /build/target/release/rune-server /usr/local/bin/rune-server
 
-ENV RUNE_HOST=0.0.0.0
-ENV RUNE_HTTP_PORT=50060
-ENV RUNE_GRPC_PORT=50070
-ENV RUNE_LOG_LEVEL=info
+ENV RUNE_SERVER__HTTP_HOST=0.0.0.0
+ENV RUNE_SERVER__HTTP_PORT=50060
+ENV RUNE_SERVER__GRPC_HOST=0.0.0.0
+ENV RUNE_SERVER__GRPC_PORT=50070
+ENV RUNE_LOG__LEVEL=info
 
 EXPOSE 50060 50070
 

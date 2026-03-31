@@ -26,8 +26,8 @@ pub fn spawn_binary(path: &str, dev: bool, http_port: u16, grpc_port: u16) -> Re
         cmd.arg("--dev");
     }
 
-    cmd.env("RUNE_HTTP_PORT", http_port.to_string());
-    cmd.env("RUNE_GRPC_PORT", grpc_port.to_string());
+    cmd.env("RUNE_SERVER__HTTP_PORT", http_port.to_string());
+    cmd.env("RUNE_SERVER__GRPC_PORT", grpc_port.to_string());
 
     // Detach from terminal
     cmd.stdout(std::process::Stdio::null());
