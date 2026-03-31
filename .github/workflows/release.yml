@@ -11,7 +11,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: cargo test --workspace
+        env:
+          CARGO_TERM_COLOR: always
+
   build:
+    needs: test
     strategy:
       matrix:
         include:

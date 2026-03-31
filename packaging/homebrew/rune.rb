@@ -5,7 +5,7 @@ class Rune < Formula
   desc "Define functions, get APIs + workflows + distributed execution"
   homepage "https://github.com/chasey-myagi/rune"
   version "@@VERSION@@"
-  license "MIT"
+  license :cannot_represent
 
   on_macos do
     on_arm do
@@ -13,7 +13,7 @@ class Rune < Formula
       sha256 "@@SHA256_DARWIN_ARM64@@"
     end
     on_intel do
-      url "https://github.com/chasey-myagi/rune/releases/download/v@@VERSION@@/rune-v@@VERSION@@-darwin-x86_64.tar.gz"
+      url "https://github.com/chasey-myagi/rune/releases/download/v@@VERSION@@/rune-v@@VERSION@@-darwin-amd64.tar.gz"
       sha256 "@@SHA256_DARWIN_X86_64@@"
     end
   end
@@ -24,7 +24,7 @@ class Rune < Formula
       sha256 "@@SHA256_LINUX_ARM64@@"
     end
     on_intel do
-      url "https://github.com/chasey-myagi/rune/releases/download/v@@VERSION@@/rune-v@@VERSION@@-linux-x86_64.tar.gz"
+      url "https://github.com/chasey-myagi/rune/releases/download/v@@VERSION@@/rune-v@@VERSION@@-linux-amd64.tar.gz"
       sha256 "@@SHA256_LINUX_X86_64@@"
     end
   end

@@ -384,12 +384,6 @@ fn global_json_flag() {
 }
 
 #[test]
-fn global_quiet_flag() {
-    let cli = parse(&["-q", "status"]);
-    assert!(cli.quiet);
-}
-
-#[test]
 fn global_remote_flag() {
     let cli = parse(&["--remote", "https://rune.prod.io", "status"]);
     assert_eq!(cli.remote.as_deref(), Some("https://rune.prod.io"));

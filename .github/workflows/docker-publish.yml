@@ -4,7 +4,7 @@ on:
   push:
     tags: ['v*']
     branches: [main]
-    paths: ['runtime/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock']
+    paths: ['runtime/**', 'proto/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock']
   workflow_dispatch:
 
 env:

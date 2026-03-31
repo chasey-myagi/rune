@@ -2,7 +2,6 @@ use clap::{Parser, Subcommand};
 
 pub mod client;
 pub mod commands;
-pub mod config;
 pub mod output;
 pub mod runtime;
 
@@ -35,10 +34,6 @@ pub struct Cli {
     /// Output format as JSON (machine-readable)
     #[arg(long, global = true)]
     pub json: bool,
-
-    /// Suppress non-essential output
-    #[arg(long, short, global = true)]
-    pub quiet: bool,
 
     #[command(subcommand)]
     pub command: Commands,

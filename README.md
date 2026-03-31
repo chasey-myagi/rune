@@ -262,7 +262,6 @@ rune config path                        # 输出配置文件路径
 # 全局选项
 --remote <URL>    # 连接远程 Runtime（或 RUNE_ADDR 环境变量）
 --json            # JSON 输出（机器可读）
--q, --quiet       # 静默模式
 ```
 
 ## API 端点
@@ -353,17 +352,17 @@ Rune 定义了 18 条行为保证契约，任何违反都是 bug。涵盖：
 
 ## 路线图
 
+### POC 阶段（demo/ 已归档至 git 历史）
+
+核心 Runtime、三语言 SDK、三种调用模式、DAG Flow、Schema 校验、认证、持久化、高级调度。
+
+### 正式发版
+
 | 版本 | 状态 | 主要交付 |
 |------|------|----------|
-| v0.1 | 已完成 | 核心 Runtime + Python SDK + 三种调用模式 + 顺序 Flow |
-| v0.2 | 已完成 | API Key 认证 + SQLite 持久化 + 调用日志 |
-| v0.3 | 已完成 | JSON Schema 校验 + OpenAPI 生成 + 文件传输 |
-| v0.4 | 已完成 | DAG 工作流引擎（并行执行、条件分支、input mapping） |
-| v0.5 | 已完成 | TypeScript SDK + CLI 工具 |
-| v0.6 | 已完成 | 高级调度 + Rate Limiting + 优雅停机 + Rust SDK |
-| v0.7 | 已完成 | 文档全面更新 + 稳定化 |
-| **v0.2.0** | **已完成** | **CLI 重构：Docker-first Runtime 管理、双模式输出、task 全命令、跨平台发布** |
-| v1.0 | 规划中 | 正式稳定版本 |
+| **v0.2.0** | **已发布** | CLI 重构（Docker-first Runtime 管理、双模式输出、task 全命令）、跨平台发布（GitHub Releases + Homebrew）、demo/ 清理 |
+| v0.3.0 | 规划中 | CLI text 模式补齐（casters/key/flow/logs 表格输出）、`--watch`/`--follow` 实时模式、config.toml 生效 |
+| v1.0.0 | 规划中 | 正式稳定版本 |
 
 ## 文档
 
