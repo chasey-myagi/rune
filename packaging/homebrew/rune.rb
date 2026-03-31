@@ -46,10 +46,10 @@ class Rune < Formula
         rune --version
 
       Configuration via environment variables:
-        RUNE_HOST       (default: 0.0.0.0)
-        RUNE_HTTP_PORT  (default: 50060)
-        RUNE_GRPC_PORT  (default: 50070)
-        RUNE_LOG_LEVEL  (default: info)
+        RUNE_SERVER__HTTP_HOST  (default: 0.0.0.0)
+        RUNE_SERVER__HTTP_PORT  (default: 50060)
+        RUNE_SERVER__GRPC_PORT  (default: 50070)
+        RUNE_LOG__LEVEL         (default: info)
 
       Documentation: https://github.com/chasey-myagi/rune
     EOS
