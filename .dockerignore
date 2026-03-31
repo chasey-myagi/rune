@@ -2,8 +2,10 @@ target/
 .git/
 .claude/
 docs/
-sdks/
-examples/
+sdks/python/
+sdks/typescript/
+examples/python-caster/
+examples/typescript-caster/
 benchmarks/
 tests/
 demo/
