@@ -69,6 +69,7 @@ impl SessionManager {
                 };
                 if hb_tx.send(msg).await.is_err() { break; }
                 let elapsed = now_ms().saturating_sub(hb_last.load(Ordering::Relaxed));
+                // Safety: u64 holds 584 million years of milliseconds, overflow impossible in practice
                 if elapsed > HEARTBEAT_TIMEOUT.as_millis() as u64 {
                     tracing::warn!(elapsed_ms = elapsed, "heartbeat timeout");
                     break;
@@ -232,6 +233,7 @@ impl SessionManager {
             payload: Some(session_message::Payload::Execute(ExecuteRequest {
                 request_id: request_id.to_string(), rune_name: rune_name.to_string(),
                 input: input.to_vec(), context: Default::default(),
+                // proto uint32 constraint: max ~49 days, sufficient for any reasonable timeout
                 timeout_ms: DEFAULT_TIMEOUT.as_millis() as u32,
             })),
         };
@@ -261,6 +263,7 @@ impl SessionManager {
             payload: Some(session_message::Payload::Execute(ExecuteRequest {
                 request_id: request_id.to_string(), rune_name: rune_name.to_string(),
                 input: input.to_vec(), context: Default::default(),
+                // proto uint32 constraint: max ~49 days, sufficient for any reasonable timeout
                 timeout_ms: DEFAULT_TIMEOUT.as_millis() as u32,
             })),
         };
@@ -295,6 +298,7 @@ impl SessionManager {
 }
 
 fn now_ms() -> u64 {
+    // Safety: u64 holds 584 million years of milliseconds, overflow impossible in practice
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap()
         .as_millis() as u64
