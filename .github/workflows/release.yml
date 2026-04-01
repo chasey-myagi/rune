@@ -25,6 +25,7 @@ jobs:
   build:
     needs: test
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -37,7 +38,7 @@ jobs:
             use_cross: true
           - target: x86_64-apple-darwin
             platform: darwin-amd64
-            os: macos-13
+            os: macos-latest
             use_cross: false
           - target: aarch64-apple-darwin
             platform: darwin-arm64
