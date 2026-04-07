@@ -1,0 +1,55 @@
+name: Bug Report
+description: 报告一个 bug
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 描述
+      description: 清晰简洁地描述这个 bug
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 详细的复现步骤
+      placeholder: |
+        1. 执行 '...'
+        2. 输入 '...'
+        3. 观察到错误
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 你期望发生什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      description: 例如 macOS 15.3, Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 项目版本号或 commit hash
+    validations:
+      required: true
