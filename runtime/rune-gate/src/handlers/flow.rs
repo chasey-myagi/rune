@@ -16,7 +16,9 @@ use tokio::sync::mpsc;
 
 use crate::error::{error_response, error_response_with_id, map_flow_error};
 use crate::state::{unique_request_id, GateState, RunParams};
-use crate::trace_headers::{apply_trace_response_headers, context_from_headers};
+use crate::trace_headers::{
+    apply_trace_response_headers, context_from_headers, request_id_from_headers,
+};
 
 pub async fn create_flow(
     State(state): State<GateState>,
@@ -181,7 +183,7 @@ pub async fn run_flow(
     Query(params): Query<RunParams>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
-    let request_id = unique_request_id();
+    let request_id = request_id_from_headers(req.headers()).unwrap_or_else(unique_request_id);
     let trace_context = context_from_headers(req.headers());
     tracing::info!(
         trace_id = %trace_context.get(TRACE_ID_KEY).map(String::as_str).unwrap_or(""),
@@ -326,7 +328,7 @@ pub async fn run_flow_async(
     trace_context: std::collections::HashMap<String, String>,
     request_id: String,
 ) -> axum::response::Response {
-    let task_id = unique_request_id();
+    let task_id = request_id.clone();
     let input_str = String::from_utf8_lossy(&body).to_string();
 
     if let Err(e) = state

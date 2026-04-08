@@ -132,21 +132,13 @@ impl Resolver for HealthAwareResolver {
         let top_tier: Vec<RuneEntry> = top_indices.iter().map(|&i| candidates[i].clone()).collect();
         let picked = self.inner.pick(rune_name, &top_tier)?;
 
-        // Find which position in top_tier was picked, then map back to
-        // original candidates via top_indices. Use pointer comparison
-        // within top_tier (inner resolver returns a reference into top_tier).
+        // Map the picked reference back to the original candidates slice
+        // via top_indices. Resolver::pick must return a reference into the
+        // provided slice — ptr::eq verifies this contract.
         let inner_idx = top_tier
             .iter()
             .position(|e| std::ptr::eq(e, picked))
-            .unwrap_or_else(|| {
-                // Fallback: value-based match (if inner resolver clones).
-                top_tier
-                    .iter()
-                    .position(|e| {
-                        e.config.name == picked.config.name && e.caster_id == picked.caster_id
-                    })
-                    .unwrap_or(0)
-            });
+            .expect("Resolver::pick must return a reference into the provided candidates slice");
 
         Some(&candidates[top_indices[inner_idx]])
     }

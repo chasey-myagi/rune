@@ -22,7 +22,9 @@ use rune_store::{CallLog, TaskStatus};
 use crate::error::{error_response, error_response_with_id, map_error};
 use crate::multipart::{is_multipart, parse_multipart, FileMetadata};
 use crate::state::{unique_request_id, GateState, RunParams};
-use crate::trace_headers::{apply_trace_response_headers, context_from_headers};
+use crate::trace_headers::{
+    apply_trace_response_headers, context_from_headers, request_id_from_headers,
+};
 
 pub async fn run_rune(
     State(state): State<GateState>,
@@ -31,6 +33,10 @@ pub async fn run_rune(
     req: axum::extract::Request,
 ) -> impl IntoResponse {
     let headers = req.headers().clone();
+    let selected_entry = req
+        .extensions()
+        .get::<rune_core::relay::RuneEntry>()
+        .cloned();
     let content_type = req
         .headers()
         .get("content-type")
@@ -71,6 +77,7 @@ pub async fn run_rune(
         &content_type,
         &labels,
         &headers,
+        selected_entry,
     )
     .await
 }
@@ -84,6 +91,10 @@ pub async fn dynamic_rune_handler(
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
     let headers = req.headers().clone();
+    let selected_entry = req
+        .extensions()
+        .get::<rune_core::relay::RuneEntry>()
+        .cloned();
     let content_type = req
         .headers()
         .get("content-type")
@@ -139,6 +150,7 @@ pub async fn dynamic_rune_handler(
         &content_type,
         &labels,
         &headers,
+        selected_entry,
     )
     .await
 }
@@ -161,6 +173,7 @@ pub fn parse_labels_header(
 }
 
 /// Unified rune execution logic for both debug and dynamic routes
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_rune(
     state: &GateState,
     rune_name: &str,
@@ -169,8 +182,9 @@ pub async fn execute_rune(
     content_type: &str,
     labels: &std::collections::HashMap<String, String>,
     headers: &HeaderMap,
+    selected_entry: Option<rune_core::relay::RuneEntry>,
 ) -> axum::response::Response {
-    let request_id = unique_request_id();
+    let request_id = request_id_from_headers(headers).unwrap_or_else(unique_request_id);
     let context = context_from_headers(headers);
     let mode = if params.async_mode.unwrap_or(false) {
         "async"
@@ -187,17 +201,20 @@ pub async fn execute_rune(
         "gate invoke"
     );
 
-    // Use label-based routing if labels are provided
-    let invoker = if labels.is_empty() {
-        state.rune.relay.resolve(rune_name, &*state.rune.resolver)
-    } else {
-        state
-            .rune
-            .relay
-            .resolve_with_labels(rune_name, labels, &*state.rune.resolver)
-    };
-    let invoker = match invoker {
-        Some(inv) => inv,
+    let selected_entry = match selected_entry.or_else(|| {
+        if labels.is_empty() {
+            state
+                .rune
+                .relay
+                .select_entry(rune_name, &*state.rune.resolver)
+        } else {
+            state
+                .rune
+                .relay
+                .select_entry_with_labels(rune_name, labels, &*state.rune.resolver)
+        }
+    }) {
+        Some(entry) => entry,
         None => {
             // If labels were specified but no match, return 503 (no matching caster)
             if !labels.is_empty() {
@@ -224,22 +241,12 @@ pub async fn execute_rune(
             );
         }
     };
+    let invoker = Arc::clone(&selected_entry.invoker);
 
-    // Get RuneConfig for schema validation and stream support (single lookup)
-    let (input_schema, output_schema, supports_stream) =
-        if let Some(entries) = state.rune.relay.find(rune_name) {
-            if let Some(first) = entries.value().first() {
-                (
-                    first.config.input_schema.clone(),
-                    first.config.output_schema.clone(),
-                    first.config.supports_stream,
-                )
-            } else {
-                (None, None, false)
-            }
-        } else {
-            (None, None, false)
-        };
+    // Keep validation/stream capability aligned with the selected candidate.
+    let input_schema = selected_entry.config.input_schema.clone();
+    let output_schema = selected_entry.config.output_schema.clone();
+    let supports_stream = selected_entry.config.supports_stream;
 
     // Check supports_stream
     if params.stream.unwrap_or(false) && !supports_stream {
