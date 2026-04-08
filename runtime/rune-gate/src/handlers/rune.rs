@@ -416,7 +416,7 @@ pub async fn stream_execute(
                             output_size += data.len() as i64;
                             let event = Event::default()
                                 .event("message")
-                                .data(String::from_utf8_lossy(&data).to_string());
+                                .data(String::from_utf8_lossy(&data));
                             if tx.send(Ok(event)).await.is_err() {
                                 state_clone
                                     .rune

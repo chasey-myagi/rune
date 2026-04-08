@@ -2306,24 +2306,24 @@ async fn test_concurrent_store_operations() {
 }
 
 // ============================================================
-// MF-3: KeyType::from_str returns None for unknown values
+// MF-3: KeyType::parse returns None for unknown values
 // ============================================================
 
 #[test]
 fn test_key_type_from_str_unknown_returns_none() {
     // from_str should return None for unknown key types, not silently fallback
-    assert!(KeyType::from_str("INVALID_TYPE").is_none());
-    assert!(KeyType::from_str("unknown").is_none());
-    assert!(KeyType::from_str("").is_none());
-    assert!(KeyType::from_str("GATE").is_none()); // case-sensitive
-    assert!(KeyType::from_str("Caster").is_none()); // case-sensitive
+    assert!(KeyType::parse("INVALID_TYPE").is_none());
+    assert!(KeyType::parse("unknown").is_none());
+    assert!(KeyType::parse("").is_none());
+    assert!(KeyType::parse("GATE").is_none()); // case-sensitive
+    assert!(KeyType::parse("Caster").is_none()); // case-sensitive
 }
 
 #[test]
 fn test_key_type_from_str_valid_values() {
-    assert_eq!(KeyType::from_str("gate"), Some(KeyType::Gate));
-    assert_eq!(KeyType::from_str("caster"), Some(KeyType::Caster));
-    assert_eq!(KeyType::from_str("admin"), Some(KeyType::Admin));
+    assert_eq!(KeyType::parse("gate"), Some(KeyType::Gate));
+    assert_eq!(KeyType::parse("caster"), Some(KeyType::Caster));
+    assert_eq!(KeyType::parse("admin"), Some(KeyType::Admin));
 }
 
 // ============================================================

@@ -13,6 +13,12 @@ pub struct RoundRobinResolver {
     counters: DashMap<String, AtomicUsize>,
 }
 
+impl Default for RoundRobinResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RoundRobinResolver {
     pub fn new() -> Self {
         Self {
@@ -41,6 +47,12 @@ impl Resolver for RoundRobinResolver {
 
 /// Random resolver — picks a random candidate
 pub struct RandomResolver;
+
+impl Default for RandomResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl RandomResolver {
     pub fn new() -> Self {

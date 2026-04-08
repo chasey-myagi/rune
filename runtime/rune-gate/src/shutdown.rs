@@ -7,6 +7,12 @@ pub struct ShutdownCoordinator {
     draining: Arc<AtomicBool>,
 }
 
+impl Default for ShutdownCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShutdownCoordinator {
     pub fn new() -> Self {
         Self {

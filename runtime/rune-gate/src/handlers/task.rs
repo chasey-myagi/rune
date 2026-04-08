@@ -21,7 +21,7 @@ pub async fn list_tasks(
     State(state): State<GateState>,
     Query(params): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
-    let status = params.status.as_deref().and_then(TaskStatus::from_str);
+    let status = params.status.as_deref().and_then(TaskStatus::parse);
     let limit = params.limit.unwrap_or(50).min(500);
     let offset = params.offset.unwrap_or(0);
     match state

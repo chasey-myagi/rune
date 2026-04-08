@@ -50,7 +50,7 @@ impl RuneStore {
                 Ok(TaskRecord {
                     task_id: row.get(0)?,
                     rune_name: row.get(1)?,
-                    status: TaskStatus::from_str(&row.get::<_, String>(2)?)
+                    status: TaskStatus::parse(&row.get::<_, String>(2)?)
                         .unwrap_or(TaskStatus::Pending),
                     input: row.get(3)?,
                     output: row.get(4)?,
@@ -170,7 +170,7 @@ impl RuneStore {
                     Ok(TaskRecord {
                         task_id: row.get(0)?,
                         rune_name: row.get(1)?,
-                        status: TaskStatus::from_str(&row.get::<_, String>(2)?)
+                        status: TaskStatus::parse(&row.get::<_, String>(2)?)
                             .unwrap_or(TaskStatus::Pending),
                         input: row.get(3)?,
                         output: row.get(4)?,

@@ -21,6 +21,12 @@ pub struct Relay {
     write_lock: Mutex<()>,
 }
 
+impl Default for Relay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Relay {
     pub fn new() -> Self {
         Self {

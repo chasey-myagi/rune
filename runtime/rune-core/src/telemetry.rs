@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Telemetry configuration for OpenTelemetry tracing and Prometheus metrics.
 ///
 /// When all fields are `None`, the system falls back to plain `tracing_subscriber::fmt` logging.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetryConfig {
     /// OTLP gRPC endpoint (e.g. "http://localhost:4317").
@@ -15,15 +15,6 @@ pub struct TelemetryConfig {
     /// When set, a Prometheus metrics exporter is started on `0.0.0.0:<port>`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prometheus_port: Option<u16>,
-}
-
-impl Default for TelemetryConfig {
-    fn default() -> Self {
-        Self {
-            otlp_endpoint: None,
-            prometheus_port: None,
-        }
-    }
 }
 
 #[cfg(test)]

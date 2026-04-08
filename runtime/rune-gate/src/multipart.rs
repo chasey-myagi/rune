@@ -59,12 +59,9 @@ pub fn sanitize_filename(name: &str) -> String {
 /// Extract the boundary from a multipart/form-data content-type header.
 fn extract_boundary(content_type: &str) -> Option<String> {
     content_type.split(';').find_map(|part| {
-        let part = part.trim();
-        if let Some(val) = part.strip_prefix("boundary=") {
-            Some(val.trim_matches('"').to_string())
-        } else {
-            None
-        }
+        part.trim()
+            .strip_prefix("boundary=")
+            .map(|val| val.trim_matches('"').to_string())
     })
 }
 

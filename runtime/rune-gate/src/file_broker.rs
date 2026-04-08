@@ -57,7 +57,7 @@ impl StoredFile {
                 let path = path.clone();
                 tokio::task::spawn_blocking(move || std::fs::read(&path).map(Bytes::from))
                     .await
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+                    .map_err(std::io::Error::other)?
             }
         }
     }
@@ -79,6 +79,12 @@ pub struct FileBroker {
     /// Optional directory for spilling large files to disk.
     /// `None` means pure in-memory mode (backward-compatible default).
     disk_dir: Option<PathBuf>,
+}
+
+impl Default for FileBroker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FileBroker {

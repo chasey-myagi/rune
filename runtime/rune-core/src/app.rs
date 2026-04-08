@@ -30,6 +30,12 @@ pub struct App {
 /// Type alias for backward compatibility — `RunningApp` is identical to `App`.
 pub type RunningApp = App;
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         let config = AppConfig::default();

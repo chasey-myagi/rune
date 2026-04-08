@@ -32,7 +32,7 @@ impl KeyType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "caster" => Some(KeyType::Caster),
             "gate" => Some(KeyType::Gate),
@@ -77,7 +77,7 @@ impl TaskStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(TaskStatus::Pending),
             "running" => Some(TaskStatus::Running),

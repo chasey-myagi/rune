@@ -61,7 +61,7 @@ impl RuneStore {
             )?;
             let result = stmt.query_row(rusqlite::params![key_hash], |row| {
                 let key_type_str = row.get::<_, String>(3)?;
-                let key_type = KeyType::from_str(&key_type_str).ok_or_else(|| {
+                let key_type = KeyType::parse(&key_type_str).ok_or_else(|| {
                     rusqlite::Error::FromSqlConversionFailure(
                         3,
                         rusqlite::types::Type::Text,
@@ -106,7 +106,7 @@ impl RuneStore {
             let keys = stmt
                 .query_map([], |row| {
                     let key_type_str = row.get::<_, String>(2)?;
-                    let key_type = KeyType::from_str(&key_type_str).ok_or_else(|| {
+                    let key_type = KeyType::parse(&key_type_str).ok_or_else(|| {
                         rusqlite::Error::FromSqlConversionFailure(
                             2,
                             rusqlite::types::Type::Text,
@@ -193,7 +193,7 @@ impl RuneStore {
                 )?;
                 let result = stmt.query_row(rusqlite::params![candidate_hash], |row| {
                     let key_type_str = row.get::<_, String>(3)?;
-                    let key_type = KeyType::from_str(&key_type_str).ok_or_else(|| {
+                    let key_type = KeyType::parse(&key_type_str).ok_or_else(|| {
                         rusqlite::Error::FromSqlConversionFailure(
                             3,
                             rusqlite::types::Type::Text,

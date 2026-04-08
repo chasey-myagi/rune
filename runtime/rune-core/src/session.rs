@@ -18,7 +18,6 @@ use tonic::Streaming;
 pub(crate) enum SessionState {
     Attaching,
     Active,
-    Disconnected,
 }
 
 /// Callback invoked when a caster attaches, with caster_id and registered rune configs.
@@ -31,9 +30,7 @@ pub(crate) enum PendingResponse {
 
 pub(crate) struct PendingRequest {
     pub(crate) tx: PendingResponse,
-    pub(crate) created_at: Instant,
     pub(crate) _permit: tokio::sync::OwnedSemaphorePermit,
-    pub(crate) timeout: Duration,
 }
 
 pub struct SessionManager {
@@ -424,8 +421,6 @@ impl SessionManager {
             request_id.to_string(),
             PendingRequest {
                 tx: PendingResponse::Once(tx),
-                created_at: Instant::now(),
-                timeout,
                 _permit: permit,
             },
         );
@@ -478,8 +473,6 @@ impl SessionManager {
             request_id.to_string(),
             PendingRequest {
                 tx: PendingResponse::Stream(tx),
-                created_at: Instant::now(),
-                timeout,
                 _permit: permit,
             },
         );
@@ -836,8 +829,6 @@ mod tests {
                 format!("r-{}", i),
                 PendingRequest {
                     tx: PendingResponse::Once(tx),
-                    created_at: Instant::now(),
-                    timeout: DEFAULT_TIMEOUT,
                     _permit: permit,
                 },
             );

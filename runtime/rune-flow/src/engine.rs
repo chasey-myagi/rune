@@ -538,18 +538,16 @@ fn resolve_condition_value(
         return resolve_path(path, step_outputs, flow_input_json);
     }
 
-    if path.starts_with("input.") {
+    if let Some(field_path) = path.strip_prefix("input.") {
         // "input.x" → flow 原始输入的 x 字段
-        let field_path = &path["input.".len()..];
         if let Some(input_val) = flow_input_json {
             return resolve_json_path(input_val, field_path);
         }
         return serde_json::Value::Null;
     }
 
-    if path.starts_with("steps.") {
+    if let Some(rest) = path.strip_prefix("steps.") {
         // "steps.A.output.field" → step A 的 output 的 field
-        let rest = &path["steps.".len()..];
         // rest = "A.output.field"
         let parts: Vec<&str> = rest.splitn(3, '.').collect();
         if parts.is_empty() {
@@ -609,10 +607,10 @@ fn compare_values(lhs: &serde_json::Value, rhs: &serde_json::Value, op: &str) ->
     match op {
         "==" => lhs == rhs,
         "!=" => lhs != rhs,
-        ">" => compare_numeric(lhs, rhs).map_or(false, |ord| ord == std::cmp::Ordering::Greater),
-        "<" => compare_numeric(lhs, rhs).map_or(false, |ord| ord == std::cmp::Ordering::Less),
-        ">=" => compare_numeric(lhs, rhs).map_or(false, |ord| ord != std::cmp::Ordering::Less),
-        "<=" => compare_numeric(lhs, rhs).map_or(false, |ord| ord != std::cmp::Ordering::Greater),
+        ">" => compare_numeric(lhs, rhs).is_some_and(|ord| ord == std::cmp::Ordering::Greater),
+        "<" => compare_numeric(lhs, rhs).is_some_and(|ord| ord == std::cmp::Ordering::Less),
+        ">=" => compare_numeric(lhs, rhs).is_some_and(|ord| ord != std::cmp::Ordering::Less),
+        "<=" => compare_numeric(lhs, rhs).is_some_and(|ord| ord != std::cmp::Ordering::Greater),
         _ => false,
     }
 }

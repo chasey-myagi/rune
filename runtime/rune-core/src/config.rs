@@ -167,7 +167,7 @@ pub struct TlsConfig {
 // AppConfig — top-level configuration
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -180,23 +180,6 @@ pub struct AppConfig {
     pub log: LogConfig,
     pub telemetry: TelemetryConfig,
     pub tls: TlsConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            auth: AuthConfig::default(),
-            store: StoreConfig::default(),
-            session: SessionConfig::default(),
-            gate: GateServerConfig::default(),
-            resolver: ResolverConfig::default(),
-            rate_limit: RateLimitConfig::default(),
-            log: LogConfig::default(),
-            telemetry: TelemetryConfig::default(),
-            tls: TlsConfig::default(),
-        }
-    }
 }
 
 impl AppConfig {
