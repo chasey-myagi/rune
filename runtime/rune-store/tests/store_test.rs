@@ -18,6 +18,7 @@ async fn test_open_in_memory() {
     assert!(store.list_tasks(None, None, 10, 0).await.is_ok());
     assert!(store.query_logs(None, 10).await.is_ok());
     assert!(store.list_snapshots().await.is_ok());
+    assert!(store.list_flows().await.is_ok());
 }
 
 #[tokio::test]

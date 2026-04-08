@@ -43,6 +43,10 @@ pub struct AuthConfig {
     /// verifiable via automatic fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hmac_secret: Option<String>,
+    /// Bootstrap-only admin key imported from env on startup.
+    /// Deliberately excluded from TOML serialization/deserialization.
+    #[serde(skip)]
+    pub initial_admin_key: Option<String>,
 }
 
 impl Default for AuthConfig {
@@ -51,6 +55,7 @@ impl Default for AuthConfig {
             enabled: true,
             exempt_routes: vec!["/health".to_string()],
             hmac_secret: None,
+            initial_admin_key: None,
         }
     }
 }
@@ -340,6 +345,9 @@ impl AppConfig {
         if let Ok(v) = std::env::var("RUNE_AUTH__HMAC_SECRET") {
             self.auth.hmac_secret = if v.is_empty() { None } else { Some(v) };
         }
+        if let Ok(v) = std::env::var("RUNE_AUTH__INITIAL_ADMIN_KEY") {
+            self.auth.initial_admin_key = if v.is_empty() { None } else { Some(v) };
+        }
 
         // Store
         env_override_string!("RUNE_STORE__DB_PATH", self.store.db_path);
@@ -546,5 +554,30 @@ http_port = 19999
         let config =
             AppConfig::from_path("/tmp/rune_test_m5_nonexistent/does_not_exist.toml").unwrap();
         assert_eq!(config.server.http_port, 50060); // default
+    }
+
+    #[test]
+    fn initial_admin_key_is_env_only() {
+        std::env::set_var(
+            "RUNE_AUTH__INITIAL_ADMIN_KEY",
+            "rk_envonly1234567890abcdef1234567890",
+        );
+        let mut config = AppConfig::default();
+        config.apply_env_overrides();
+        assert_eq!(
+            config.auth.initial_admin_key.as_deref(),
+            Some("rk_envonly1234567890abcdef1234567890")
+        );
+        std::env::remove_var("RUNE_AUTH__INITIAL_ADMIN_KEY");
+    }
+
+    #[test]
+    fn initial_admin_key_is_ignored_in_toml() {
+        let toml_str = r#"
+        [auth]
+        initial_admin_key = "rk_should_be_ignored"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.auth.initial_admin_key.is_none());
     }
 }

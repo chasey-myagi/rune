@@ -903,7 +903,7 @@ async fn test_fix_timeout_trips_cb_but_never_retries_integration() {
     let elapsed = start.elapsed();
 
     assert!(
-        matches!(result3, Err(RuneError::Unavailable)),
+        matches!(result3, Err(RuneError::CircuitOpen { .. })),
         "call 3 should fast-fail, got {:?}",
         result3
     );

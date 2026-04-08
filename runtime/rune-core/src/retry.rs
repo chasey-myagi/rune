@@ -17,6 +17,10 @@ pub enum RuneErrorKind {
     InvalidInput,
     NotFound,
     Cancelled,
+    RateLimited,
+    CircuitOpen,
+    Unauthorized,
+    Forbidden,
 }
 
 pub fn parse_retryable_errors(strings: &[String]) -> HashSet<RuneErrorKind> {
@@ -30,6 +34,10 @@ pub fn parse_retryable_errors(strings: &[String]) -> HashSet<RuneErrorKind> {
             "invalid_input" | "invalidinput" => Some(RuneErrorKind::InvalidInput),
             "not_found" | "notfound" => Some(RuneErrorKind::NotFound),
             "cancelled" | "canceled" => Some(RuneErrorKind::Cancelled),
+            "rate_limited" | "ratelimited" => Some(RuneErrorKind::RateLimited),
+            "circuit_open" | "circuitopen" => Some(RuneErrorKind::CircuitOpen),
+            "unauthorized" => Some(RuneErrorKind::Unauthorized),
+            "forbidden" => Some(RuneErrorKind::Forbidden),
             _ => None,
         })
         .collect()
@@ -44,6 +52,10 @@ fn error_kind(err: &RuneError) -> RuneErrorKind {
         RuneError::InvalidInput(_) => RuneErrorKind::InvalidInput,
         RuneError::NotFound(_) => RuneErrorKind::NotFound,
         RuneError::Cancelled => RuneErrorKind::Cancelled,
+        RuneError::RateLimited { .. } => RuneErrorKind::RateLimited,
+        RuneError::CircuitOpen { .. } => RuneErrorKind::CircuitOpen,
+        RuneError::Unauthorized(_) => RuneErrorKind::Unauthorized,
+        RuneError::Forbidden(_) => RuneErrorKind::Forbidden,
     }
 }
 
@@ -64,7 +76,12 @@ pub fn is_retryable(err: &RuneError, retryable: &HashSet<RuneErrorKind>) -> bool
 fn is_client_error(err: &RuneError) -> bool {
     matches!(
         error_kind(err),
-        RuneErrorKind::InvalidInput | RuneErrorKind::NotFound | RuneErrorKind::Cancelled
+        RuneErrorKind::InvalidInput
+            | RuneErrorKind::NotFound
+            | RuneErrorKind::Cancelled
+            | RuneErrorKind::RateLimited
+            | RuneErrorKind::Unauthorized
+            | RuneErrorKind::Forbidden
     )
 }
 
@@ -210,9 +227,28 @@ impl RuneInvoker for RetryInvoker {
 
         let _permit = self.circuit_breaker.can_execute()?;
         match self.inner.invoke_stream(ctx, input).await {
-            Ok(receiver) => {
-                self.circuit_breaker.record_success();
-                Ok(receiver)
+            Ok(mut inner_rx) => {
+                // Wrap the receiver so success/failure is recorded when the
+                // stream actually finishes, not at connection time.
+                let cb = Arc::clone(&self.circuit_breaker);
+                let (tx, rx) = mpsc::channel(32);
+                tokio::spawn(async move {
+                    let mut saw_error = false;
+                    while let Some(item) = inner_rx.recv().await {
+                        if item.is_err() {
+                            saw_error = true;
+                        }
+                        if tx.send(item).await.is_err() {
+                            break;
+                        }
+                    }
+                    if saw_error {
+                        cb.record_failure();
+                    } else {
+                        cb.record_success();
+                    }
+                });
+                Ok(rx)
             }
             Err(err) => {
                 if !is_client_error(&err) {
@@ -425,7 +461,7 @@ mod tests {
         let second = invoker.invoke_once(test_ctx(), Bytes::new()).await;
 
         assert!(matches!(first, Err(RuneError::Unavailable)));
-        assert!(matches!(second, Err(RuneError::Unavailable)));
+        assert!(matches!(second, Err(RuneError::CircuitOpen { .. })));
         assert_eq!(inner.call_count.load(Ordering::Relaxed), 1);
         assert_eq!(breaker.state(), CBState::Open);
     }

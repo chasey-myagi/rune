@@ -11,10 +11,16 @@ use crate::pool::ConnectionPool;
 pub enum StoreError {
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
+    #[error("serialization error: {0}")]
+    Serde(#[from] serde_json::Error),
     #[error("invalid key type: {0}")]
     InvalidKeyType(String),
+    #[error("invalid key format: {0}")]
+    InvalidKeyFormat(String),
     #[error("invalid task status: {0}")]
     InvalidTaskStatus(String),
+    #[error("flow already exists: {0}")]
+    DuplicateFlow(String),
     #[error("blocking task failed: {0}")]
     BlockingTask(#[from] tokio::task::JoinError),
 }
@@ -159,10 +165,18 @@ impl RuneStore {
                 last_seen       TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS flows (
+                name            TEXT PRIMARY KEY,
+                definition_json TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_call_logs_rune ON call_logs(rune_name);
             CREATE INDEX IF NOT EXISTS idx_call_logs_ts ON call_logs(timestamp);
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
             CREATE INDEX IF NOT EXISTS idx_tasks_rune ON tasks(rune_name);
+            CREATE INDEX IF NOT EXISTS idx_flows_updated_at ON flows(updated_at);
             ",
         )?;
         Ok(())

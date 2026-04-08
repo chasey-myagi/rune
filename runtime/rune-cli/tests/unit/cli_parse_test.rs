@@ -258,6 +258,48 @@ fn key_revoke() {
     }
 }
 
+#[test]
+fn key_bootstrap_defaults() {
+    let cli = parse(&["key", "bootstrap"]);
+    match cli.command {
+        Commands::Key(KeyCommands::Bootstrap {
+            label,
+            db_path,
+            force,
+        }) => {
+            assert_eq!(label, "bootstrap-admin");
+            assert_eq!(db_path, "rune.db");
+            assert!(!force);
+        }
+        _ => panic!("expected Key Bootstrap"),
+    }
+}
+
+#[test]
+fn key_bootstrap_custom_values() {
+    let cli = parse(&[
+        "key",
+        "bootstrap",
+        "--label",
+        "ops-admin",
+        "--db-path",
+        "/tmp/rune.db",
+        "--force",
+    ]);
+    match cli.command {
+        Commands::Key(KeyCommands::Bootstrap {
+            label,
+            db_path,
+            force,
+        }) => {
+            assert_eq!(label, "ops-admin");
+            assert_eq!(db_path, "/tmp/rune.db");
+            assert!(force);
+        }
+        _ => panic!("expected Key Bootstrap"),
+    }
+}
+
 // ── Flow ───────────────────────────────────────────────────────
 
 #[test]

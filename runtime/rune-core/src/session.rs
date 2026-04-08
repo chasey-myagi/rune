@@ -220,7 +220,7 @@ impl SessionManager {
                     let permits = if max_conc > 0 {
                         max_conc as usize
                     } else {
-                        usize::MAX >> 1
+                        tokio::sync::Semaphore::MAX_PERMITS
                     };
                     semaphore.add_permits(permits);
 

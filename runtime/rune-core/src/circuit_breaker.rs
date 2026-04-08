@@ -65,7 +65,9 @@ impl CircuitBreaker {
                     .map(|opened_at| opened_at.elapsed() >= reset_timeout)
                     .unwrap_or(true);
                 if !can_probe {
-                    return Err(RuneError::Unavailable);
+                    return Err(RuneError::CircuitOpen {
+                        rune_name: String::new(),
+                    });
                 }
 
                 inner.state = CBState::HalfOpen;
@@ -142,7 +144,9 @@ impl CircuitBreaker {
     fn take_half_open_permit(self: &Arc<Self>, inner: &mut CBInner) -> Result<CBPermit, RuneError> {
         let max_permits = self.config.half_open_max_permits.max(1);
         if inner.half_open_permits >= max_permits {
-            return Err(RuneError::Unavailable);
+            return Err(RuneError::CircuitOpen {
+                rune_name: String::new(),
+            });
         }
         inner.half_open_permits += 1;
         Ok(CBPermit::new(Arc::clone(self), true))

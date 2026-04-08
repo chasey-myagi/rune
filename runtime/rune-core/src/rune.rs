@@ -57,6 +57,14 @@ pub enum RuneError {
     Timeout,
     #[error("cancelled")]
     Cancelled,
+    #[error("rate limited: retry after {retry_after_secs}s")]
+    RateLimited { retry_after_secs: u64 },
+    #[error("circuit open for rune '{rune_name}'")]
+    CircuitOpen { rune_name: String },
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -108,5 +116,26 @@ impl StreamSender {
     pub async fn end(self) -> Result<(), RuneError> {
         // Drop self, closing the channel
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuneError;
+
+    #[test]
+    fn rate_limited_error_formats_retry_after() {
+        let err = RuneError::RateLimited {
+            retry_after_secs: 12,
+        };
+        assert_eq!(err.to_string(), "rate limited: retry after 12s");
+    }
+
+    #[test]
+    fn circuit_open_error_mentions_rune_name() {
+        let err = RuneError::CircuitOpen {
+            rune_name: "echo".to_string(),
+        };
+        assert_eq!(err.to_string(), "circuit open for rune 'echo'");
     }
 }

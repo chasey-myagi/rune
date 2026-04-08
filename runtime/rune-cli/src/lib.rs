@@ -209,6 +209,21 @@ pub enum KeyCommands {
         /// Key ID to revoke
         key_id: String,
     },
+
+    /// Bootstrap the first admin key by writing directly to the local database
+    Bootstrap {
+        /// Human-readable label
+        #[arg(long, default_value = "bootstrap-admin")]
+        label: String,
+
+        /// Path to the Rune database file
+        #[arg(long, default_value = "rune.db")]
+        db_path: String,
+
+        /// Create an additional admin key even if one already exists
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

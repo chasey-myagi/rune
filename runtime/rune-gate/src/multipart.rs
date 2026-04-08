@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use crate::error::error_response;
+use crate::error::error_response_with_id;
 use crate::state::GateState;
 use axum::http::StatusCode;
 
@@ -85,10 +85,11 @@ pub async fn parse_multipart(
     let boundary = match extract_boundary(content_type) {
         Some(b) => b,
         None => {
-            return Err(error_response(
+            return Err(error_response_with_id(
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
                 "missing boundary in multipart content-type",
+                Some(request_id),
             ));
         }
     };
@@ -109,10 +110,11 @@ pub async fn parse_multipart(
                 for fid in &file_ids {
                     state.rune.file_broker.remove(fid);
                 }
-                return Err(error_response(
+                return Err(error_response_with_id(
                     StatusCode::BAD_REQUEST,
                     "BAD_REQUEST",
                     &format!("failed to parse multipart body: {}", e),
+                    Some(request_id),
                 ));
             }
         };
@@ -137,10 +139,11 @@ pub async fn parse_multipart(
                 for fid in &file_ids {
                     state.rune.file_broker.remove(fid);
                 }
-                return Err(error_response(
+                return Err(error_response_with_id(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "PAYLOAD_TOO_LARGE",
                     "total upload size exceeds maximum allowed size",
+                    Some(request_id),
                 ));
             }
 

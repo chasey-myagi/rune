@@ -26,6 +26,7 @@ libc = "0.2"
 urlencoding = "2"
 comfy-table = "7"
 chrono = { version = "0.4", features = ["serde"] }
+rune-store = { path = "../rune-store" }
 
 [[test]]
 name = "cli_parse_test"

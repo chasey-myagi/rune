@@ -71,6 +71,42 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing::info!(db_path = %config.store.db_path, "store initialized");
 
+    if config.auth.enabled && !config.server.dev_mode {
+        if let Some(initial_admin_key) = config.auth.initial_admin_key.as_deref() {
+            match store.has_admin_key().await {
+                Ok(true) => {
+                    tracing::debug!(
+                        "admin key already exists; skipping RUNE_AUTH__INITIAL_ADMIN_KEY bootstrap"
+                    );
+                }
+                Ok(false) => match store
+                    .import_admin_key(initial_admin_key, "initial-admin-from-env")
+                    .await
+                {
+                    Ok(api_key) => {
+                        tracing::info!(
+                            key_prefix = %api_key.key_prefix,
+                            "bootstrapped admin key from RUNE_AUTH__INITIAL_ADMIN_KEY"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "failed to bootstrap admin key from RUNE_AUTH__INITIAL_ADMIN_KEY — aborting"
+                        );
+                        std::process::exit(1);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to check existing admin keys before bootstrap; skipping env bootstrap"
+                    );
+                }
+            }
+        }
+    }
+
     // ── Key Verifier ──
     let key_verifier: Arc<dyn KeyVerifier> = if config.auth.enabled {
         let hmac_secret = config.auth.hmac_secret.clone().unwrap_or_else(|| {
@@ -195,6 +231,26 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&running.resolver),
         config.default_timeout(),
     );
+
+    match store.list_flows().await {
+        Ok(flows) => {
+            let flow_count = flows.len();
+            for flow in flows {
+                let flow_name = flow.name.clone();
+                if let Err(e) = flow_engine.register(flow) {
+                    tracing::warn!(
+                        flow = %flow_name,
+                        error = %e,
+                        "failed to restore persisted flow"
+                    );
+                }
+            }
+            tracing::info!(flow_count, "loaded persisted flows");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load persisted flows");
+        }
+    }
 
     // Demo flows — only registered in dev mode
     if config.server.dev_mode {

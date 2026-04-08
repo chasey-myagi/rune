@@ -84,6 +84,11 @@ async fn main() -> anyhow::Result<()> {
             KeyCommands::Revoke { key_id } => {
                 rune_cli::commands::key::revoke(&client, &key_id, json_mode).await
             }
+            KeyCommands::Bootstrap {
+                label,
+                db_path,
+                force,
+            } => rune_cli::commands::key::bootstrap(&db_path, &label, force, json_mode).await,
         },
         Commands::Flow(cmd) => match cmd {
             FlowCommands::Register { file } => {

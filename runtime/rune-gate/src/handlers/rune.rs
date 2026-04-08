@@ -16,7 +16,7 @@ use rune_core::rune::RuneContext;
 use rune_schema::validator::{validate_input, validate_output};
 use rune_store::{CallLog, TaskStatus};
 
-use crate::error::{error_response, map_error};
+use crate::error::{error_response, error_response_with_id, map_error};
 use crate::multipart::{is_multipart, parse_multipart, FileMetadata};
 use crate::state::{unique_request_id, GateState, RunParams};
 
@@ -189,16 +189,17 @@ pub async fn execute_rune(
             (None, None, false)
         };
 
+    let request_id = unique_request_id();
+
     // Check supports_stream
     if params.stream.unwrap_or(false) && !supports_stream {
-        return error_response(
+        return error_response_with_id(
             StatusCode::BAD_REQUEST,
             "STREAM_NOT_SUPPORTED",
             &format!("rune '{}' does not support streaming", rune_name),
+            Some(&request_id),
         );
     }
-
-    let request_id = unique_request_id();
 
     // Handle multipart vs regular body
     let (rune_input, file_metadata, file_ids) = if is_multipart(content_type) {
@@ -217,10 +218,11 @@ pub async fn execute_rune(
     let should_validate = file_metadata.is_none() || !rune_input.is_empty();
     if should_validate {
         if let Err(e) = validate_input(input_schema.as_deref(), &rune_input) {
-            return error_response(
+            return error_response_with_id(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "VALIDATION_FAILED",
                 &e.to_string(),
+                Some(&request_id),
             );
         }
     }
@@ -312,15 +314,17 @@ pub async fn sync_execute(
     body: Bytes,
     output_schema: Option<String>,
 ) -> (axum::response::Response, i64) {
+    let request_id = ctx.request_id.clone();
     match invoker.invoke_once(ctx, body).await {
         Ok(output) => {
             // Output schema validation
             if let Err(e) = validate_output(output_schema.as_deref(), &output) {
                 return (
-                    error_response(
+                    error_response_with_id(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "OUTPUT_VALIDATION_FAILED",
                         &e.to_string(),
+                        Some(&request_id),
                     ),
                     0,
                 );
@@ -338,7 +342,7 @@ pub async fn sync_execute(
                 }
             }
         }
-        Err(e) => (map_error(e), 0),
+        Err(e) => (map_error(e, Some(&request_id)), 0),
     }
 }
 
@@ -351,6 +355,7 @@ pub async fn sync_execute_multipart(
     file_ids: &[String],
     state: &GateState,
 ) -> (axum::response::Response, i64) {
+    let request_id = ctx.request_id.clone();
     // If there are no files, just run the normal path
     if files.is_empty() {
         return sync_execute(invoker, ctx, body, output_schema).await;
@@ -403,7 +408,7 @@ pub async fn sync_execute_multipart(
             for fid in file_ids {
                 state.rune.file_broker.remove(fid);
             }
-            (map_error(e), 0)
+            (map_error(e, Some(&request_id)), 0)
         }
     }
 }
@@ -507,10 +512,11 @@ pub async fn async_execute(
         .insert_task(&task_id, &rune_name, Some(&input_str))
         .await
     {
-        return error_response(
+        return error_response_with_id(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL",
             &e.to_string(),
+            Some(&request_id),
         );
     }
     if let Err(e) = state
@@ -519,10 +525,11 @@ pub async fn async_execute(
         .update_task_status(&task_id, TaskStatus::Running, None, None)
         .await
     {
-        return error_response(
+        return error_response_with_id(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL",
             &e.to_string(),
+            Some(&request_id),
         );
     }
 

@@ -1019,6 +1019,91 @@ async fn test_mixed_sync_and_stream_runes() {
     );
 }
 
+#[tokio::test]
+async fn test_stream_not_supported_error_includes_request_id() {
+    let state = make_state(false);
+    let app = gate::build_router(state, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/runes/echo/run?stream=true")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"hello":"world"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 400);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "STREAM_NOT_SUPPORTED");
+    assert!(json["error"]["request_id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_flow_create_and_delete_write_through_to_store() {
+    let state = make_state(false);
+    let app = gate::build_router(state.clone(), None);
+    let flow_json = serde_json::json!({
+        "name": "persisted-flow",
+        "steps": [
+            {
+                "name": "step-a",
+                "rune": "echo",
+                "depends_on": [],
+                "condition": null,
+                "input_mapping": null
+            }
+        ],
+        "gate_path": null
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/flows")
+                .header("content-type", "application/json")
+                .body(Body::from(flow_json.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    assert!(state
+        .admin
+        .store
+        .get_flow("persisted-flow")
+        .await
+        .unwrap()
+        .is_some());
+
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/flows/persisted-flow")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 204);
+    assert!(state
+        .admin
+        .store
+        .get_flow("persisted-flow")
+        .await
+        .unwrap()
+        .is_none());
+}
+
 // ===========================================================================
 // #18  Stats accumulate correctly across multiple runes
 // ===========================================================================

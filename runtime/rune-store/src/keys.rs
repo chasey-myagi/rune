@@ -1,7 +1,7 @@
 use crate::key_cache::CacheResult;
 use crate::models::{ApiKey, KeyType};
 use crate::pool::ConnectionPool;
-use crate::store::{RuneStore, StoreResult};
+use crate::store::{RuneStore, StoreError, StoreResult};
 use hmac::{Hmac, Mac};
 use rand::TryRngCore;
 use rusqlite::{Connection, Error as SqlError, Row};
@@ -19,29 +19,38 @@ impl RuneStore {
         let pool = self.pool.clone();
         let label = label.to_string();
         tokio::task::spawn_blocking(move || {
-            let raw_key = generate_raw_key();
-            let key_prefix = format!("rk_{}", &raw_key[3..19]);
-            let key_hash = hash_key(&raw_key);
-            let now = now_iso8601();
             let conn = pool.writer();
-            conn.execute(
-                "INSERT INTO api_keys (key_prefix, key_hash, key_type, label, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![key_prefix, key_hash, key_type.as_str(), label, now],
-            )?;
-            let id = conn.last_insert_rowid();
-            Ok(CreateKeyResult {
-                raw_key: raw_key.clone(),
-                api_key: ApiKey {
-                    id,
-                    key_prefix,
-                    key_hash: Some(key_hash),
-                    key_type,
-                    label,
-                    created_at: now,
-                    revoked_at: None,
-                },
-            })
+            insert_generated_key(&conn, key_type, &label)
+        })
+        .await?
+    }
+
+    pub async fn has_admin_key(&self) -> StoreResult<bool> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.reader();
+            has_active_admin_key(&conn)
+        })
+        .await?
+    }
+
+    pub fn has_admin_key_sync(&self) -> StoreResult<bool> {
+        let conn = self.pool.reader();
+        has_active_admin_key(&conn)
+    }
+
+    pub fn bootstrap_admin_key(&self, label: &str) -> StoreResult<CreateKeyResult> {
+        let conn = self.pool.writer();
+        insert_generated_key(&conn, KeyType::Admin, label)
+    }
+
+    pub async fn import_admin_key(&self, raw_key: &str, label: &str) -> StoreResult<ApiKey> {
+        let pool = self.pool.clone();
+        let raw_key = raw_key.to_string();
+        let label = label.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.writer();
+            insert_raw_key(&conn, &raw_key, KeyType::Admin, &label)
         })
         .await?
     }
@@ -203,6 +212,56 @@ fn hmac_key(raw_key: &str, secret: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC-SHA256 accepts any key size");
     mac.update(raw_key.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+fn insert_generated_key(
+    conn: &Connection,
+    key_type: KeyType,
+    label: &str,
+) -> StoreResult<CreateKeyResult> {
+    let raw_key = generate_raw_key();
+    let api_key = insert_raw_key(conn, &raw_key, key_type, label)?;
+    Ok(CreateKeyResult { raw_key, api_key })
+}
+
+fn insert_raw_key(
+    conn: &Connection,
+    raw_key: &str,
+    key_type: KeyType,
+    label: &str,
+) -> StoreResult<ApiKey> {
+    if !raw_key.starts_with("rk_") || raw_key.len() < 19 {
+        return Err(StoreError::InvalidKeyFormat(
+            "expected a key starting with 'rk_' and at least 19 characters".to_string(),
+        ));
+    }
+    let key_prefix = format!("rk_{}", &raw_key[3..19]);
+    let key_hash = hash_key(raw_key);
+    let now = now_iso8601();
+    conn.execute(
+        "INSERT INTO api_keys (key_prefix, key_hash, key_type, label, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![key_prefix, key_hash, key_type.as_str(), label, now],
+    )?;
+    let id = conn.last_insert_rowid();
+    Ok(ApiKey {
+        id,
+        key_prefix,
+        key_hash: Some(key_hash),
+        key_type,
+        label: label.to_string(),
+        created_at: now,
+        revoked_at: None,
+    })
+}
+
+fn has_active_admin_key(conn: &Connection) -> StoreResult<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM api_keys WHERE key_type = 'admin' AND revoked_at IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 fn load_key_by_hashes(
@@ -442,5 +501,49 @@ mod tests {
             correct_type.is_some(),
             "typed negative cache entry must not affect the correct key type"
         );
+    }
+
+    #[tokio::test]
+    async fn admin_key_presence_checks_ignore_revoked_keys() {
+        let store = crate::store::RuneStore::open_in_memory().unwrap();
+        assert!(!store.has_admin_key().await.unwrap());
+        assert!(!store.has_admin_key_sync().unwrap());
+
+        let result = store.bootstrap_admin_key("bootstrap-admin").unwrap();
+        assert!(store.has_admin_key().await.unwrap());
+        assert!(store.has_admin_key_sync().unwrap());
+
+        store.revoke_key(result.api_key.id).await.unwrap();
+        assert!(!store.has_admin_key().await.unwrap());
+        assert!(!store.has_admin_key_sync().unwrap());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_admin_key_creates_verifiable_admin_key() {
+        let store = crate::store::RuneStore::open_in_memory().unwrap();
+
+        let result = store.bootstrap_admin_key("bootstrap-admin").unwrap();
+
+        let verified = store
+            .verify_key(&result.raw_key, KeyType::Admin)
+            .await
+            .unwrap();
+        assert!(verified.is_some());
+        assert_eq!(verified.unwrap().label, "bootstrap-admin");
+    }
+
+    #[tokio::test]
+    async fn import_admin_key_round_trips() {
+        let store = crate::store::RuneStore::open_in_memory().unwrap();
+        let raw_key = "rk_1234567890abcdef1234567890abcdef";
+
+        let imported = store
+            .import_admin_key(raw_key, "initial-admin-from-env")
+            .await
+            .unwrap();
+        assert_eq!(imported.key_type, KeyType::Admin);
+
+        let verified = store.verify_key(raw_key, KeyType::Admin).await.unwrap();
+        assert!(verified.is_some());
     }
 }

@@ -10,10 +10,10 @@ use axum::{
 use bytes::Bytes;
 use rune_flow::dag::FlowDefinition;
 use rune_flow::engine::FlowRunner;
-use rune_store::TaskStatus;
+use rune_store::{StoreError, TaskStatus};
 use tokio::sync::mpsc;
 
-use crate::error::{error_response, map_flow_error};
+use crate::error::{error_response, error_response_with_id, map_flow_error};
 use crate::state::{unique_request_id, GateState, RunParams};
 
 pub async fn create_flow(
@@ -68,9 +68,10 @@ pub async fn create_flow(
         );
     }
 
+    // Register in engine first (validates DAG + holds write lock for
+    // atomicity), then persist to store. If store fails, rollback engine.
     let mut engine = state.flow.flow_engine.write().await;
 
-    // Check for duplicate name
     if engine.get(&flow.name).is_some() {
         return error_response(
             StatusCode::CONFLICT,
@@ -79,9 +80,28 @@ pub async fn create_flow(
         );
     }
 
-    // Register (validates DAG)
     if let Err(e) = engine.register(flow.clone()) {
         return error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string());
+    }
+
+    match state.admin.store.create_flow(&flow).await {
+        Ok(()) => {}
+        Err(StoreError::DuplicateFlow(_)) => {
+            engine.remove(&flow.name);
+            return error_response(
+                StatusCode::CONFLICT,
+                "CONFLICT",
+                &format!("flow '{}' already exists", flow.name),
+            );
+        }
+        Err(e) => {
+            engine.remove(&flow.name);
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL",
+                &e.to_string(),
+            );
+        }
     }
 
     (StatusCode::CREATED, Json(serde_json::json!(flow))).into_response()
@@ -124,15 +144,32 @@ pub async fn delete_flow(
     State(state): State<GateState>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    let mut engine = state.flow.flow_engine.write().await;
-    if engine.remove(&name) {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        error_response(
-            StatusCode::NOT_FOUND,
-            "FLOW_NOT_FOUND",
-            &format!("flow '{}' not found", name),
-        )
+    match state.admin.store.delete_flow(&name).await {
+        Ok(true) => {
+            let mut engine = state.flow.flow_engine.write().await;
+            engine.remove(&name);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => {
+            // In dev mode, built-in flows (pipeline, single, empty) are
+            // registered in-memory without a store row. Fall back to
+            // removing from the engine directly.
+            let mut engine = state.flow.flow_engine.write().await;
+            if engine.remove(&name) {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                error_response(
+                    StatusCode::NOT_FOUND,
+                    "FLOW_NOT_FOUND",
+                    &format!("flow '{}' not found", name),
+                )
+            }
+        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }
 
@@ -142,13 +179,15 @@ pub async fn run_flow(
     Query(params): Query<RunParams>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
+    let request_id = unique_request_id();
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
         Ok(b) => b,
         Err(_) => {
-            return error_response(
+            return error_response_with_id(
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
                 "failed to read body",
+                Some(&request_id),
             )
         }
     };
@@ -162,10 +201,11 @@ pub async fn run_flow(
 
     // Validate JSON
     if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
-        return error_response(
+        return error_response_with_id(
             StatusCode::UNPROCESSABLE_ENTITY,
             "INVALID_INPUT",
             "invalid JSON",
+            Some(&request_id),
         );
     }
 
@@ -177,10 +217,11 @@ pub async fn run_flow(
         let flow = match engine.get(&name) {
             Some(f) => f.clone(),
             None => {
-                return error_response(
+                return error_response_with_id(
                     StatusCode::NOT_FOUND,
                     "FLOW_NOT_FOUND",
                     &format!("flow '{}' not found", name),
+                    Some(&request_id),
                 );
             }
         };
@@ -212,7 +253,7 @@ pub async fn run_flow(
             )
                 .into_response()
         }
-        Err(e) => map_flow_error(e),
+        Err(e) => map_flow_error(e, Some(&request_id)),
     }
 }
 
@@ -232,10 +273,11 @@ pub async fn run_flow_async(
         .insert_task(&task_id, &format!("flow:{}", flow_name), Some(&input_str))
         .await
     {
-        return error_response(
+        return error_response_with_id(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL",
             &e.to_string(),
+            Some(&task_id),
         );
     }
     let _ = state

@@ -1,0 +1,25 @@
+name: CI
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [main, dev]
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/sync-proto.sh
+      - run: git diff --exit-code -- sdks/typescript/proto/rune.proto sdks/python/src/rune/_proto
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features
