@@ -1,5 +1,8 @@
+use crate::circuit_breaker::{CircuitBreakerRegistry, CircuitBreakerSnapshot};
+use crate::config::RetryConfig;
 use crate::invoker::RuneInvoker;
 use crate::resolver::Resolver;
+use crate::retry::RetryInvoker;
 use crate::rune::RuneConfig;
 use dashmap::DashMap;
 use std::sync::{Arc, Mutex};
@@ -19,6 +22,8 @@ pub struct Relay {
     gate_path_index: DashMap<String, String>,
     /// Serializes register/remove_caster to prevent race conditions on gate_path_index
     write_lock: Mutex<()>,
+    circuit_breaker_registry: Option<Arc<CircuitBreakerRegistry>>,
+    retry_config: Option<RetryConfig>,
 }
 
 impl Default for Relay {
@@ -33,6 +38,20 @@ impl Relay {
             entries: DashMap::new(),
             gate_path_index: DashMap::new(),
             write_lock: Mutex::new(()),
+            circuit_breaker_registry: None,
+            retry_config: None,
+        }
+    }
+
+    pub fn with_retry(config: RetryConfig) -> Self {
+        Self {
+            entries: DashMap::new(),
+            gate_path_index: DashMap::new(),
+            write_lock: Mutex::new(()),
+            circuit_breaker_registry: Some(Arc::new(CircuitBreakerRegistry::new(
+                config.circuit_breaker.clone(),
+            ))),
+            retry_config: Some(config),
         }
     }
 
@@ -85,10 +104,28 @@ impl Relay {
             self.gate_path_index.insert(index_key, config.name.clone());
         }
 
+        // Only wrap remote invokers (caster_id.is_some()) with retry + circuit breaker.
+        // Local invokers (registered via App::rune()) have no caster_id and run in-process.
+        let actual_invoker = if let (Some(cid), Some(retry_cfg), Some(registry)) = (
+            caster_id.as_ref(),
+            self.retry_config.as_ref(),
+            self.circuit_breaker_registry.as_ref(),
+        ) {
+            let cb = registry.get_or_create(cid);
+            Arc::new(RetryInvoker::new(
+                invoker,
+                cid.clone(),
+                retry_cfg.clone(),
+                cb,
+            )) as Arc<dyn RuneInvoker>
+        } else {
+            invoker
+        };
+
         let name = config.name.clone();
         self.entries.entry(name).or_default().push(RuneEntry {
             config,
-            invoker,
+            invoker: actual_invoker,
             caster_id,
         });
         Ok(())
@@ -140,6 +177,10 @@ impl Relay {
             if !still_exists {
                 self.gate_path_index.remove(&key);
             }
+        }
+
+        if let Some(registry) = &self.circuit_breaker_registry {
+            registry.remove(caster_id);
         }
     }
 
@@ -215,6 +256,17 @@ impl Relay {
             }
         }
         result
+    }
+
+    pub fn circuit_breaker_registry(&self) -> Option<Arc<CircuitBreakerRegistry>> {
+        self.circuit_breaker_registry.clone()
+    }
+
+    pub fn circuit_breaker_states(&self) -> Vec<CircuitBreakerSnapshot> {
+        self.circuit_breaker_registry
+            .as_ref()
+            .map(|registry| registry.states())
+            .unwrap_or_default()
     }
 }
 

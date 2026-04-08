@@ -17,10 +17,12 @@ use rune_proto::rune_service_client::RuneServiceClient;
 use rune_proto::rune_service_server::RuneServiceServer;
 use rune_proto::*;
 
-use rune_core::config::AppConfig;
+use rune_core::circuit_breaker::CBState;
+use rune_core::config::{AppConfig, CircuitBreakerConfig, RetryConfig};
 use rune_core::grpc_service::RuneGrpcService;
 use rune_core::relay::Relay;
-use rune_core::rune::RuneError;
+use rune_core::resolver::RoundRobinResolver;
+use rune_core::rune::{RuneContext, RuneError};
 use rune_core::session::SessionManager;
 
 // ---------------------------------------------------------------------------
@@ -758,6 +760,166 @@ async fn attach_registers_multiple_runes() {
     assert!(names.contains(&"rune_b"));
     assert!(names.contains(&"rune_c"));
     assert_eq!(list.len(), 3);
+
+    tx.send(make_detach_msg("done")).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Retry + Circuit Breaker integration test (real remote invoker path)
+// ---------------------------------------------------------------------------
+
+/// Integration test: consecutive timeouts through real remote invoker path
+/// open the circuit breaker, but timeout itself is never retried.
+///
+/// Verifies the full chain: Relay::resolve → RetryInvoker → RemoteInvoker →
+/// SessionManager → gRPC → (Caster never responds) → Timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_fix_timeout_trips_cb_but_never_retries_integration() {
+    let retry_config = RetryConfig {
+        enabled: true,
+        max_retries: 3,
+        base_delay_ms: 10,
+        max_delay_ms: 50,
+        backoff_multiplier: 1.0,
+        retryable_errors: vec!["unavailable".into(), "internal".into()],
+        circuit_breaker: CircuitBreakerConfig {
+            enabled: true,
+            failure_threshold: 2,
+            success_threshold: 1,
+            reset_timeout_ms: 60_000,
+            half_open_max_permits: 1,
+        },
+    };
+
+    let config = default_session_config();
+    let relay = Arc::new(Relay::with_retry(retry_config));
+    let session_mgr = Arc::new(SessionManager::new_dev(
+        config.heartbeat_interval(),
+        config.heartbeat_timeout(),
+    ));
+
+    let (addr, _shutdown) = start_server(Arc::clone(&relay), Arc::clone(&session_mgr)).await;
+    let mut client = connect_client(addr).await;
+
+    let (tx, rx) = mpsc::channel(32);
+    let stream = ReceiverStream::new(rx);
+
+    let mut response_stream = client
+        .session(Request::new(stream))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Attach a caster that declares a rune but will NEVER respond to ExecuteRequest.
+    tx.send(make_attach_msg(
+        "caster-slow",
+        vec![make_echo_rune_decl("slow_rune")],
+        5,
+    ))
+    .await
+    .unwrap();
+
+    let ack = response_stream.message().await.unwrap().unwrap();
+    assert!(matches!(
+        ack.payload,
+        Some(session_message::Payload::AttachAck(_))
+    ));
+
+    let resolver = RoundRobinResolver::new();
+
+    // --- Call 1: timeout (not retried), CB failure count → 1 ---
+    let invoker = relay
+        .resolve("slow_rune", &resolver)
+        .expect("rune should be registered");
+    let ctx1 = RuneContext {
+        rune_name: "slow_rune".into(),
+        request_id: "timeout-1".into(),
+        context: Default::default(),
+        timeout: Duration::from_millis(200),
+    };
+    let result1 = invoker.invoke_once(ctx1, Bytes::from("ping")).await;
+    assert!(
+        matches!(result1, Err(RuneError::Timeout)),
+        "call 1 should timeout, got {:?}",
+        result1
+    );
+
+    // Drain the ExecuteRequest the caster received (we never respond).
+    let exec_msg1 = tokio::time::timeout(Duration::from_secs(2), response_stream.message())
+        .await
+        .expect("should receive execute request 1")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        exec_msg1.payload,
+        Some(session_message::Payload::Execute(_))
+    ));
+
+    // CB still Closed (1 < threshold 2)
+    let states = relay.circuit_breaker_states();
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].state, CBState::Closed);
+
+    // --- Call 2: another timeout → CB failure count → 2 → Opens ---
+    let invoker = relay.resolve("slow_rune", &resolver).unwrap();
+    let ctx2 = RuneContext {
+        rune_name: "slow_rune".into(),
+        request_id: "timeout-2".into(),
+        context: Default::default(),
+        timeout: Duration::from_millis(200),
+    };
+    let result2 = invoker.invoke_once(ctx2, Bytes::from("ping")).await;
+    assert!(matches!(result2, Err(RuneError::Timeout)));
+
+    // Drain ExecuteRequest 2
+    let exec_msg2 = tokio::time::timeout(Duration::from_secs(2), response_stream.message())
+        .await
+        .expect("should receive execute request 2")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        exec_msg2.payload,
+        Some(session_message::Payload::Execute(_))
+    ));
+
+    // CB should now be Open
+    let states = relay.circuit_breaker_states();
+    assert_eq!(
+        states[0].state,
+        CBState::Open,
+        "CB must be Open after 2 consecutive timeouts"
+    );
+
+    // --- Call 3: CB open → fast-fail Unavailable, no ExecuteRequest sent ---
+    let invoker = relay.resolve("slow_rune", &resolver).unwrap();
+    let ctx3 = RuneContext {
+        rune_name: "slow_rune".into(),
+        request_id: "fast-fail-3".into(),
+        context: Default::default(),
+        timeout: Duration::from_secs(5),
+    };
+    let start = std::time::Instant::now();
+    let result3 = invoker.invoke_once(ctx3, Bytes::from("ping")).await;
+    let elapsed = start.elapsed();
+
+    assert!(
+        matches!(result3, Err(RuneError::Unavailable)),
+        "call 3 should fast-fail, got {:?}",
+        result3
+    );
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "fast-fail should be instant, took {:?}",
+        elapsed
+    );
+
+    // Verify NO ExecuteRequest reached the caster for call 3.
+    let maybe_msg =
+        tokio::time::timeout(Duration::from_millis(100), response_stream.message()).await;
+    assert!(
+        maybe_msg.is_err(),
+        "no ExecuteRequest should reach caster when CB is open"
+    );
 
     tx.send(make_detach_msg("done")).await.unwrap();
 }

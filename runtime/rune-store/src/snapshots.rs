@@ -4,11 +4,11 @@ use crate::store::{RuneStore, StoreResult};
 
 impl RuneStore {
     pub async fn upsert_snapshot(&self, snapshot: &RuneSnapshot) -> StoreResult<()> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let snapshot = snapshot.clone();
         tokio::task::spawn_blocking(move || {
             let now = timestamp_now();
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.writer();
             conn.execute(
                 "INSERT INTO rune_snapshots \
                  (rune_name, version, description, supports_stream, \
@@ -37,9 +37,9 @@ impl RuneStore {
     }
 
     pub async fn list_snapshots(&self) -> StoreResult<Vec<RuneSnapshot>> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.reader();
             let mut stmt = conn.prepare(
                 "SELECT rune_name, version, description, supports_stream, \
                  gate_path, gate_method, last_seen \

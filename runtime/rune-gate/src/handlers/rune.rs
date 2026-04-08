@@ -257,7 +257,7 @@ pub async fn execute_rune(
     let req_id = request_id.clone();
 
     let has_files = file_metadata.is_some();
-    let response = if let Some(files) = file_metadata {
+    let (response, output_size) = if let Some(files) = file_metadata {
         sync_execute_multipart(
             invoker,
             ctx,
@@ -287,7 +287,7 @@ pub async fn execute_rune(
             latency_ms,
             status_code,
             input_size,
-            output_size: 0, // not easily available after response is built
+            output_size,
             timestamp: rune_store::now_iso8601(),
         })
         .await;
@@ -311,23 +311,34 @@ pub async fn sync_execute(
     ctx: RuneContext,
     body: Bytes,
     output_schema: Option<String>,
-) -> axum::response::Response {
+) -> (axum::response::Response, i64) {
     match invoker.invoke_once(ctx, body).await {
         Ok(output) => {
             // Output schema validation
             if let Err(e) = validate_output(output_schema.as_deref(), &output) {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "OUTPUT_VALIDATION_FAILED",
-                    &e.to_string(),
+                return (
+                    error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "OUTPUT_VALIDATION_FAILED",
+                        &e.to_string(),
+                    ),
+                    0,
                 );
             }
             match serde_json::from_slice::<serde_json::Value>(&output) {
-                Ok(json) => (StatusCode::OK, Json(json)).into_response(),
-                Err(_) => (StatusCode::OK, output).into_response(),
+                Ok(json) => {
+                    let output_size = serde_json::to_vec(&json)
+                        .map(|bytes| bytes.len() as i64)
+                        .unwrap_or(output.len() as i64);
+                    ((StatusCode::OK, Json(json)).into_response(), output_size)
+                }
+                Err(_) => {
+                    let output_size = output.len() as i64;
+                    ((StatusCode::OK, output).into_response(), output_size)
+                }
             }
         }
-        Err(e) => map_error(e),
+        Err(e) => (map_error(e), 0),
     }
 }
 
@@ -339,7 +350,7 @@ pub async fn sync_execute_multipart(
     files: Vec<FileMetadata>,
     file_ids: &[String],
     state: &GateState,
-) -> axum::response::Response {
+) -> (axum::response::Response, i64) {
     // If there are no files, just run the normal path
     if files.is_empty() {
         return sync_execute(invoker, ctx, body, output_schema).await;
@@ -379,14 +390,20 @@ pub async fn sync_execute_multipart(
                 });
             }
 
-            (StatusCode::OK, Json(response_json)).into_response()
+            let output_size = serde_json::to_vec(&response_json)
+                .map(|bytes| bytes.len() as i64)
+                .unwrap_or_default();
+            (
+                (StatusCode::OK, Json(response_json)).into_response(),
+                output_size,
+            )
         }
         Err(e) => {
             // Clean up files on error
             for fid in file_ids {
                 state.rune.file_broker.remove(fid);
             }
-            map_error(e)
+            (map_error(e), 0)
         }
     }
 }

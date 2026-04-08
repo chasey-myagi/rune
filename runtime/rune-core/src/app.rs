@@ -1,5 +1,5 @@
 use crate::auth::KeyVerifier;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, RetryConfig};
 use crate::grpc_service::RuneGrpcService;
 use crate::invoker::{LocalInvoker, LocalStreamInvoker};
 use crate::relay::Relay;
@@ -17,6 +17,14 @@ fn resolver_from_strategy(strategy: &str, session_mgr: &Arc<SessionManager>) -> 
         "least_load" => Arc::new(LeastLoadResolver::new(Arc::clone(session_mgr))),
         "priority" => Arc::new(PriorityResolver::new(Arc::new(RoundRobinResolver::new()))),
         _ => Arc::new(RoundRobinResolver::new()), // "round_robin" and fallback
+    }
+}
+
+fn build_relay(retry: &RetryConfig) -> Arc<Relay> {
+    if retry.enabled {
+        Arc::new(Relay::with_retry(retry.clone()))
+    } else {
+        Arc::new(Relay::new())
     }
 }
 
@@ -57,7 +65,7 @@ impl App {
         ));
         let resolver = resolver_from_strategy(&config.resolver.strategy, &session_mgr);
         Self {
-            relay: Arc::new(Relay::new()),
+            relay: build_relay(&config.retry),
             resolver,
             session_mgr,
             config,
@@ -74,7 +82,7 @@ impl App {
         ));
         let resolver = resolver_from_strategy(&config.resolver.strategy, &session_mgr);
         Self {
-            relay: Arc::new(Relay::new()),
+            relay: build_relay(&config.retry),
             resolver,
             session_mgr,
             config,

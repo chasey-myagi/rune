@@ -3,10 +3,10 @@ use crate::store::{RuneStore, StoreResult};
 
 impl RuneStore {
     pub async fn insert_log(&self, log: &CallLog) -> StoreResult<i64> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let log = log.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.writer();
             conn.execute(
                 "INSERT INTO call_logs \
                  (request_id, rune_name, mode, caster_id, latency_ms, \
@@ -34,10 +34,10 @@ impl RuneStore {
         rune_name: Option<&str>,
         limit: i64,
     ) -> StoreResult<Vec<CallLog>> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let rune_name = rune_name.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.reader();
             let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
                 if let Some(rn) = rune_name {
                     (
@@ -83,10 +83,10 @@ impl RuneStore {
     }
 
     pub async fn cleanup_logs_before(&self, before: &str) -> StoreResult<u64> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let before = before.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.writer();
             let deleted = conn.execute(
                 "DELETE FROM call_logs WHERE timestamp < ?1",
                 rusqlite::params![before],
@@ -97,9 +97,9 @@ impl RuneStore {
     }
 
     pub async fn call_stats(&self) -> StoreResult<(i64, Vec<(String, i64, i64)>)> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.reader();
             let total: i64 =
                 conn.query_row("SELECT COUNT(*) FROM call_logs", [], |row| row.get(0))?;
             let mut stmt = conn.prepare(
@@ -124,9 +124,9 @@ impl RuneStore {
     pub async fn call_stats_enhanced(
         &self,
     ) -> StoreResult<(i64, Vec<(String, i64, i64, f64, f64)>)> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.reader();
 
             // Query 1: Single aggregation for count, avg, success per rune
             let mut agg_stmt = conn.prepare(
