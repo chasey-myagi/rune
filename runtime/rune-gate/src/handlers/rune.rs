@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{
     extract::{Path, Query, State},
+    http::HeaderMap,
     http::StatusCode,
     response::{sse::Event, IntoResponse, Sse},
     Json,
@@ -13,12 +15,14 @@ use tokio::sync::mpsc;
 
 use rune_core::invoker::RuneInvoker;
 use rune_core::rune::RuneContext;
+use rune_core::trace::TRACE_ID_KEY;
 use rune_schema::validator::{validate_input, validate_output};
 use rune_store::{CallLog, TaskStatus};
 
 use crate::error::{error_response, error_response_with_id, map_error};
 use crate::multipart::{is_multipart, parse_multipart, FileMetadata};
 use crate::state::{unique_request_id, GateState, RunParams};
+use crate::trace_headers::{apply_trace_response_headers, context_from_headers};
 
 pub async fn run_rune(
     State(state): State<GateState>,
@@ -26,6 +30,7 @@ pub async fn run_rune(
     Query(params): Query<RunParams>,
     req: axum::extract::Request,
 ) -> impl IntoResponse {
+    let headers = req.headers().clone();
     let content_type = req
         .headers()
         .get("content-type")
@@ -58,7 +63,16 @@ pub async fn run_rune(
         }
     };
 
-    execute_rune(&state, &name, params, body, &content_type, &labels).await
+    execute_rune(
+        &state,
+        &name,
+        params,
+        body,
+        &content_type,
+        &labels,
+        &headers,
+    )
+    .await
 }
 
 /// gate_path dynamic routing: find rune by matching path
@@ -69,6 +83,7 @@ pub async fn dynamic_rune_handler(
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
+    let headers = req.headers().clone();
     let content_type = req
         .headers()
         .get("content-type")
@@ -116,7 +131,16 @@ pub async fn dynamic_rune_handler(
 
     let params: RunParams = serde_urlencoded::from_str(&query).unwrap_or_default();
 
-    execute_rune(&state, &rune_name, params, body, &content_type, &labels).await
+    execute_rune(
+        &state,
+        &rune_name,
+        params,
+        body,
+        &content_type,
+        &labels,
+        &headers,
+    )
+    .await
 }
 
 /// Parse X-Rune-Labels header value into a HashMap.
@@ -144,7 +168,25 @@ pub async fn execute_rune(
     body: Bytes,
     content_type: &str,
     labels: &std::collections::HashMap<String, String>,
+    headers: &HeaderMap,
 ) -> axum::response::Response {
+    let request_id = unique_request_id();
+    let context = context_from_headers(headers);
+    let mode = if params.async_mode.unwrap_or(false) {
+        "async"
+    } else if params.stream.unwrap_or(false) {
+        "stream"
+    } else {
+        "sync"
+    };
+    tracing::info!(
+        trace_id = %context.get(TRACE_ID_KEY).map(String::as_str).unwrap_or(""),
+        request_id = %request_id,
+        rune_name = %rune_name,
+        mode = %mode,
+        "gate invoke"
+    );
+
     // Use label-based routing if labels are provided
     let invoker = if labels.is_empty() {
         state.rune.relay.resolve(rune_name, &*state.rune.resolver)
@@ -159,16 +201,26 @@ pub async fn execute_rune(
         None => {
             // If labels were specified but no match, return 503 (no matching caster)
             if !labels.is_empty() {
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "NO_MATCHING_CASTER",
-                    &format!("no caster matching labels for rune '{}'", rune_name),
+                return traced_response(
+                    error_response_with_id(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "NO_MATCHING_CASTER",
+                        &format!("no caster matching labels for rune '{}'", rune_name),
+                        Some(&request_id),
+                    ),
+                    &request_id,
+                    &context,
                 );
             }
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "NOT_FOUND",
-                &format!("rune '{}' not found", rune_name),
+            return traced_response(
+                error_response_with_id(
+                    StatusCode::NOT_FOUND,
+                    "NOT_FOUND",
+                    &format!("rune '{}' not found", rune_name),
+                    Some(&request_id),
+                ),
+                &request_id,
+                &context,
             );
         }
     };
@@ -189,15 +241,17 @@ pub async fn execute_rune(
             (None, None, false)
         };
 
-    let request_id = unique_request_id();
-
     // Check supports_stream
     if params.stream.unwrap_or(false) && !supports_stream {
-        return error_response_with_id(
-            StatusCode::BAD_REQUEST,
-            "STREAM_NOT_SUPPORTED",
-            &format!("rune '{}' does not support streaming", rune_name),
-            Some(&request_id),
+        return traced_response(
+            error_response_with_id(
+                StatusCode::BAD_REQUEST,
+                "STREAM_NOT_SUPPORTED",
+                &format!("rune '{}' does not support streaming", rune_name),
+                Some(&request_id),
+            ),
+            &request_id,
+            &context,
         );
     }
 
@@ -208,7 +262,7 @@ pub async fn execute_rune(
                 let rune_input = result.json_input.unwrap_or_default();
                 (rune_input, Some(result.files), result.file_ids)
             }
-            Err(err_response) => return err_response,
+            Err(err_response) => return traced_response(err_response, &request_id, &context),
         }
     } else {
         (body, None, Vec::new())
@@ -218,28 +272,23 @@ pub async fn execute_rune(
     let should_validate = file_metadata.is_none() || !rune_input.is_empty();
     if should_validate {
         if let Err(e) = validate_input(input_schema.as_deref(), &rune_input) {
-            return error_response_with_id(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "VALIDATION_FAILED",
-                &e.to_string(),
-                Some(&request_id),
+            return traced_response(
+                error_response_with_id(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "VALIDATION_FAILED",
+                    &e.to_string(),
+                    Some(&request_id),
+                ),
+                &request_id,
+                &context,
             );
         }
     }
     let ctx = RuneContext {
         rune_name: rune_name.to_string(),
         request_id: request_id.clone(),
-        context: Default::default(),
+        context,
         timeout: state.rune.request_timeout,
-    };
-
-    // Determine mode string for call log
-    let mode = if params.async_mode.unwrap_or(false) {
-        "async"
-    } else if params.stream.unwrap_or(false) {
-        "stream"
-    } else {
-        "sync"
     };
 
     // async mode
@@ -314,35 +363,43 @@ pub async fn sync_execute(
     body: Bytes,
     output_schema: Option<String>,
 ) -> (axum::response::Response, i64) {
+    let trace_context = ctx.context.clone();
     let request_id = ctx.request_id.clone();
     match invoker.invoke_once(ctx, body).await {
         Ok(output) => {
             // Output schema validation
             if let Err(e) = validate_output(output_schema.as_deref(), &output) {
-                return (
-                    error_response_with_id(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "OUTPUT_VALIDATION_FAILED",
-                        &e.to_string(),
-                        Some(&request_id),
-                    ),
-                    0,
+                let mut response = error_response_with_id(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "OUTPUT_VALIDATION_FAILED",
+                    &e.to_string(),
+                    Some(&request_id),
                 );
+                apply_trace_response_headers(&mut response, &request_id, &trace_context);
+                return (response, 0);
             }
             match serde_json::from_slice::<serde_json::Value>(&output) {
                 Ok(json) => {
                     let output_size = serde_json::to_vec(&json)
                         .map(|bytes| bytes.len() as i64)
                         .unwrap_or(output.len() as i64);
-                    ((StatusCode::OK, Json(json)).into_response(), output_size)
+                    let mut response = (StatusCode::OK, Json(json)).into_response();
+                    apply_trace_response_headers(&mut response, &request_id, &trace_context);
+                    (response, output_size)
                 }
                 Err(_) => {
                     let output_size = output.len() as i64;
-                    ((StatusCode::OK, output).into_response(), output_size)
+                    let mut response = (StatusCode::OK, output).into_response();
+                    apply_trace_response_headers(&mut response, &request_id, &trace_context);
+                    (response, output_size)
                 }
             }
         }
-        Err(e) => (map_error(e, Some(&request_id)), 0),
+        Err(e) => {
+            let mut response = map_error(e, Some(&request_id));
+            apply_trace_response_headers(&mut response, &request_id, &trace_context);
+            (response, 0)
+        }
     }
 }
 
@@ -355,6 +412,7 @@ pub async fn sync_execute_multipart(
     file_ids: &[String],
     state: &GateState,
 ) -> (axum::response::Response, i64) {
+    let trace_context = ctx.context.clone();
     let request_id = ctx.request_id.clone();
     // If there are no files, just run the normal path
     if files.is_empty() {
@@ -398,17 +456,18 @@ pub async fn sync_execute_multipart(
             let output_size = serde_json::to_vec(&response_json)
                 .map(|bytes| bytes.len() as i64)
                 .unwrap_or_default();
-            (
-                (StatusCode::OK, Json(response_json)).into_response(),
-                output_size,
-            )
+            let mut response = (StatusCode::OK, Json(response_json)).into_response();
+            apply_trace_response_headers(&mut response, &request_id, &trace_context);
+            (response, output_size)
         }
         Err(e) => {
             // Clean up files on error
             for fid in file_ids {
                 state.rune.file_broker.remove(fid);
             }
-            (map_error(e, Some(&request_id)), 0)
+            let mut response = map_error(e, Some(&request_id));
+            apply_trace_response_headers(&mut response, &request_id, &trace_context);
+            (response, 0)
         }
     }
 }
@@ -420,6 +479,7 @@ pub async fn stream_execute(
     ctx: RuneContext,
     body: Bytes,
 ) -> axum::response::Response {
+    let trace_context = ctx.context.clone();
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
 
     let state_clone = state.clone();
@@ -491,7 +551,9 @@ pub async fn stream_execute(
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    Sse::new(stream).into_response()
+    let mut response = Sse::new(stream).into_response();
+    apply_trace_response_headers(&mut response, request_id, &trace_context);
+    response
 }
 
 pub async fn async_execute(
@@ -501,6 +563,7 @@ pub async fn async_execute(
     body: Bytes,
     request_id: String,
 ) -> axum::response::Response {
+    let trace_context = ctx.context.clone();
     let task_id = request_id.clone();
     let rune_name = ctx.rune_name.clone();
     let input_str = String::from_utf8_lossy(&body).to_string();
@@ -512,11 +575,15 @@ pub async fn async_execute(
         .insert_task(&task_id, &rune_name, Some(&input_str))
         .await
     {
-        return error_response_with_id(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL",
-            &e.to_string(),
-            Some(&request_id),
+        return traced_response(
+            error_response_with_id(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL",
+                &e.to_string(),
+                Some(&request_id),
+            ),
+            &request_id,
+            &trace_context,
         );
     }
     if let Err(e) = state
@@ -525,11 +592,15 @@ pub async fn async_execute(
         .update_task_status(&task_id, TaskStatus::Running, None, None)
         .await
     {
-        return error_response_with_id(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL",
-            &e.to_string(),
-            Some(&request_id),
+        return traced_response(
+            error_response_with_id(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL",
+                &e.to_string(),
+                Some(&request_id),
+            ),
+            &request_id,
+            &trace_context,
         );
     }
 
@@ -596,12 +667,25 @@ pub async fn async_execute(
             .await;
     });
 
-    (
-        StatusCode::ACCEPTED,
-        Json(serde_json::json!({
-            "task_id": request_id,
-            "status": "running",
-        })),
+    traced_response(
+        (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "task_id": request_id,
+                "status": "running",
+            })),
+        )
+            .into_response(),
+        &request_id,
+        &trace_context,
     )
-        .into_response()
+}
+
+fn traced_response(
+    mut response: axum::response::Response,
+    request_id: &str,
+    context: &HashMap<String, String>,
+) -> axum::response::Response {
+    apply_trace_response_headers(&mut response, request_id, context);
+    response
 }

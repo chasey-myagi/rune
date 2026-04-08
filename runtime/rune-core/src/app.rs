@@ -4,7 +4,8 @@ use crate::grpc_service::RuneGrpcService;
 use crate::invoker::{LocalInvoker, LocalStreamInvoker};
 use crate::relay::Relay;
 use crate::resolver::{
-    LeastLoadResolver, PriorityResolver, RandomResolver, Resolver, RoundRobinResolver,
+    HealthAwareResolver, LeastLoadResolver, PriorityResolver, RandomResolver, Resolver,
+    RoundRobinResolver,
 };
 use crate::rune::{RuneConfig, RuneHandler, StreamRuneHandler};
 use crate::session::SessionManager;
@@ -14,8 +15,14 @@ use std::sync::Arc;
 fn resolver_from_strategy(strategy: &str, session_mgr: &Arc<SessionManager>) -> Arc<dyn Resolver> {
     match strategy {
         "random" => Arc::new(RandomResolver),
-        "least_load" => Arc::new(LeastLoadResolver::new(Arc::clone(session_mgr))),
-        "priority" => Arc::new(PriorityResolver::new(Arc::new(RoundRobinResolver::new()))),
+        "least_load" => Arc::new(HealthAwareResolver::new(
+            Arc::new(LeastLoadResolver::new(Arc::clone(session_mgr))),
+            Arc::clone(session_mgr),
+        )),
+        "priority" => Arc::new(HealthAwareResolver::new(
+            Arc::new(PriorityResolver::new(Arc::new(RoundRobinResolver::new()))),
+            Arc::clone(session_mgr),
+        )),
         _ => Arc::new(RoundRobinResolver::new()), // "round_robin" and fallback
     }
 }
@@ -50,18 +57,20 @@ impl App {
         Self {
             relay: Arc::new(Relay::new()),
             resolver: Arc::new(RoundRobinResolver::new()),
-            session_mgr: Arc::new(SessionManager::new_dev(
+            session_mgr: Arc::new(SessionManager::new_dev_with_default_max_concurrent(
                 config.heartbeat_interval(),
                 config.heartbeat_timeout(),
+                config.rate_limit.default_caster_max_concurrent as usize,
             )),
             config,
         }
     }
 
     pub fn with_config(config: AppConfig) -> Self {
-        let session_mgr = Arc::new(SessionManager::new_dev(
+        let session_mgr = Arc::new(SessionManager::new_dev_with_default_max_concurrent(
             config.heartbeat_interval(),
             config.heartbeat_timeout(),
+            config.rate_limit.default_caster_max_concurrent as usize,
         ));
         let resolver = resolver_from_strategy(&config.resolver.strategy, &session_mgr);
         Self {
@@ -74,11 +83,12 @@ impl App {
 
     pub fn with_config_and_auth(config: AppConfig, key_verifier: Arc<dyn KeyVerifier>) -> Self {
         let dev_mode = config.server.dev_mode;
-        let session_mgr = Arc::new(SessionManager::with_auth(
+        let session_mgr = Arc::new(SessionManager::with_auth_and_default_max_concurrent(
             config.heartbeat_interval(),
             config.heartbeat_timeout(),
             key_verifier,
             dev_mode,
+            config.rate_limit.default_caster_max_concurrent as usize,
         ));
         let resolver = resolver_from_strategy(&config.resolver.strategy, &session_mgr);
         Self {

@@ -11,3 +11,4 @@ pub mod rune;
 pub mod session;
 pub mod telemetry;
 pub mod time_utils;
+pub mod trace;

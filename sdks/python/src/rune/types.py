@@ -33,3 +33,11 @@ class RuneContext:
     rune_name: str
     request_id: str
     context: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def trace_id(self) -> str | None:
+        return self.context.get("trace_id")
+
+    @property
+    def parent_request_id(self) -> str | None:
+        return self.context.get("parent_request_id")

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -188,12 +189,30 @@ impl Default for RetryConfig {
 #[serde(default)]
 pub struct RateLimitConfig {
     pub requests_per_minute: u32,
+    pub per_rune: HashMap<String, PerRuneRateLimit>,
+    pub default_caster_max_concurrent: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerRuneRateLimit {
+    pub requests_per_minute: u32,
+}
+
+impl Default for PerRuneRateLimit {
+    fn default() -> Self {
+        Self {
+            requests_per_minute: 60,
+        }
+    }
 }
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
             requests_per_minute: 600,
+            per_rune: HashMap::new(),
+            default_caster_max_concurrent: 1024,
         }
     }
 }
@@ -439,6 +458,11 @@ impl AppConfig {
         env_override!(
             "RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE",
             self.rate_limit.requests_per_minute,
+            u32
+        );
+        env_override!(
+            "RUNE_RATE_LIMIT__DEFAULT_CASTER_MAX_CONCURRENT",
+            self.rate_limit.default_caster_max_concurrent,
             u32
         );
 

@@ -84,6 +84,74 @@ impl LeastLoadResolver {
     }
 }
 
+pub struct HealthAwareResolver {
+    inner: Arc<dyn Resolver>,
+    session_mgr: Arc<crate::session::SessionManager>,
+}
+
+impl HealthAwareResolver {
+    pub fn new(inner: Arc<dyn Resolver>, session_mgr: Arc<crate::session::SessionManager>) -> Self {
+        Self { inner, session_mgr }
+    }
+
+    fn rank(&self, entry: &RuneEntry) -> u8 {
+        match entry.caster_id.as_deref() {
+            None => 2,
+            Some(caster_id) => match self.session_mgr.health_status(caster_id) {
+                Some(crate::session::HealthStatusLevel::Healthy) | None => 2,
+                Some(crate::session::HealthStatusLevel::Degraded) => 1,
+                Some(crate::session::HealthStatusLevel::Unhealthy) => 0,
+            },
+        }
+    }
+}
+
+impl Resolver for HealthAwareResolver {
+    fn pick<'a>(&self, rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry> {
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Compute ranks once, collect indices of best-rank candidates.
+        let ranks: Vec<u8> = candidates.iter().map(|e| self.rank(e)).collect();
+        let best_rank = *ranks.iter().max().unwrap_or(&0);
+
+        let top_indices: Vec<usize> = ranks
+            .iter()
+            .enumerate()
+            .filter(|(_, &r)| r == best_rank)
+            .map(|(i, _)| i)
+            .collect();
+
+        if top_indices.len() == candidates.len() {
+            // All same rank — delegate directly (no clone needed).
+            return self.inner.pick(rune_name, candidates);
+        }
+
+        // Build temporary vec for inner resolver, then map back via index.
+        let top_tier: Vec<RuneEntry> = top_indices.iter().map(|&i| candidates[i].clone()).collect();
+        let picked = self.inner.pick(rune_name, &top_tier)?;
+
+        // Find which position in top_tier was picked, then map back to
+        // original candidates via top_indices. Use pointer comparison
+        // within top_tier (inner resolver returns a reference into top_tier).
+        let inner_idx = top_tier
+            .iter()
+            .position(|e| std::ptr::eq(e, picked))
+            .unwrap_or_else(|| {
+                // Fallback: value-based match (if inner resolver clones).
+                top_tier
+                    .iter()
+                    .position(|e| {
+                        e.config.name == picked.config.name && e.caster_id == picked.caster_id
+                    })
+                    .unwrap_or(0)
+            });
+
+        Some(&candidates[top_indices[inner_idx]])
+    }
+}
+
 impl Resolver for LeastLoadResolver {
     fn pick<'a>(&self, _rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry> {
         if candidates.is_empty() {
@@ -186,6 +254,7 @@ mod tests {
     use super::*;
     use crate::invoker::LocalInvoker;
     use crate::rune::{make_handler, RuneConfig};
+    use crate::session::{HealthInfo, HealthStatusLevel, SessionManager};
 
     fn make_entry(name: &str, priority: i32) -> RuneEntry {
         let handler = make_handler(|_ctx, input| async move { Ok(input) });
@@ -361,5 +430,159 @@ mod tests {
             second_ptr, original_ptr,
             "returned reference must point to original candidate slice, not a clone"
         );
+    }
+
+    /// Regression: HealthAwareResolver with round-robin inner must rotate
+    /// among same-rank candidates and return correct references.
+    #[test]
+    fn test_fix_health_aware_resolver_round_robins_among_same_rank() {
+        let session_mgr = Arc::new(SessionManager::new_dev(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+        ));
+        session_mgr.insert_test_caster("caster_a", 1);
+        session_mgr.insert_test_caster("caster_b", 1);
+
+        let resolver = HealthAwareResolver::new(Arc::new(RoundRobinResolver::new()), session_mgr);
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let candidates = vec![
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler.clone())),
+                caster_id: Some("caster_a".into()),
+            },
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler)),
+                caster_id: Some("caster_b".into()),
+            },
+        ];
+
+        let first = resolver.pick("echo", &candidates).unwrap();
+        let second = resolver.pick("echo", &candidates).unwrap();
+
+        assert_ne!(
+            first.caster_id, second.caster_id,
+            "HealthAwareResolver must round-robin among same-rank candidates"
+        );
+        // References must point into the original candidates slice
+        let first_ptr = first as *const RuneEntry;
+        let second_ptr = second as *const RuneEntry;
+        assert!(first_ptr == &candidates[0] as *const _ || first_ptr == &candidates[1] as *const _,);
+        assert!(
+            second_ptr == &candidates[0] as *const _ || second_ptr == &candidates[1] as *const _,
+        );
+    }
+
+    /// Regression: when candidates contain duplicate (name, caster_id=None)
+    /// entries (allowed by local registration), the `seen=0` logic always
+    /// returns the first match, breaking load balancing for the second pick.
+    #[test]
+    fn test_fix_health_aware_resolver_duplicate_local_candidates() {
+        let session_mgr = Arc::new(SessionManager::new_dev(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+        ));
+
+        let resolver = HealthAwareResolver::new(Arc::new(RoundRobinResolver::new()), session_mgr);
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        // Two local entries with same name and caster_id=None
+        let candidates = vec![
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler.clone())),
+                caster_id: None,
+            },
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler)),
+                caster_id: None,
+            },
+        ];
+
+        let first = resolver.pick("echo", &candidates).unwrap();
+        let second = resolver.pick("echo", &candidates).unwrap();
+
+        // Round-robin should pick candidates[0] then candidates[1]
+        let first_ptr = first as *const RuneEntry;
+        let second_ptr = second as *const RuneEntry;
+        assert_eq!(first_ptr, &candidates[0] as *const _);
+        assert_eq!(
+            second_ptr, &candidates[1] as *const _,
+            "second pick must return candidates[1], not candidates[0] again (seen=0 bug)"
+        );
+    }
+
+    #[test]
+    fn health_aware_resolver_prefers_healthy_over_degraded() {
+        let session_mgr = Arc::new(SessionManager::new_dev(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+        ));
+        session_mgr.insert_test_caster("healthy", 1);
+        session_mgr.insert_test_caster("degraded", 1);
+        if let Some(health) = session_mgr.health.get("degraded") {
+            let mut info = health.write().unwrap();
+            *info = HealthInfo {
+                status: HealthStatusLevel::Degraded,
+                ..HealthInfo::default()
+            };
+        }
+
+        let resolver = HealthAwareResolver::new(Arc::new(RoundRobinResolver::new()), session_mgr);
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let candidates = vec![
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler.clone())),
+                caster_id: Some("degraded".into()),
+            },
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler)),
+                caster_id: Some("healthy".into()),
+            },
+        ];
+
+        let picked = resolver.pick("echo", &candidates).unwrap();
+        assert_eq!(picked.caster_id.as_deref(), Some("healthy"));
+    }
+
+    #[test]
+    fn health_aware_resolver_falls_back_when_all_unhealthy() {
+        let session_mgr = Arc::new(SessionManager::new_dev(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+        ));
+        session_mgr.insert_test_caster("unhealthy", 1);
+        if let Some(health) = session_mgr.health.get("unhealthy") {
+            let mut info = health.write().unwrap();
+            *info = HealthInfo {
+                status: HealthStatusLevel::Unhealthy,
+                ..HealthInfo::default()
+            };
+        }
+
+        let resolver = HealthAwareResolver::new(Arc::new(RoundRobinResolver::new()), session_mgr);
+        let candidates = vec![make_entry("echo", 0)];
+        assert!(resolver.pick("echo", &candidates).is_some());
     }
 }

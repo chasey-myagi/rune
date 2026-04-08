@@ -80,9 +80,5 @@ pub struct CreateKeyRequest {
 }
 
 pub fn unique_request_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let ts = rune_core::time_utils::now_ms();
-    format!("r-{:x}-{:x}", ts, seq)
+    rune_core::time_utils::unique_request_id()
 }

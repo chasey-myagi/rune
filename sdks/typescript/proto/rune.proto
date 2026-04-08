@@ -15,6 +15,7 @@ message SessionMessage {
         ExecuteResult result = 12;
         StreamEvent stream_event = 13;
         StreamEnd stream_end = 14;
+        HealthReport health_report = 15;
 
         // Runtime → Caster
         AttachAck attach_ack = 20;
@@ -40,6 +41,7 @@ message AttachAck {
     bool accepted = 1;
     string reason = 2;
     repeated string supported_features = 3;   // Runtime 支持的特性集
+    string protocol_version = 4;
 }
 
 message CasterDetach {
@@ -116,6 +118,15 @@ message Heartbeat {
     uint64 timestamp_ms = 1;
 }
 
+message HealthReport {
+    HealthStatus status = 1;
+    uint32 active_requests = 2;
+    float error_rate = 3;
+    string custom_info = 4;
+    uint64 timestamp_ms = 5;
+    uint32 error_rate_window_secs = 6;
+}
+
 // ── 公共类型 ──
 
 enum Status {
@@ -123,6 +134,13 @@ enum Status {
     STATUS_COMPLETED = 1;
     STATUS_FAILED = 2;
     STATUS_CANCELLED = 3;
+}
+
+enum HealthStatus {
+    HEALTH_STATUS_UNSPECIFIED = 0;
+    HEALTH_STATUS_HEALTHY = 1;
+    HEALTH_STATUS_DEGRADED = 2;
+    HEALTH_STATUS_UNHEALTHY = 3;
 }
 
 message ErrorDetail {

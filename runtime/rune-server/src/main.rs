@@ -333,9 +333,10 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter: if config.server.dev_mode {
             None
         } else {
-            Some(gate::RateLimitState::new(
+            Some(gate::RateLimitState::with_per_rune_limits(
                 config.rate_limit.requests_per_minute,
                 60,
+                config.rate_limit.per_rune.clone(),
             ))
         },
         shutdown: shutdown.clone(),

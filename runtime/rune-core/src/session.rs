@@ -13,11 +13,43 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time;
 use tonic::Streaming;
+use tracing::Instrument;
+
+pub const PROTOCOL_VERSION: &str = "1.2";
+pub const FEATURE_HEALTH_PROBE: &str = "health_probe";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum SessionState {
     Attaching,
     Active,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HealthStatusLevel {
+    #[default]
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+impl HealthStatusLevel {
+    fn from_proto(status: i32) -> Self {
+        match HealthStatus::try_from(status).unwrap_or(HealthStatus::Unspecified) {
+            HealthStatus::Degraded => Self::Degraded,
+            HealthStatus::Unhealthy => Self::Unhealthy,
+            _ => Self::Healthy,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HealthInfo {
+    pub status: HealthStatusLevel,
+    pub active_requests: u32,
+    pub error_rate: f32,
+    pub error_rate_window_secs: u32,
+    pub custom_info: String,
+    pub last_report_ms: u64,
 }
 
 /// Callback invoked when a caster attaches, with caster_id and registered rune configs.
@@ -35,8 +67,10 @@ pub(crate) struct PendingRequest {
 
 pub struct SessionManager {
     pub(crate) sessions: DashMap<String, CasterState>,
+    pub(crate) health: DashMap<String, Arc<std::sync::RwLock<HealthInfo>>>,
     pub(crate) heartbeat_interval: Duration,
     pub(crate) heartbeat_timeout: Duration,
+    pub(crate) default_caster_max_concurrent: usize,
     on_caster_attach: OnceLock<OnCasterAttach>,
     key_verifier: Arc<dyn KeyVerifier>,
     dev_mode: bool,
@@ -54,10 +88,20 @@ impl SessionManager {
     /// Test-only constructor with dev_mode=true and no auth.
     /// Production code should use `with_auth()`.
     pub fn new_dev(heartbeat_interval: Duration, heartbeat_timeout: Duration) -> Self {
+        Self::new_dev_with_default_max_concurrent(heartbeat_interval, heartbeat_timeout, 1024)
+    }
+
+    pub fn new_dev_with_default_max_concurrent(
+        heartbeat_interval: Duration,
+        heartbeat_timeout: Duration,
+        default_caster_max_concurrent: usize,
+    ) -> Self {
         Self {
             sessions: DashMap::new(),
+            health: DashMap::new(),
             heartbeat_interval,
             heartbeat_timeout,
+            default_caster_max_concurrent,
             on_caster_attach: OnceLock::new(),
             key_verifier: Arc::new(crate::auth::NoopVerifier),
             dev_mode: true,
@@ -70,10 +114,28 @@ impl SessionManager {
         key_verifier: Arc<dyn KeyVerifier>,
         dev_mode: bool,
     ) -> Self {
-        Self {
-            sessions: DashMap::new(),
+        Self::with_auth_and_default_max_concurrent(
             heartbeat_interval,
             heartbeat_timeout,
+            key_verifier,
+            dev_mode,
+            1024,
+        )
+    }
+
+    pub fn with_auth_and_default_max_concurrent(
+        heartbeat_interval: Duration,
+        heartbeat_timeout: Duration,
+        key_verifier: Arc<dyn KeyVerifier>,
+        dev_mode: bool,
+        default_caster_max_concurrent: usize,
+    ) -> Self {
+        Self {
+            sessions: DashMap::new(),
+            health: DashMap::new(),
+            heartbeat_interval,
+            heartbeat_timeout,
+            default_caster_max_concurrent,
             on_caster_attach: OnceLock::new(),
             key_verifier,
             dev_mode,
@@ -91,6 +153,25 @@ impl SessionManager {
             .get(caster_id)
             .map(|s| s.semaphore.available_permits() > 0)
             .unwrap_or(false)
+    }
+
+    pub fn health_info(&self, caster_id: &str) -> Option<HealthInfo> {
+        self.health.get(caster_id).map(|entry| {
+            entry
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        })
+    }
+
+    pub fn health_status(&self, caster_id: &str) -> Option<HealthStatusLevel> {
+        self.health_info(caster_id).map(|info| info.status)
+    }
+
+    pub fn is_healthy(&self, caster_id: &str) -> bool {
+        self.health_status(caster_id)
+            .map(|status| status != HealthStatusLevel::Unhealthy)
+            .unwrap_or(true)
     }
 
     /// Return the list of connected caster IDs.
@@ -130,6 +211,28 @@ impl SessionManager {
                 connected_at: Instant::now(),
             },
         );
+        self.health.insert(
+            caster_id.to_string(),
+            Arc::new(std::sync::RwLock::new(HealthInfo::default())),
+        );
+    }
+
+    /// Acquire one permit from a test caster's semaphore (saturate capacity).
+    /// Panics if the caster does not exist or has no available permits.
+    pub fn acquire_test_permit(&self, caster_id: &str) -> tokio::sync::OwnedSemaphorePermit {
+        let session = self.sessions.get(caster_id).expect("test caster not found");
+        let sem = Arc::clone(&session.semaphore);
+        drop(session);
+        sem.try_acquire_owned()
+            .expect("no available permits on test caster")
+    }
+
+    /// Set the health status of a test caster.
+    pub fn set_test_health(&self, caster_id: &str, status: HealthStatusLevel) {
+        if let Some(health) = self.health.get(caster_id) {
+            let mut info = health.write().unwrap();
+            info.status = status;
+        }
     }
 
     pub async fn handle_session(
@@ -207,7 +310,8 @@ impl SessionManager {
                                 payload: Some(session_message::Payload::AttachAck(AttachAck {
                                     accepted: false,
                                     reason: "invalid or missing caster key".into(),
-                                    supported_features: Vec::new(),
+                                    supported_features: vec![FEATURE_HEALTH_PROBE.to_string()],
+                                    protocol_version: PROTOCOL_VERSION.to_string(),
                                 })),
                             };
                             let _ = outbound_tx.send(ack).await;
@@ -220,8 +324,9 @@ impl SessionManager {
                     let permits = if max_conc > 0 {
                         max_conc as usize
                     } else {
-                        tokio::sync::Semaphore::MAX_PERMITS
+                        self.default_caster_max_concurrent
                     };
+                    tracing::info!(caster_id = %id, effective_max_concurrent = permits, "caster concurrency configured");
                     semaphore.add_permits(permits);
 
                     self.sessions.insert(
@@ -233,6 +338,10 @@ impl SessionManager {
                             semaphore: Arc::clone(&semaphore),
                             connected_at: Instant::now(),
                         },
+                    );
+                    self.health.insert(
+                        id.clone(),
+                        Arc::new(std::sync::RwLock::new(HealthInfo::default())),
                     );
 
                     let mut configs = Vec::new();
@@ -282,7 +391,8 @@ impl SessionManager {
                         payload: Some(session_message::Payload::AttachAck(AttachAck {
                             accepted: true,
                             reason: String::new(),
-                            supported_features: Vec::new(),
+                            supported_features: vec![FEATURE_HEALTH_PROBE.to_string()],
+                            protocol_version: PROTOCOL_VERSION.to_string(),
                         })),
                     };
                     let _ = outbound_tx.send(ack).await;
@@ -367,6 +477,24 @@ impl SessionManager {
                     last_heartbeat_ms.store(now_ms(), Ordering::Relaxed);
                 }
 
+                Some(session_message::Payload::HealthReport(report))
+                    if state == SessionState::Active =>
+                {
+                    if let Some(ref id) = caster_id {
+                        if let Some(health) = self.health.get(id) {
+                            let mut current = health
+                                .write()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            current.status = HealthStatusLevel::from_proto(report.status);
+                            current.active_requests = report.active_requests;
+                            current.error_rate = report.error_rate;
+                            current.error_rate_window_secs = report.error_rate_window_secs;
+                            current.custom_info = report.custom_info;
+                            current.last_report_ms = report.timestamp_ms;
+                        }
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -376,6 +504,7 @@ impl SessionManager {
         if let Some(id) = &caster_id {
             tracing::info!(caster_id = %id, "cleaning up disconnected caster");
             self.sessions.remove(id);
+            self.health.remove(id);
             relay.remove_caster(id);
             // Abort all outstanding timeout tasks for this session
             let th_keys: Vec<String> = timeout_handles.iter().map(|e| e.key().clone()).collect();
@@ -411,47 +540,61 @@ impl SessionManager {
         context: HashMap<String, String>,
         timeout: Duration,
     ) -> Result<Bytes, RuneError> {
-        let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
-        let permit = Arc::clone(&session.semaphore)
-            .try_acquire_owned()
-            .map_err(|_| RuneError::Unavailable)?;
+        let trace_id = context
+            .get(crate::trace::TRACE_ID_KEY)
+            .cloned()
+            .unwrap_or_default();
 
-        let (tx, rx) = oneshot::channel();
-        session.pending.insert(
-            request_id.to_string(),
-            PendingRequest {
-                tx: PendingResponse::Once(tx),
-                _permit: permit,
-            },
-        );
+        async move {
+            let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
+            let permit = Arc::clone(&session.semaphore)
+                .try_acquire_owned()
+                .map_err(|_| RuneError::Unavailable)?;
 
-        spawn_request_timeout(
-            Arc::clone(&session.pending),
-            Arc::clone(&session.timeout_handles),
-            request_id.to_string(),
-            timeout,
-        );
+            let (tx, rx) = oneshot::channel();
+            session.pending.insert(
+                request_id.to_string(),
+                PendingRequest {
+                    tx: PendingResponse::Once(tx),
+                    _permit: permit,
+                },
+            );
 
-        let msg = SessionMessage {
-            payload: Some(session_message::Payload::Execute(ExecuteRequest {
-                request_id: request_id.to_string(),
-                rune_name: rune_name.to_string(),
-                input: input.to_vec(),
-                context,
-                timeout_ms: safe_timeout_ms(timeout),
-                attachments: Vec::new(),
-            })),
-        };
+            spawn_request_timeout(
+                Arc::clone(&session.pending),
+                Arc::clone(&session.timeout_handles),
+                request_id.to_string(),
+                timeout,
+            );
 
-        if session.outbound.send(msg).await.is_err() {
-            abort_timeout_handle(&session.timeout_handles, request_id);
-            session.pending.remove(request_id);
-            // permit auto-returned when PendingRequest is dropped
-            return Err(RuneError::Unavailable);
+            let msg = SessionMessage {
+                payload: Some(session_message::Payload::Execute(ExecuteRequest {
+                    request_id: request_id.to_string(),
+                    rune_name: rune_name.to_string(),
+                    input: input.to_vec(),
+                    context,
+                    timeout_ms: safe_timeout_ms(timeout),
+                    attachments: Vec::new(),
+                })),
+            };
+
+            if session.outbound.send(msg).await.is_err() {
+                abort_timeout_handle(&session.timeout_handles, request_id);
+                session.pending.remove(request_id);
+                return Err(RuneError::Unavailable);
+            }
+            drop(session);
+            rx.await
+                .map_err(|_| RuneError::Internal(anyhow::anyhow!("response channel dropped")))?
         }
-        drop(session);
-        rx.await
-            .map_err(|_| RuneError::Internal(anyhow::anyhow!("response channel dropped")))?
+        .instrument(tracing::info_span!(
+            "session.execute",
+            trace_id = %trace_id,
+            request_id = %request_id,
+            caster_id = %caster_id,
+            rune_name = %rune_name
+        ))
+        .await
     }
 
     pub async fn execute_stream(
@@ -463,46 +606,60 @@ impl SessionManager {
         context: HashMap<String, String>,
         timeout: Duration,
     ) -> Result<mpsc::Receiver<Result<Bytes, RuneError>>, RuneError> {
-        let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
-        let permit = Arc::clone(&session.semaphore)
-            .try_acquire_owned()
-            .map_err(|_| RuneError::Unavailable)?;
+        let trace_id = context
+            .get(crate::trace::TRACE_ID_KEY)
+            .cloned()
+            .unwrap_or_default();
 
-        let (tx, rx) = mpsc::channel(32);
-        session.pending.insert(
-            request_id.to_string(),
-            PendingRequest {
-                tx: PendingResponse::Stream(tx),
-                _permit: permit,
-            },
-        );
+        async move {
+            let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
+            let permit = Arc::clone(&session.semaphore)
+                .try_acquire_owned()
+                .map_err(|_| RuneError::Unavailable)?;
 
-        spawn_request_timeout(
-            Arc::clone(&session.pending),
-            Arc::clone(&session.timeout_handles),
-            request_id.to_string(),
-            timeout,
-        );
+            let (tx, rx) = mpsc::channel(32);
+            session.pending.insert(
+                request_id.to_string(),
+                PendingRequest {
+                    tx: PendingResponse::Stream(tx),
+                    _permit: permit,
+                },
+            );
 
-        let msg = SessionMessage {
-            payload: Some(session_message::Payload::Execute(ExecuteRequest {
-                request_id: request_id.to_string(),
-                rune_name: rune_name.to_string(),
-                input: input.to_vec(),
-                context,
-                timeout_ms: safe_timeout_ms(timeout),
-                attachments: Vec::new(),
-            })),
-        };
+            spawn_request_timeout(
+                Arc::clone(&session.pending),
+                Arc::clone(&session.timeout_handles),
+                request_id.to_string(),
+                timeout,
+            );
 
-        if session.outbound.send(msg).await.is_err() {
-            abort_timeout_handle(&session.timeout_handles, request_id);
-            session.pending.remove(request_id);
-            // permit auto-returned when PendingRequest is dropped
-            return Err(RuneError::Unavailable);
+            let msg = SessionMessage {
+                payload: Some(session_message::Payload::Execute(ExecuteRequest {
+                    request_id: request_id.to_string(),
+                    rune_name: rune_name.to_string(),
+                    input: input.to_vec(),
+                    context,
+                    timeout_ms: safe_timeout_ms(timeout),
+                    attachments: Vec::new(),
+                })),
+            };
+
+            if session.outbound.send(msg).await.is_err() {
+                abort_timeout_handle(&session.timeout_handles, request_id);
+                session.pending.remove(request_id);
+                return Err(RuneError::Unavailable);
+            }
+            drop(session);
+            Ok(rx)
         }
-        drop(session);
-        Ok(rx)
+        .instrument(tracing::info_span!(
+            "session.execute_stream",
+            trace_id = %trace_id,
+            request_id = %request_id,
+            caster_id = %caster_id,
+            rune_name = %rune_name
+        ))
+        .await
     }
 
     /// Cancel a request by searching all sessions for the request_id.

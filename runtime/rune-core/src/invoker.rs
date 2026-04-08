@@ -1,7 +1,9 @@
 use crate::rune::{RuneContext, RuneError, RuneHandler, StreamRuneHandler, StreamSender};
+use crate::trace::TRACE_ID_KEY;
 use bytes::Bytes;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 #[async_trait::async_trait]
 pub trait RuneInvoker: Send + Sync {
@@ -94,15 +96,25 @@ pub struct RemoteInvoker {
 #[async_trait::async_trait]
 impl RuneInvoker for RemoteInvoker {
     async fn invoke_once(&self, ctx: RuneContext, input: Bytes) -> Result<Bytes, RuneError> {
+        let request_id = ctx.request_id.clone();
+        let rune_name = ctx.rune_name.clone();
+        let trace_id = ctx.context.get(TRACE_ID_KEY).cloned().unwrap_or_default();
         self.session
             .execute(
                 &self.caster_id,
-                &ctx.request_id,
-                &ctx.rune_name,
+                &request_id,
+                &rune_name,
                 input,
                 ctx.context.clone(),
                 ctx.timeout,
             )
+            .instrument(tracing::info_span!(
+                "remote.invoke",
+                trace_id = %trace_id,
+                request_id = %request_id,
+                caster_id = %self.caster_id,
+                rune_name = %rune_name
+            ))
             .await
     }
 
@@ -111,15 +123,25 @@ impl RuneInvoker for RemoteInvoker {
         ctx: RuneContext,
         input: Bytes,
     ) -> Result<mpsc::Receiver<Result<Bytes, RuneError>>, RuneError> {
+        let request_id = ctx.request_id.clone();
+        let rune_name = ctx.rune_name.clone();
+        let trace_id = ctx.context.get(TRACE_ID_KEY).cloned().unwrap_or_default();
         self.session
             .execute_stream(
                 &self.caster_id,
-                &ctx.request_id,
-                &ctx.rune_name,
+                &request_id,
+                &rune_name,
                 input,
                 ctx.context.clone(),
                 ctx.timeout,
             )
+            .instrument(tracing::info_span!(
+                "remote.invoke_stream",
+                trace_id = %trace_id,
+                request_id = %request_id,
+                caster_id = %self.caster_id,
+                rune_name = %rune_name
+            ))
             .await
     }
 }

@@ -7,6 +7,7 @@ export type {
   CasterOptions,
   ReconnectOptions,
 } from './types.js';
+export { getTraceId, getParentRequestId } from './types.js';
 
 // Handler types
 export type {

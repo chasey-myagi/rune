@@ -3,6 +3,7 @@ use bytes::Bytes;
 use rune_core::relay::Relay;
 use rune_core::resolver::Resolver;
 use rune_core::rune::{RuneContext, RuneError};
+use rune_core::trace;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -113,12 +114,24 @@ impl FlowEngine {
     }
 
     pub async fn execute(&self, flow_name: &str, input: Bytes) -> Result<FlowResult, FlowError> {
+        self.execute_with_context(flow_name, input, HashMap::new(), None)
+            .await
+    }
+
+    pub async fn execute_with_context(
+        &self,
+        flow_name: &str,
+        input: Bytes,
+        parent_context: HashMap<String, String>,
+        flow_request_id: Option<String>,
+    ) -> Result<FlowResult, FlowError> {
         let flow = self
             .flows
             .get(flow_name)
             .ok_or_else(|| FlowError::FlowNotFound(flow_name.to_string()))?
             .clone();
-        self.execute_flow(&flow, input).await
+        self.execute_flow_with_context(&flow, input, parent_context, flow_request_id)
+            .await
     }
 
     /// Execute a pre-fetched FlowDefinition without looking it up from the
@@ -129,6 +142,18 @@ impl FlowEngine {
         input: Bytes,
     ) -> Result<FlowResult, FlowError> {
         self.runner().execute_flow(flow, input).await
+    }
+
+    pub async fn execute_flow_with_context(
+        &self,
+        flow: &FlowDefinition,
+        input: Bytes,
+        parent_context: HashMap<String, String>,
+        flow_request_id: Option<String>,
+    ) -> Result<FlowResult, FlowError> {
+        self.runner()
+            .execute_flow_with_context(flow, input, parent_context, flow_request_id)
+            .await
     }
 }
 
@@ -143,6 +168,17 @@ impl FlowRunner {
         flow: &FlowDefinition,
         input: Bytes,
     ) -> Result<FlowResult, FlowError> {
+        self.execute_flow_with_context(flow, input, HashMap::new(), None)
+            .await
+    }
+
+    pub async fn execute_flow_with_context(
+        &self,
+        flow: &FlowDefinition,
+        input: Bytes,
+        mut parent_context: HashMap<String, String>,
+        flow_request_id: Option<String>,
+    ) -> Result<FlowResult, FlowError> {
         // 空 flow: passthrough
         if flow.steps.is_empty() {
             return Ok(FlowResult {
@@ -151,6 +187,14 @@ impl FlowRunner {
                 steps_executed: 0,
             });
         }
+
+        trace::ensure_trace_defaults(&mut parent_context);
+        let flow_request_id =
+            flow_request_id.unwrap_or_else(rune_core::time_utils::unique_request_id);
+        let flow_span_id = parent_context
+            .get(trace::SPAN_ID_KEY)
+            .cloned()
+            .unwrap_or_else(rune_core::time_utils::generate_span_id);
 
         let layers = topological_layers(flow)?;
 
@@ -250,11 +294,23 @@ impl FlowRunner {
                 match invoker {
                     Some(inv) => {
                         let timeout = self.step_timeout;
+                        let parent_context = parent_context.clone();
+                        let flow_request_id = flow_request_id.clone();
+                        let flow_span_id = flow_span_id.clone();
                         join_set.spawn(async move {
+                            let mut step_context = parent_context;
+                            step_context
+                                .insert(trace::PARENT_REQUEST_ID_KEY.to_string(), flow_request_id);
+                            step_context
+                                .insert(trace::PARENT_SPAN_ID_KEY.to_string(), flow_span_id);
+                            step_context.insert(
+                                trace::SPAN_ID_KEY.to_string(),
+                                rune_core::time_utils::generate_span_id(),
+                            );
                             let ctx = RuneContext {
                                 rune_name: rune_name.clone(),
                                 request_id: uuid_simple(),
-                                context: Default::default(),
+                                context: step_context,
                                 timeout,
                             };
                             match inv.invoke_once(ctx, si).await {
@@ -630,11 +686,7 @@ fn as_f64(v: &serde_json::Value) -> Option<f64> {
 
 /// 生成简单的请求 ID（时间戳 + 单调计数器，保证并行 step 不重复）
 fn uuid_simple() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let ts = rune_core::time_utils::now_ms();
-    format!("req-{:x}-{:x}", ts, seq)
+    rune_core::time_utils::unique_request_id()
 }
 
 #[cfg(test)]

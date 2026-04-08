@@ -55,6 +55,14 @@ export interface RuneContext {
   attachments?: FileAttachment[];
 }
 
+export function getTraceId(ctx: RuneContext): string | undefined {
+  return ctx.context["trace_id"];
+}
+
+export function getParentRequestId(ctx: RuneContext): string | undefined {
+  return ctx.context["parent_request_id"];
+}
+
 /**
  * Options for constructing a Caster instance.
  */

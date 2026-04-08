@@ -7,6 +7,7 @@ pub mod rate_limit;
 pub mod router;
 pub mod shutdown;
 pub mod state;
+pub(crate) mod trace_headers;
 
 /// Backward-compatible re-export module.
 /// External code can still use `rune_gate::gate::GateState`, etc.
