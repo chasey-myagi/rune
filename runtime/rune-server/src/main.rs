@@ -13,7 +13,7 @@ use rune_flow::dag::{FlowDefinition, StepDefinition};
 use rune_flow::engine::FlowEngine;
 use rune_gate::gate;
 use rune_proto::rune_service_server::RuneServiceServer;
-use rune_store::{RuneSnapshot, RuneStore, StoreKeyVerifier};
+use rune_store::{RuneSnapshot, RuneStore, StoreKeyVerifier, StorePoolConfig};
 
 #[derive(Parser)]
 #[command(name = "rune-server", about = "Rune runtime server")]
@@ -51,11 +51,23 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(dev_mode = config.server.dev_mode, "loading configuration");
 
     // ── Store ──
+    let store_pool_config = StorePoolConfig {
+        reader_count: config.store.reader_pool_size,
+        key_cache_ttl: std::time::Duration::from_secs(config.store.key_cache_ttl_secs),
+        key_cache_negative_ttl: std::time::Duration::from_secs(
+            config.store.key_cache_negative_ttl_secs,
+        ),
+    };
     let store = if config.server.dev_mode && config.store.db_path == "rune.db" {
         // In dev mode with default path, use in-memory database
-        Arc::new(RuneStore::open_in_memory()?)
+        Arc::new(RuneStore::open_in_memory_with_config(
+            store_pool_config.clone(),
+        )?)
     } else {
-        Arc::new(RuneStore::open(&config.store.db_path)?)
+        Arc::new(RuneStore::open_with_config(
+            &config.store.db_path,
+            store_pool_config,
+        )?)
     };
     tracing::info!(db_path = %config.store.db_path, "store initialized");
 

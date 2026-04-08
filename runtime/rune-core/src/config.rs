@@ -60,6 +60,9 @@ impl Default for AuthConfig {
 pub struct StoreConfig {
     pub db_path: String,
     pub log_retention_days: u32,
+    pub reader_pool_size: usize,
+    pub key_cache_ttl_secs: u64,
+    pub key_cache_negative_ttl_secs: u64,
 }
 
 impl Default for StoreConfig {
@@ -67,6 +70,9 @@ impl Default for StoreConfig {
         Self {
             db_path: "rune.db".to_string(),
             log_retention_days: 30,
+            reader_pool_size: 4,
+            key_cache_ttl_secs: 60,
+            key_cache_negative_ttl_secs: 30,
         }
     }
 }
@@ -125,6 +131,56 @@ impl Default for ResolverConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct CircuitBreakerConfig {
+    pub enabled: bool,
+    pub failure_threshold: u32,
+    pub success_threshold: u32,
+    pub reset_timeout_ms: u64,
+    pub half_open_max_permits: u32,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            failure_threshold: 5,
+            success_threshold: 2,
+            reset_timeout_ms: 30_000,
+            half_open_max_permits: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetryConfig {
+    pub enabled: bool,
+    pub max_retries: u32,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub backoff_multiplier: f64,
+    pub retryable_errors: Vec<String>,
+    pub circuit_breaker: CircuitBreakerConfig,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 100,
+            max_delay_ms: 5_000,
+            backoff_multiplier: 2.0,
+            // Timeout is excluded: the runtime does not cancel the remote caster
+            // on timeout, so retrying would start a second concurrent execution.
+            retryable_errors: vec!["unavailable".to_string(), "internal".to_string()],
+            circuit_breaker: CircuitBreakerConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RateLimitConfig {
     pub requests_per_minute: u32,
 }
@@ -176,6 +232,7 @@ pub struct AppConfig {
     pub session: SessionConfig,
     pub gate: GateServerConfig,
     pub resolver: ResolverConfig,
+    pub retry: RetryConfig,
     pub rate_limit: RateLimitConfig,
     pub log: LogConfig,
     pub telemetry: TelemetryConfig,
@@ -291,6 +348,21 @@ impl AppConfig {
             self.store.log_retention_days,
             u32
         );
+        env_override!(
+            "RUNE_STORE__READER_POOL_SIZE",
+            self.store.reader_pool_size,
+            usize
+        );
+        env_override!(
+            "RUNE_STORE__KEY_CACHE_TTL_SECS",
+            self.store.key_cache_ttl_secs,
+            u64
+        );
+        env_override!(
+            "RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS",
+            self.store.key_cache_negative_ttl_secs,
+            u64
+        );
 
         // Session
         env_override!(
@@ -318,6 +390,42 @@ impl AppConfig {
 
         // Resolver
         env_override_string!("RUNE_RESOLVER__STRATEGY", self.resolver.strategy);
+
+        // Retry
+        env_override!("RUNE_RETRY__ENABLED", self.retry.enabled, bool);
+        env_override!("RUNE_RETRY__MAX_RETRIES", self.retry.max_retries, u32);
+        env_override!("RUNE_RETRY__BASE_DELAY_MS", self.retry.base_delay_ms, u64);
+        env_override!("RUNE_RETRY__MAX_DELAY_MS", self.retry.max_delay_ms, u64);
+        env_override!(
+            "RUNE_RETRY__BACKOFF_MULTIPLIER",
+            self.retry.backoff_multiplier,
+            f64
+        );
+        env_override!(
+            "RUNE_RETRY__CIRCUIT_BREAKER__ENABLED",
+            self.retry.circuit_breaker.enabled,
+            bool
+        );
+        env_override!(
+            "RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD",
+            self.retry.circuit_breaker.failure_threshold,
+            u32
+        );
+        env_override!(
+            "RUNE_RETRY__CIRCUIT_BREAKER__SUCCESS_THRESHOLD",
+            self.retry.circuit_breaker.success_threshold,
+            u32
+        );
+        env_override!(
+            "RUNE_RETRY__CIRCUIT_BREAKER__RESET_TIMEOUT_MS",
+            self.retry.circuit_breaker.reset_timeout_ms,
+            u64
+        );
+        env_override!(
+            "RUNE_RETRY__CIRCUIT_BREAKER__HALF_OPEN_MAX_PERMITS",
+            self.retry.circuit_breaker.half_open_max_permits,
+            u32
+        );
 
         // Rate limit
         env_override!(

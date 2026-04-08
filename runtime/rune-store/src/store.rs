@@ -1,8 +1,11 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
 
-use rusqlite::Connection;
 use thiserror::Error;
+
+use crate::key_cache::KeyCache;
+use crate::pool::ConnectionPool;
 
 #[derive(Error, Debug)]
 pub enum StoreError {
@@ -18,19 +21,44 @@ pub enum StoreError {
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
+#[derive(Debug, Clone)]
+pub struct StorePoolConfig {
+    pub reader_count: usize,
+    pub key_cache_ttl: Duration,
+    pub key_cache_negative_ttl: Duration,
+}
+
+impl Default for StorePoolConfig {
+    fn default() -> Self {
+        Self {
+            reader_count: 4,
+            key_cache_ttl: Duration::from_secs(60),
+            key_cache_negative_ttl: Duration::from_secs(30),
+        }
+    }
+}
+
 /// SQLite-backed persistence layer for Rune runtime.
 #[derive(Clone)]
 pub struct RuneStore {
-    pub(crate) conn: Arc<Mutex<Connection>>,
+    pub(crate) pool: Arc<ConnectionPool>,
+    pub(crate) key_cache: Arc<KeyCache>,
 }
 
 impl RuneStore {
     /// Open a database at the given file path.
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+        Self::open_with_config(path, StorePoolConfig::default())
+    }
+
+    pub fn open_with_config(path: impl AsRef<Path>, config: StorePoolConfig) -> StoreResult<Self> {
+        let pool = ConnectionPool::new(path.as_ref(), config.reader_count)?;
         let store = Self {
-            conn: Arc::new(Mutex::new(conn)),
+            pool: Arc::new(pool),
+            key_cache: Arc::new(KeyCache::new(
+                config.key_cache_ttl,
+                config.key_cache_negative_ttl,
+            )),
         };
         store.run_migrations()?;
         Ok(store)
@@ -38,10 +66,17 @@ impl RuneStore {
 
     /// Open an in-memory database (useful for testing).
     pub fn open_in_memory() -> StoreResult<Self> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+        Self::open_in_memory_with_config(StorePoolConfig::default())
+    }
+
+    pub fn open_in_memory_with_config(config: StorePoolConfig) -> StoreResult<Self> {
+        let pool = ConnectionPool::new_in_memory()?;
         let store = Self {
-            conn: Arc::new(Mutex::new(conn)),
+            pool: Arc::new(pool),
+            key_cache: Arc::new(KeyCache::new(
+                config.key_cache_ttl,
+                config.key_cache_negative_ttl,
+            )),
         };
         store.run_migrations()?;
         Ok(store)
@@ -50,9 +85,9 @@ impl RuneStore {
     /// Deliberately poison the internal Mutex (test-only).
     #[cfg(feature = "test-helpers")]
     pub fn poison_mutex(&self) {
-        let mutex = self.conn.clone();
+        let pool = Arc::clone(&self.pool);
         let handle = std::thread::spawn(move || {
-            let _guard = mutex.lock().unwrap();
+            let _guard = pool.writer();
             panic!("intentional panic to poison the mutex");
         });
         // The thread panicked while holding the lock → Mutex is now poisoned.
@@ -62,7 +97,7 @@ impl RuneStore {
     /// Query the current journal_mode (test-only).
     #[cfg(feature = "test-helpers")]
     pub fn journal_mode(&self) -> StoreResult<String> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self.pool.writer();
         let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
         Ok(mode)
     }
@@ -70,13 +105,13 @@ impl RuneStore {
     /// Query the current busy_timeout (test-only).
     #[cfg(feature = "test-helpers")]
     pub fn busy_timeout(&self) -> StoreResult<i64> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self.pool.writer();
         let timeout: i64 = conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
         Ok(timeout)
     }
 
     fn run_migrations(&self) -> StoreResult<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self.pool.writer();
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS api_keys (

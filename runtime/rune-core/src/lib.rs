@@ -1,10 +1,12 @@
 pub mod app;
 pub mod auth;
+pub mod circuit_breaker;
 pub mod config;
 pub mod grpc_service;
 pub mod invoker;
 pub mod relay;
 pub mod resolver;
+pub mod retry;
 pub mod rune;
 pub mod session;
 pub mod telemetry;

@@ -118,7 +118,7 @@ mod tests {
 
         // Drop the api_keys table to simulate a DB error
         {
-            let conn = store.conn.lock().unwrap();
+            let conn = store.pool.writer();
             conn.execute_batch("DROP TABLE api_keys").unwrap();
         }
 

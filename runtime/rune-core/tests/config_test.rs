@@ -25,6 +25,9 @@ fn test_default_config() {
     // Store defaults
     assert_eq!(config.store.db_path, "rune.db");
     assert_eq!(config.store.log_retention_days, 30);
+    assert_eq!(config.store.reader_pool_size, 4);
+    assert_eq!(config.store.key_cache_ttl_secs, 60);
+    assert_eq!(config.store.key_cache_negative_ttl_secs, 30);
 
     // Session defaults
     assert_eq!(config.session.heartbeat_interval_secs, 10);
@@ -37,6 +40,22 @@ fn test_default_config() {
 
     // Resolver defaults
     assert_eq!(config.resolver.strategy, "round_robin");
+
+    // Retry defaults
+    assert!(config.retry.enabled);
+    assert_eq!(config.retry.max_retries, 3);
+    assert_eq!(config.retry.base_delay_ms, 100);
+    assert_eq!(config.retry.max_delay_ms, 5_000);
+    assert_eq!(config.retry.backoff_multiplier, 2.0);
+    assert_eq!(
+        config.retry.retryable_errors,
+        vec!["unavailable", "internal"]
+    );
+    assert!(config.retry.circuit_breaker.enabled);
+    assert_eq!(config.retry.circuit_breaker.failure_threshold, 5);
+    assert_eq!(config.retry.circuit_breaker.success_threshold, 2);
+    assert_eq!(config.retry.circuit_breaker.reset_timeout_ms, 30_000);
+    assert_eq!(config.retry.circuit_breaker.half_open_max_permits, 1);
 
     // Rate limit defaults
     assert_eq!(config.rate_limit.requests_per_minute, 600);
@@ -157,6 +176,11 @@ fn test_env_var_override_bool_and_ip() {
     std::env::set_var("RUNE_AUTH__ENABLED", "false");
     std::env::set_var("RUNE_SERVER__GRPC_HOST", "127.0.0.1");
     std::env::set_var("RUNE_STORE__LOG_RETENTION_DAYS", "7");
+    std::env::set_var("RUNE_STORE__READER_POOL_SIZE", "8");
+    std::env::set_var("RUNE_STORE__KEY_CACHE_TTL_SECS", "120");
+    std::env::set_var("RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS", "15");
+    std::env::set_var("RUNE_RETRY__MAX_RETRIES", "5");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD", "9");
 
     let mut config = AppConfig::default();
     config.apply_env_overrides();
@@ -164,10 +188,20 @@ fn test_env_var_override_bool_and_ip() {
     assert!(!config.auth.enabled);
     assert_eq!(config.server.grpc_host, IpAddr::V4(Ipv4Addr::LOCALHOST));
     assert_eq!(config.store.log_retention_days, 7);
+    assert_eq!(config.store.reader_pool_size, 8);
+    assert_eq!(config.store.key_cache_ttl_secs, 120);
+    assert_eq!(config.store.key_cache_negative_ttl_secs, 15);
+    assert_eq!(config.retry.max_retries, 5);
+    assert_eq!(config.retry.circuit_breaker.failure_threshold, 9);
 
     std::env::remove_var("RUNE_AUTH__ENABLED");
     std::env::remove_var("RUNE_SERVER__GRPC_HOST");
     std::env::remove_var("RUNE_STORE__LOG_RETENTION_DAYS");
+    std::env::remove_var("RUNE_STORE__READER_POOL_SIZE");
+    std::env::remove_var("RUNE_STORE__KEY_CACHE_TTL_SECS");
+    std::env::remove_var("RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS");
+    std::env::remove_var("RUNE_RETRY__MAX_RETRIES");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD");
 }
 
 #[test]
@@ -599,6 +633,19 @@ fn test_multiple_env_vars_all_take_effect() {
     std::env::set_var("RUNE_SERVER__DRAIN_TIMEOUT_SECS", "30");
     std::env::set_var("RUNE_GATE__MAX_UPLOAD_SIZE_MB", "50");
     std::env::set_var("RUNE_STORE__LOG_RETENTION_DAYS", "90");
+    std::env::set_var("RUNE_STORE__READER_POOL_SIZE", "16");
+    std::env::set_var("RUNE_STORE__KEY_CACHE_TTL_SECS", "300");
+    std::env::set_var("RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS", "45");
+    std::env::set_var("RUNE_RETRY__ENABLED", "false");
+    std::env::set_var("RUNE_RETRY__MAX_RETRIES", "6");
+    std::env::set_var("RUNE_RETRY__BASE_DELAY_MS", "250");
+    std::env::set_var("RUNE_RETRY__MAX_DELAY_MS", "8000");
+    std::env::set_var("RUNE_RETRY__BACKOFF_MULTIPLIER", "3.5");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__ENABLED", "false");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD", "7");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__SUCCESS_THRESHOLD", "4");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__RESET_TIMEOUT_MS", "120000");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__HALF_OPEN_MAX_PERMITS", "3");
 
     let mut config = AppConfig::default();
     config.apply_env_overrides();
@@ -625,6 +672,19 @@ fn test_multiple_env_vars_all_take_effect() {
     assert_eq!(config.server.drain_timeout_secs, 30);
     assert_eq!(config.gate.max_upload_size_mb, 50);
     assert_eq!(config.store.log_retention_days, 90);
+    assert_eq!(config.store.reader_pool_size, 16);
+    assert_eq!(config.store.key_cache_ttl_secs, 300);
+    assert_eq!(config.store.key_cache_negative_ttl_secs, 45);
+    assert!(!config.retry.enabled);
+    assert_eq!(config.retry.max_retries, 6);
+    assert_eq!(config.retry.base_delay_ms, 250);
+    assert_eq!(config.retry.max_delay_ms, 8000);
+    assert_eq!(config.retry.backoff_multiplier, 3.5);
+    assert!(!config.retry.circuit_breaker.enabled);
+    assert_eq!(config.retry.circuit_breaker.failure_threshold, 7);
+    assert_eq!(config.retry.circuit_breaker.success_threshold, 4);
+    assert_eq!(config.retry.circuit_breaker.reset_timeout_ms, 120000);
+    assert_eq!(config.retry.circuit_breaker.half_open_max_permits, 3);
 
     // Clean up all env vars
     std::env::remove_var("RUNE_SERVER__GRPC_HOST");
@@ -643,6 +703,19 @@ fn test_multiple_env_vars_all_take_effect() {
     std::env::remove_var("RUNE_SERVER__DRAIN_TIMEOUT_SECS");
     std::env::remove_var("RUNE_GATE__MAX_UPLOAD_SIZE_MB");
     std::env::remove_var("RUNE_STORE__LOG_RETENTION_DAYS");
+    std::env::remove_var("RUNE_STORE__READER_POOL_SIZE");
+    std::env::remove_var("RUNE_STORE__KEY_CACHE_TTL_SECS");
+    std::env::remove_var("RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS");
+    std::env::remove_var("RUNE_RETRY__ENABLED");
+    std::env::remove_var("RUNE_RETRY__MAX_RETRIES");
+    std::env::remove_var("RUNE_RETRY__BASE_DELAY_MS");
+    std::env::remove_var("RUNE_RETRY__MAX_DELAY_MS");
+    std::env::remove_var("RUNE_RETRY__BACKOFF_MULTIPLIER");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__ENABLED");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__SUCCESS_THRESHOLD");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__RESET_TIMEOUT_MS");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__HALF_OPEN_MAX_PERMITS");
 }
 
 // ---- Long db_path value ----
@@ -895,6 +968,20 @@ fn test_full_config_roundtrip() {
     config.auth.exempt_routes = vec!["/health".into(), "/metrics".into(), "/ready".into()];
     config.store.db_path = "/custom/path/rune.db".to_string();
     config.store.log_retention_days = 7;
+    config.store.reader_pool_size = 12;
+    config.store.key_cache_ttl_secs = 180;
+    config.store.key_cache_negative_ttl_secs = 25;
+    config.retry.enabled = false;
+    config.retry.max_retries = 8;
+    config.retry.base_delay_ms = 150;
+    config.retry.max_delay_ms = 12_000;
+    config.retry.backoff_multiplier = 1.5;
+    config.retry.retryable_errors = vec!["timeout".into(), "internal".into()];
+    config.retry.circuit_breaker.enabled = false;
+    config.retry.circuit_breaker.failure_threshold = 11;
+    config.retry.circuit_breaker.success_threshold = 3;
+    config.retry.circuit_breaker.reset_timeout_ms = 45_000;
+    config.retry.circuit_breaker.half_open_max_permits = 2;
     config.session.heartbeat_interval_secs = 5;
     config.session.heartbeat_timeout_secs = 20;
     config.session.max_request_timeout_secs = 60;
@@ -927,6 +1014,20 @@ fn test_full_config_roundtrip() {
     );
     assert_eq!(loaded.store.db_path, "/custom/path/rune.db");
     assert_eq!(loaded.store.log_retention_days, 7);
+    assert_eq!(loaded.store.reader_pool_size, 12);
+    assert_eq!(loaded.store.key_cache_ttl_secs, 180);
+    assert_eq!(loaded.store.key_cache_negative_ttl_secs, 25);
+    assert!(!loaded.retry.enabled);
+    assert_eq!(loaded.retry.max_retries, 8);
+    assert_eq!(loaded.retry.base_delay_ms, 150);
+    assert_eq!(loaded.retry.max_delay_ms, 12_000);
+    assert_eq!(loaded.retry.backoff_multiplier, 1.5);
+    assert_eq!(loaded.retry.retryable_errors, vec!["timeout", "internal"]);
+    assert!(!loaded.retry.circuit_breaker.enabled);
+    assert_eq!(loaded.retry.circuit_breaker.failure_threshold, 11);
+    assert_eq!(loaded.retry.circuit_breaker.success_threshold, 3);
+    assert_eq!(loaded.retry.circuit_breaker.reset_timeout_ms, 45_000);
+    assert_eq!(loaded.retry.circuit_breaker.half_open_max_permits, 2);
     assert_eq!(loaded.session.heartbeat_interval_secs, 5);
     assert_eq!(loaded.session.heartbeat_timeout_secs, 20);
     assert_eq!(loaded.session.max_request_timeout_secs, 60);
