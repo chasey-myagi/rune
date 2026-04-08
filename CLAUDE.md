@@ -92,3 +92,11 @@ examples/      — 7 个端到端示例（rust-caster、python 基础/流式/异
 - `docs/configuration.md` — 配置参考
 - `docs/api-reference.md` — HTTP API 端点参考
 - `docs/cli.md` — CLI 命令参考
+
+## Git 工作流
+
+- **dev** — 日常开发分支，本地提交和 PR 都基于 dev
+- **main** — 发版分支，仅在正式发版时从 dev 合入
+- 提交前 pre-commit hook 会自动跑 `cargo fmt --check` + `cargo clippy -- -D warnings`
+- CI workflow（`ci-rust.yml`）在 push dev / PR 到 main 或 dev 时触发
+- 发版：合并 dev → main，打 `v*` tag，CI 自动构建跨平台二进制 + Docker 镜像
