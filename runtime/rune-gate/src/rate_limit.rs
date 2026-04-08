@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use dashmap::DashMap;
@@ -37,9 +37,11 @@ impl RateLimitState {
         let last = self.last_eviction_secs.load(Ordering::Relaxed);
         if now_secs.saturating_sub(last) >= evict_interval {
             // CAS to prevent multiple threads evicting simultaneously
-            if self.last_eviction_secs.compare_exchange(
-                last, now_secs, Ordering::AcqRel, Ordering::Acquire
-            ).is_ok() {
+            if self
+                .last_eviction_secs
+                .compare_exchange(last, now_secs, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
                 self.evict_expired(now);
             }
         }

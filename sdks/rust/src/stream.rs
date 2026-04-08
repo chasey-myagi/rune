@@ -57,7 +57,6 @@ impl StreamSender {
 
     /// Signal end of stream. Idempotent — calling multiple times is safe.
     pub fn end(&self) {
-        self.ended
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.ended.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }

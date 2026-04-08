@@ -1,5 +1,5 @@
-use anyhow::Result;
 use crate::runtime::{self, binary, docker, state};
+use anyhow::Result;
 
 const DEFAULT_IMAGE: &str = "ghcr.io/chasey-myagi/rune-server";
 const DEFAULT_TAG: &str = "latest";

@@ -1,8 +1,8 @@
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
 };
 
 use crate::error::error_response;
@@ -56,7 +56,8 @@ pub async fn health(State(state): State<GateState>) -> axum::response::Response 
 
 pub async fn list_runes(State(state): State<GateState>) -> impl IntoResponse {
     let runes: Vec<serde_json::Value> = state
-        .rune.relay
+        .rune
+        .relay
         .list()
         .into_iter()
         .map(|(name, gate_path)| serde_json::json!({"name": name, "gate_path": gate_path}))
@@ -135,26 +136,33 @@ pub async fn mgmt_stats(State(state): State<GateState>) -> impl IntoResponse {
             }))
             .into_response()
         }
-        Err(e) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }
-
 
 pub async fn mgmt_logs(
     State(state): State<GateState>,
     Query(params): Query<LogQuery>,
 ) -> impl IntoResponse {
     let limit = params.limit.unwrap_or(50).min(500);
-    match state.admin.store.query_logs(params.rune.as_deref(), limit).await {
+    match state
+        .admin
+        .store
+        .query_logs(params.rune.as_deref(), limit)
+        .await
+    {
         Ok(logs) => Json(serde_json::json!({"logs": logs})).into_response(),
-        Err(e) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }
-
 
 pub async fn mgmt_create_key(
     State(state): State<GateState>,
@@ -187,9 +195,11 @@ pub async fn mgmt_create_key(
             })),
         )
             .into_response(),
-        Err(e) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }
 
@@ -203,9 +213,11 @@ pub async fn mgmt_list_keys(
 
     match state.admin.store.list_keys().await {
         Ok(keys) => Json(serde_json::json!({"keys": keys})).into_response(),
-        Err(e) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }
 
@@ -220,8 +232,10 @@ pub async fn mgmt_revoke_key(
 
     match state.admin.store.revoke_key(id).await {
         Ok(()) => Json(serde_json::json!({"status": "revoked", "id": id})).into_response(),
-        Err(e) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }

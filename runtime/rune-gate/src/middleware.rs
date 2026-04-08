@@ -1,8 +1,4 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    middleware::Next,
-};
+use axum::{extract::State, http::StatusCode, middleware::Next};
 
 use crate::error::error_response;
 use crate::state::GateState;
@@ -112,9 +108,15 @@ pub async fn rate_limit_middleware(
     // Management routes are exempt from rate limiting
     if path.starts_with("/api/v1/") {
         let mgmt_prefixes = [
-            "/api/v1/status", "/api/v1/casters", "/api/v1/stats",
-            "/api/v1/logs", "/api/v1/keys", "/api/v1/runes",
-            "/api/v1/openapi.json", "/api/v1/flows", "/api/v1/tasks",
+            "/api/v1/status",
+            "/api/v1/casters",
+            "/api/v1/stats",
+            "/api/v1/logs",
+            "/api/v1/keys",
+            "/api/v1/runes",
+            "/api/v1/openapi.json",
+            "/api/v1/flows",
+            "/api/v1/tasks",
             "/api/v1/files",
         ];
         if mgmt_prefixes.iter().any(|p| path.starts_with(p)) {
@@ -195,7 +197,10 @@ mod tests {
 
         // Different tokens must produce different keys
         let key3 = rate_key_from_header(Some("Bearer other-token"));
-        assert_ne!(key, key3, "different tokens must produce different rate keys");
+        assert_ne!(
+            key, key3,
+            "different tokens must produce different rate keys"
+        );
     }
 
     #[test]

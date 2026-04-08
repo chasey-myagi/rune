@@ -1,8 +1,8 @@
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
+    Json,
 };
 use rune_store::TaskStatus;
 
@@ -24,20 +24,30 @@ pub async fn list_tasks(
     let status = params.status.as_deref().and_then(TaskStatus::from_str);
     let limit = params.limit.unwrap_or(50).min(500);
     let offset = params.offset.unwrap_or(0);
-    match state.admin.store.list_tasks(status, params.rune.as_deref(), limit, offset).await {
+    match state
+        .admin
+        .store
+        .list_tasks(status, params.rune.as_deref(), limit, offset)
+        .await
+    {
         Ok(tasks) => Json(serde_json::json!({"tasks": tasks})).into_response(),
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string()),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }
 
-pub async fn get_task(
-    State(state): State<GateState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+pub async fn get_task(State(state): State<GateState>, Path(id): Path<String>) -> impl IntoResponse {
     match state.admin.store.get_task(&id).await {
         Ok(Some(task)) => (StatusCode::OK, Json(serde_json::json!(task))).into_response(),
         Ok(None) => error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "task not found"),
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string()),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }
 
@@ -47,7 +57,11 @@ pub async fn delete_task(
 ) -> impl IntoResponse {
     match state.admin.store.get_task(&id).await {
         Ok(None) => error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "task not found"),
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string()),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
         Ok(Some(task)) => match task.status {
             TaskStatus::Completed | TaskStatus::Failed => error_response(
                 StatusCode::CONFLICT,
@@ -62,15 +76,16 @@ pub async fn delete_task(
             _ => {
                 // running or pending — cancel
                 state
-                    .rune.session_mgr
+                    .rune
+                    .session_mgr
                     .cancel_by_request_id(&id, "cancelled by user")
                     .await;
-                if let Err(e) = state.admin.store.update_task_status(
-                    &id,
-                    TaskStatus::Cancelled,
-                    None,
-                    Some("cancelled by user"),
-                ).await {
+                if let Err(e) = state
+                    .admin
+                    .store
+                    .update_task_status(&id, TaskStatus::Cancelled, None, Some("cancelled by user"))
+                    .await
+                {
                     tracing::error!("Failed to update task status in store: {}", e);
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,

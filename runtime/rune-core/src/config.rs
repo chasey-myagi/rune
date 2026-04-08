@@ -334,10 +334,7 @@ impl AppConfig {
         );
 
         // Resolver
-        env_override_string!(
-            "RUNE_RESOLVER__STRATEGY",
-            self.resolver.strategy
-        );
+        env_override_string!("RUNE_RESOLVER__STRATEGY", self.resolver.strategy);
 
         // Rate limit
         env_override!(

@@ -1,15 +1,15 @@
-use std::sync::{Arc, Mutex};
-use dashmap::DashMap;
-use crate::rune::RuneConfig;
 use crate::invoker::RuneInvoker;
 use crate::resolver::Resolver;
+use crate::rune::RuneConfig;
+use dashmap::DashMap;
+use std::sync::{Arc, Mutex};
 
 /// 一个 Rune 的注册条目
 #[derive(Clone)]
 pub struct RuneEntry {
     pub config: RuneConfig,
     pub invoker: Arc<dyn RuneInvoker>,
-    pub caster_id: Option<String>,  // None = 进程内
+    pub caster_id: Option<String>, // None = 进程内
 }
 
 /// Relay = 注册表
@@ -31,7 +31,12 @@ impl Relay {
     }
 
     /// 注册一个 Rune（进程内或远程），检查 gate.path 冲突
-    pub fn register(&self, config: RuneConfig, invoker: Arc<dyn RuneInvoker>, caster_id: Option<String>) -> Result<(), String> {
+    pub fn register(
+        &self,
+        config: RuneConfig,
+        invoker: Arc<dyn RuneInvoker>,
+        caster_id: Option<String>,
+    ) -> Result<(), String> {
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         // Check gate.path conflict: different rune_name with same path+method is a hard error
@@ -75,7 +80,11 @@ impl Relay {
         }
 
         let name = config.name.clone();
-        self.entries.entry(name).or_default().push(RuneEntry { config, invoker, caster_id });
+        self.entries.entry(name).or_default().push(RuneEntry {
+            config,
+            invoker,
+            caster_id,
+        });
         Ok(())
     }
 
@@ -90,16 +99,17 @@ impl Relay {
             for e in entry.value() {
                 if e.caster_id.as_deref() == Some(caster_id) {
                     if let Some(ref gate) = e.config.gate {
-                        keys_to_check.push((format!("{}:{}", gate.method, gate.path), rune_name.clone()));
+                        keys_to_check
+                            .push((format!("{}:{}", gate.method, gate.path), rune_name.clone()));
                     }
                 }
             }
         }
 
         for mut entry in self.entries.iter_mut() {
-            entry.value_mut().retain(|e| {
-                e.caster_id.as_deref() != Some(caster_id)
-            });
+            entry
+                .value_mut()
+                .retain(|e| e.caster_id.as_deref() != Some(caster_id));
         }
         // 清理空条目
         self.entries.retain(|_, v| !v.is_empty());
@@ -107,12 +117,17 @@ impl Relay {
         // Clean up gate_path_index: only check the specific rune_name's remaining
         // entries instead of iterating all entries across all rune names.
         for (key, rune_name) in keys_to_check {
-            let still_exists = self.entries.get(&rune_name)
+            let still_exists = self
+                .entries
+                .get(&rune_name)
                 .map(|entries| {
                     entries.value().iter().any(|e| {
-                        e.config.gate.as_ref()
+                        e.config
+                            .gate
+                            .as_ref()
                             .map(|g| format!("{}:{}", g.method, g.path))
-                            .as_deref() == Some(&key)
+                            .as_deref()
+                            == Some(&key)
                     })
                 })
                 .unwrap_or(false);
@@ -123,14 +138,23 @@ impl Relay {
     }
 
     /// Find all candidates for a rune name
-    pub fn find(&self, rune_name: &str) -> Option<dashmap::mapref::one::Ref<'_, String, Vec<RuneEntry>>> {
+    pub fn find(
+        &self,
+        rune_name: &str,
+    ) -> Option<dashmap::mapref::one::Ref<'_, String, Vec<RuneEntry>>> {
         let entry = self.entries.get(rune_name)?;
-        if entry.value().is_empty() { return None; }
+        if entry.value().is_empty() {
+            return None;
+        }
         Some(entry)
     }
 
     /// Convenience: find + pick using a resolver
-    pub fn resolve(&self, rune_name: &str, resolver: &dyn Resolver) -> Option<Arc<dyn RuneInvoker>> {
+    pub fn resolve(
+        &self,
+        rune_name: &str,
+        resolver: &dyn Resolver,
+    ) -> Option<Arc<dyn RuneInvoker>> {
         let entries = self.find(rune_name)?;
         let picked = resolver.pick(rune_name, entries.value())?;
         Some(Arc::clone(&picked.invoker))
@@ -151,13 +175,19 @@ impl Relay {
             return Some(Arc::clone(&picked.invoker));
         }
         // Filter candidates by labels
-        let filtered: Vec<RuneEntry> = entries.value().iter()
+        let filtered: Vec<RuneEntry> = entries
+            .value()
+            .iter()
             .filter(|e| {
-                required_labels.iter().all(|(k, v)| e.config.labels.get(k) == Some(v))
+                required_labels
+                    .iter()
+                    .all(|(k, v)| e.config.labels.get(k) == Some(v))
             })
             .cloned()
             .collect();
-        if filtered.is_empty() { return None; }
+        if filtered.is_empty() {
+            return None;
+        }
         let picked = resolver.pick(rune_name, &filtered)?;
         Some(Arc::clone(&picked.invoker))
     }
@@ -185,8 +215,8 @@ impl Relay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rune::{RuneContext, make_handler};
     use crate::resolver::RoundRobinResolver;
+    use crate::rune::{make_handler, RuneContext};
     use bytes::Bytes;
     use std::time::Duration;
 
@@ -202,9 +232,16 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
+        relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
 
         let resolver = RoundRobinResolver::new();
         let invoker = relay.resolve("echo", &resolver).expect("should resolve");
@@ -214,7 +251,10 @@ mod tests {
             context: Default::default(),
             timeout: Duration::from_secs(30),
         };
-        let result = invoker.invoke_once(ctx, Bytes::from("hello")).await.unwrap();
+        let result = invoker
+            .invoke_once(ctx, Bytes::from("hello"))
+            .await
+            .unwrap();
         assert_eq!(result, Bytes::from("hello"));
     }
 
@@ -241,10 +281,23 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(cfg("rr"), Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
-        relay.register(cfg("rr"), Arc::new(crate::invoker::LocalInvoker::new(h2)), None).unwrap();
+        relay
+            .register(
+                cfg("rr"),
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                None,
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg("rr"),
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                None,
+            )
+            .unwrap();
 
         let resolver = RoundRobinResolver::new();
         let ctx = || RuneContext {
@@ -253,8 +306,18 @@ mod tests {
             context: Default::default(),
             timeout: Duration::from_secs(30),
         };
-        let r1 = relay.resolve("rr", &resolver).unwrap().invoke_once(ctx(), Bytes::new()).await.unwrap();
-        let r2 = relay.resolve("rr", &resolver).unwrap().invoke_once(ctx(), Bytes::new()).await.unwrap();
+        let r1 = relay
+            .resolve("rr", &resolver)
+            .unwrap()
+            .invoke_once(ctx(), Bytes::new())
+            .await
+            .unwrap();
+        let r2 = relay
+            .resolve("rr", &resolver)
+            .unwrap()
+            .invoke_once(ctx(), Bytes::new())
+            .await
+            .unwrap();
 
         // 轮询应该交替
         assert_ne!(r1, r2);
@@ -272,9 +335,16 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), Some("c1".into())).unwrap();
+        relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some("c1".into()),
+            )
+            .unwrap();
 
         let resolver = RoundRobinResolver::new();
         assert!(relay.resolve("x", &resolver).is_some());
@@ -301,7 +371,8 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
         let config2 = RuneConfig {
             name: "rune_b".into(),
@@ -314,17 +385,40 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
-        relay.register(config1, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
-        let result = relay.register(config2, Arc::new(crate::invoker::LocalInvoker::new(h2)), None);
+        relay
+            .register(
+                config1,
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                None,
+            )
+            .unwrap();
+        let result = relay.register(
+            config2,
+            Arc::new(crate::invoker::LocalInvoker::new(h2)),
+            None,
+        );
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("route conflict"), "error should mention route conflict, got: {}", err);
-        assert!(err.contains("rune_a"), "error should mention first rune name, got: {}", err);
-        assert!(err.contains("rune_b"), "error should mention second rune name, got: {}", err);
+        assert!(
+            err.contains("route conflict"),
+            "error should mention route conflict, got: {}",
+            err
+        );
+        assert!(
+            err.contains("rune_a"),
+            "error should mention first rune name, got: {}",
+            err
+        );
+        assert!(
+            err.contains("rune_b"),
+            "error should mention second rune name, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -345,7 +439,8 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
         let config2 = RuneConfig {
             name: "rune_b".into(),
@@ -358,11 +453,24 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
-        relay.register(config1, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
-        relay.register(config2, Arc::new(crate::invoker::LocalInvoker::new(h2)), None).unwrap();
+        relay
+            .register(
+                config1,
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                None,
+            )
+            .unwrap();
+        relay
+            .register(
+                config2,
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                None,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -383,11 +491,24 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
-        relay.register(config.clone(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c2".into())).unwrap();
+        relay
+            .register(
+                config.clone(),
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("c1".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("c2".into()),
+            )
+            .unwrap();
     }
 
     // ---- Scenario 8: reserved route conflict ----
@@ -407,14 +528,27 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
-        let result = relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
+        let result = relay.register(
+            config,
+            Arc::new(crate::invoker::LocalInvoker::new(handler)),
+            None,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("/health"), "error should mention /health, got: {}", err);
-        assert!(err.contains("management route"), "error should mention management route, got: {}", err);
+        assert!(
+            err.contains("/health"),
+            "error should mention /health, got: {}",
+            err
+        );
+        assert!(
+            err.contains("management route"),
+            "error should mention management route, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -432,13 +566,22 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
-        let result = relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
+        let result = relay.register(
+            config,
+            Arc::new(crate::invoker::LocalInvoker::new(handler)),
+            None,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("/api/v1/runes"), "error should mention /api/v1/runes, got: {}", err);
+        assert!(
+            err.contains("/api/v1/runes"),
+            "error should mention /api/v1/runes, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -457,13 +600,22 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
-        let result = relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None);
+        let result = relay.register(
+            config,
+            Arc::new(crate::invoker::LocalInvoker::new(handler)),
+            None,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("/api/v1/"), "error should mention the reserved prefix, got: {}", err);
+        assert!(
+            err.contains("/api/v1/"),
+            "error should mention the reserved prefix, got: {}",
+            err
+        );
     }
 
     // ---- Scenario 9: list() method ----
@@ -482,45 +634,66 @@ mod tests {
         let h2 = make_handler(|_ctx, input| async move { Ok(input) });
         let h3 = make_handler(|_ctx, input| async move { Ok(input) });
 
-        relay.register(RuneConfig {
-            name: "echo".into(),
-            version: String::new(),
-            description: "".into(),
-            supports_stream: false,
-            gate: Some(crate::rune::GateConfig {
-                path: "/api/echo".into(),
-                method: "POST".into(),
-            }),
-            input_schema: None,
-            output_schema: None,
-            priority: 0, labels: Default::default(),
-        }, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
+        relay
+            .register(
+                RuneConfig {
+                    name: "echo".into(),
+                    version: String::new(),
+                    description: "".into(),
+                    supports_stream: false,
+                    gate: Some(crate::rune::GateConfig {
+                        path: "/api/echo".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                None,
+            )
+            .unwrap();
 
-        relay.register(RuneConfig {
-            name: "translate".into(),
-            version: String::new(),
-            description: "".into(),
-            supports_stream: false,
-            gate: None,
-            input_schema: None,
-            output_schema: None,
-            priority: 0, labels: Default::default(),
-        }, Arc::new(crate::invoker::LocalInvoker::new(h2)), None).unwrap();
+        relay
+            .register(
+                RuneConfig {
+                    name: "translate".into(),
+                    version: String::new(),
+                    description: "".into(),
+                    supports_stream: false,
+                    gate: None,
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                None,
+            )
+            .unwrap();
 
         // Same name "echo" from another caster
-        relay.register(RuneConfig {
-            name: "echo".into(),
-            version: String::new(),
-            description: "".into(),
-            supports_stream: false,
-            gate: Some(crate::rune::GateConfig {
-                path: "/api/echo".into(),
-                method: "POST".into(),
-            }),
-            input_schema: None,
-            output_schema: None,
-            priority: 0, labels: Default::default(),
-        }, Arc::new(crate::invoker::LocalInvoker::new(h3)), Some("c2".into())).unwrap();
+        relay
+            .register(
+                RuneConfig {
+                    name: "echo".into(),
+                    version: String::new(),
+                    description: "".into(),
+                    supports_stream: false,
+                    gate: Some(crate::rune::GateConfig {
+                        path: "/api/echo".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(crate::invoker::LocalInvoker::new(h3)),
+                Some("c2".into()),
+            )
+            .unwrap();
 
         let list = relay.list();
         // SF-7: list() deduplicates by rune name, so "echo" (2 casters) counts once
@@ -552,11 +725,18 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
         // Register with caster_id "c1"
-        relay.register(config.clone(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
+        relay
+            .register(
+                config.clone(),
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("c1".into()),
+            )
+            .unwrap();
         assert!(relay.resolve("my_rune", &resolver).is_some());
 
         // Remove caster "c1"
@@ -565,7 +745,13 @@ mod tests {
 
         // Re-register with same caster_id "c1"
         let h2 = make_handler(|_ctx, _input| async { Ok(Bytes::from("second")) });
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c1".into())).unwrap();
+        relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("c1".into()),
+            )
+            .unwrap();
         assert!(relay.resolve("my_rune", &resolver).is_some());
     }
 
@@ -591,9 +777,16 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), Some("c1".into())).unwrap();
+        relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some("c1".into()),
+            )
+            .unwrap();
 
         // Removing a non-existent caster should not affect existing entries
         relay.remove_caster("c99");
@@ -621,9 +814,16 @@ mod tests {
                 }),
                 input_schema: None,
                 output_schema: None,
-                priority: 0, labels: Default::default(),
+                priority: 0,
+                labels: Default::default(),
             };
-            relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
+            relay
+                .register(
+                    config,
+                    Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                    None,
+                )
+                .unwrap();
         }
 
         // list should return exactly 100 entries
@@ -664,18 +864,24 @@ mod tests {
                 gate: None,
                 input_schema: None,
                 output_schema: None,
-                priority: 0, labels: Default::default(),
+                priority: 0,
+                labels: Default::default(),
             };
-            relay.register(
-                config,
-                Arc::new(crate::invoker::LocalInvoker::new(handler)),
-                Some(format!("c{}", i)),
-            ).unwrap();
+            relay
+                .register(
+                    config,
+                    Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                    Some(format!("c{}", i)),
+                )
+                .unwrap();
         }
 
         // Verify 1 entry in list (deduped by name) but 5 candidates internally
-        let list: Vec<_> = relay.list().into_iter()
-            .filter(|(n, _)| n == "shared_rune").collect();
+        let list: Vec<_> = relay
+            .list()
+            .into_iter()
+            .filter(|(n, _)| n == "shared_rune")
+            .collect();
         assert_eq!(list.len(), 1);
         assert_eq!(relay.find("shared_rune").unwrap().value().len(), 5);
 
@@ -685,8 +891,11 @@ mod tests {
         relay.remove_caster("c2");
 
         // Verify still 1 entry in list (deduped) but 2 candidates internally
-        let list: Vec<_> = relay.list().into_iter()
-            .filter(|(n, _)| n == "shared_rune").collect();
+        let list: Vec<_> = relay
+            .list()
+            .into_iter()
+            .filter(|(n, _)| n == "shared_rune")
+            .collect();
         assert_eq!(list.len(), 1);
         assert_eq!(relay.find("shared_rune").unwrap().value().len(), 2);
 
@@ -700,10 +909,18 @@ mod tests {
             context: Default::default(),
             timeout: Duration::from_secs(30),
         };
-        let r1 = relay.resolve("shared_rune", &resolver).unwrap()
-            .invoke_once(ctx(), Bytes::new()).await.unwrap();
-        let r2 = relay.resolve("shared_rune", &resolver).unwrap()
-            .invoke_once(ctx(), Bytes::new()).await.unwrap();
+        let r1 = relay
+            .resolve("shared_rune", &resolver)
+            .unwrap()
+            .invoke_once(ctx(), Bytes::new())
+            .await
+            .unwrap();
+        let r2 = relay
+            .resolve("shared_rune", &resolver)
+            .unwrap()
+            .invoke_once(ctx(), Bytes::new())
+            .await
+            .unwrap();
         // The two remaining casters should alternate
         assert_ne!(r1, r2);
     }
@@ -723,18 +940,31 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
         // Register A
         let h_a = make_handler(|_ctx, _input| async { Ok(Bytes::from("A")) });
-        relay.register(make_cfg(), Arc::new(crate::invoker::LocalInvoker::new(h_a)), Some("A".into())).unwrap();
+        relay
+            .register(
+                make_cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(h_a)),
+                Some("A".into()),
+            )
+            .unwrap();
         assert_eq!(relay.list().len(), 1); // 1 rune name
         assert_eq!(relay.find("interleaved").unwrap().value().len(), 1);
 
         // Register B (same rune name, different caster)
         let h_b = make_handler(|_ctx, _input| async { Ok(Bytes::from("B")) });
-        relay.register(make_cfg(), Arc::new(crate::invoker::LocalInvoker::new(h_b)), Some("B".into())).unwrap();
+        relay
+            .register(
+                make_cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(h_b)),
+                Some("B".into()),
+            )
+            .unwrap();
         assert_eq!(relay.list().len(), 1); // still 1 rune name (deduped)
         assert_eq!(relay.find("interleaved").unwrap().value().len(), 2);
 
@@ -745,7 +975,13 @@ mod tests {
 
         // Register C
         let h_c = make_handler(|_ctx, _input| async { Ok(Bytes::from("C")) });
-        relay.register(make_cfg(), Arc::new(crate::invoker::LocalInvoker::new(h_c)), Some("C".into())).unwrap();
+        relay
+            .register(
+                make_cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(h_c)),
+                Some("C".into()),
+            )
+            .unwrap();
         assert_eq!(relay.list().len(), 1); // still 1 rune name
         assert_eq!(relay.find("interleaved").unwrap().value().len(), 2);
 
@@ -782,7 +1018,8 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
         let config2 = RuneConfig {
             name: "multi_path_rune".into(),
@@ -795,14 +1032,30 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
-        relay.register(config1, Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
-        relay.register(config2, Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c2".into())).unwrap();
+        relay
+            .register(
+                config1,
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("c1".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                config2,
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("c2".into()),
+            )
+            .unwrap();
 
-        let list: Vec<_> = relay.list().into_iter()
-            .filter(|(n, _)| n == "multi_path_rune").collect();
+        let list: Vec<_> = relay
+            .list()
+            .into_iter()
+            .filter(|(n, _)| n == "multi_path_rune")
+            .collect();
         // SF-7: deduped by name — only one entry in list
         assert_eq!(list.len(), 1);
         // But both candidates exist internally
@@ -828,11 +1081,18 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
         // Should succeed (gate path is just a string, no URL parsing)
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
+        relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
 
         let list = relay.list();
         assert_eq!(list.len(), 1);
@@ -855,10 +1115,17 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
+        relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
         let list = relay.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].1.as_deref(), Some("/translate#section"));
@@ -881,13 +1148,16 @@ mod tests {
                 gate: None,
                 input_schema: None,
                 output_schema: None,
-                priority: 0, labels: Default::default(),
+                priority: 0,
+                labels: Default::default(),
             };
-            relay.register(
-                config,
-                Arc::new(crate::invoker::LocalInvoker::new(handler)),
-                Some(format!("c{}", i)),
-            ).unwrap();
+            relay
+                .register(
+                    config,
+                    Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                    Some(format!("c{}", i)),
+                )
+                .unwrap();
         }
 
         assert_eq!(relay.list().len(), 1); // deduped: 3 casters, 1 rune name
@@ -915,7 +1185,7 @@ mod tests {
     // v0.6.0 TDD Wave A — Scheduling, Labels, Priority
     // ====================================================================
 
-    use crate::resolver::{RandomResolver, LeastLoadResolver, PriorityResolver};
+    use crate::resolver::{LeastLoadResolver, PriorityResolver, RandomResolver};
     use std::collections::HashMap;
 
     // Helper to build RuneConfig with labels
@@ -964,10 +1234,23 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(cfg(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
-        relay.register(cfg(), Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c2".into())).unwrap();
+        relay
+            .register(
+                cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("c1".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("c2".into()),
+            )
+            .unwrap();
 
         let resolver = RandomResolver::new();
         // Should always return Some
@@ -992,11 +1275,30 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(cfg(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
-        relay.register(cfg(), Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c2".into())).unwrap();
-        relay.register(cfg(), Arc::new(crate::invoker::LocalInvoker::new(h3)), Some("c3".into())).unwrap();
+        relay
+            .register(
+                cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("c1".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("c2".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(h3)),
+                Some("c3".into()),
+            )
+            .unwrap();
 
         let resolver = RandomResolver::new();
         let ctx = || RuneContext {
@@ -1013,7 +1315,11 @@ mod tests {
             results.insert(r);
         }
         // With 50 trials and 3 options, probability of seeing only 1 is negligible
-        assert!(results.len() > 1, "random resolver should vary selection, got only {:?}", results);
+        assert!(
+            results.len() > 1,
+            "random resolver should vary selection, got only {:?}",
+            results
+        );
     }
 
     #[test]
@@ -1035,9 +1341,16 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(cfg, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
+        relay
+            .register(
+                cfg,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
 
         let resolver = RandomResolver::new();
         assert!(relay.resolve("single", &resolver).is_some());
@@ -1066,10 +1379,23 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(cfg(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("low".into())).unwrap();
-        relay.register(cfg(), Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("high".into())).unwrap();
+        relay
+            .register(
+                cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("low".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg(),
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("high".into()),
+            )
+            .unwrap();
 
         // LeastLoadResolver should prefer the caster with more available permits
         // (lower load). Without real session state, this tests the resolver logic.
@@ -1106,9 +1432,16 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(cfg, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
+        relay
+            .register(
+                cfg,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
         assert!(relay.resolve("single_ll", &resolver).is_some());
     }
 
@@ -1126,9 +1459,16 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(cfg, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).unwrap();
+        relay
+            .register(
+                cfg,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
 
         let rr = RoundRobinResolver::new();
         let rand = RandomResolver::new();
@@ -1175,16 +1515,20 @@ mod tests {
         let mut labels_staging = HashMap::new();
         labels_staging.insert("env".to_string(), "staging".to_string());
 
-        relay.register(
-            cfg_with_labels("labeled", labels_prod.clone()),
-            Arc::new(crate::invoker::LocalInvoker::new(h1)),
-            Some("c_prod".into()),
-        ).unwrap();
-        relay.register(
-            cfg_with_labels("labeled", labels_staging),
-            Arc::new(crate::invoker::LocalInvoker::new(h2)),
-            Some("c_staging".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_labels("labeled", labels_prod.clone()),
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("c_prod".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg_with_labels("labeled", labels_staging),
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("c_staging".into()),
+            )
+            .unwrap();
 
         let resolver = RoundRobinResolver::new();
         let ctx = RuneContext {
@@ -1195,7 +1539,8 @@ mod tests {
         };
 
         // Request with env=prod should get prod caster
-        let invoker = relay.resolve_with_labels("labeled", &labels_prod, &resolver)
+        let invoker = relay
+            .resolve_with_labels("labeled", &labels_prod, &resolver)
             .expect("should find prod caster");
         let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
         assert_eq!(result, Bytes::from("prod"));
@@ -1208,18 +1553,22 @@ mod tests {
 
         let mut labels_prod = HashMap::new();
         labels_prod.insert("env".to_string(), "prod".to_string());
-        relay.register(
-            cfg_with_labels("labeled", labels_prod),
-            Arc::new(crate::invoker::LocalInvoker::new(handler)),
-            Some("c_prod".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_labels("labeled", labels_prod),
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some("c_prod".into()),
+            )
+            .unwrap();
 
         let resolver = RoundRobinResolver::new();
 
         // Request with env=dev — no match
         let mut labels_dev = HashMap::new();
         labels_dev.insert("env".to_string(), "dev".to_string());
-        assert!(relay.resolve_with_labels("labeled", &labels_dev, &resolver).is_none());
+        assert!(relay
+            .resolve_with_labels("labeled", &labels_dev, &resolver)
+            .is_none());
     }
 
     #[tokio::test]
@@ -1231,11 +1580,13 @@ mod tests {
         labels.insert("env".to_string(), "prod".to_string());
         labels.insert("region".to_string(), "us-west".to_string());
 
-        relay.register(
-            cfg_with_labels("multi_label", labels),
-            Arc::new(crate::invoker::LocalInvoker::new(handler)),
-            Some("c1".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_labels("multi_label", labels),
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some("c1".into()),
+            )
+            .unwrap();
 
         let resolver = RoundRobinResolver::new();
 
@@ -1243,7 +1594,9 @@ mod tests {
         let mut req_labels = HashMap::new();
         req_labels.insert("env".to_string(), "prod".to_string());
         req_labels.insert("region".to_string(), "us-west".to_string());
-        assert!(relay.resolve_with_labels("multi_label", &req_labels, &resolver).is_some());
+        assert!(relay
+            .resolve_with_labels("multi_label", &req_labels, &resolver)
+            .is_some());
     }
 
     #[test]
@@ -1255,11 +1608,13 @@ mod tests {
         labels.insert("env".to_string(), "prod".to_string());
         labels.insert("region".to_string(), "us-west".to_string());
 
-        relay.register(
-            cfg_with_labels("partial", labels),
-            Arc::new(crate::invoker::LocalInvoker::new(handler)),
-            Some("c1".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_labels("partial", labels),
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some("c1".into()),
+            )
+            .unwrap();
 
         let resolver = RoundRobinResolver::new();
 
@@ -1267,7 +1622,9 @@ mod tests {
         let mut req_labels = HashMap::new();
         req_labels.insert("env".to_string(), "prod".to_string());
         req_labels.insert("region".to_string(), "eu-central".to_string());
-        assert!(relay.resolve_with_labels("partial", &req_labels, &resolver).is_none());
+        assert!(relay
+            .resolve_with_labels("partial", &req_labels, &resolver)
+            .is_none());
     }
 
     #[test]
@@ -1278,17 +1635,21 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("env".to_string(), "prod".to_string());
 
-        relay.register(
-            cfg_with_labels("no_filter", labels),
-            Arc::new(crate::invoker::LocalInvoker::new(handler)),
-            Some("c1".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_labels("no_filter", labels),
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some("c1".into()),
+            )
+            .unwrap();
 
         let resolver = RoundRobinResolver::new();
 
         // Empty labels → should match all (default strategy)
         let empty_labels = HashMap::new();
-        assert!(relay.resolve_with_labels("no_filter", &empty_labels, &resolver).is_some());
+        assert!(relay
+            .resolve_with_labels("no_filter", &empty_labels, &resolver)
+            .is_some());
     }
 
     #[test]
@@ -1302,18 +1663,22 @@ mod tests {
         labels.insert("region".to_string(), "us-west".to_string());
         labels.insert("gpu".to_string(), "true".to_string());
 
-        relay.register(
-            cfg_with_labels("superset", labels),
-            Arc::new(crate::invoker::LocalInvoker::new(handler)),
-            Some("c1".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_labels("superset", labels),
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some("c1".into()),
+            )
+            .unwrap();
 
         let resolver = RoundRobinResolver::new();
 
         // Request only requires env=prod → caster has it plus more → match
         let mut req_labels = HashMap::new();
         req_labels.insert("env".to_string(), "prod".to_string());
-        assert!(relay.resolve_with_labels("superset", &req_labels, &resolver).is_some());
+        assert!(relay
+            .resolve_with_labels("superset", &req_labels, &resolver)
+            .is_some());
     }
 
     // ---- Priority tests ----
@@ -1324,16 +1689,20 @@ mod tests {
         let h_low = make_handler(|_ctx, _input| async { Ok(Bytes::from("low")) });
         let h_high = make_handler(|_ctx, _input| async { Ok(Bytes::from("high")) });
 
-        relay.register(
-            cfg_with_priority("prio_rune", 1),
-            Arc::new(crate::invoker::LocalInvoker::new(h_low)),
-            Some("c_low".into()),
-        ).unwrap();
-        relay.register(
-            cfg_with_priority("prio_rune", 10),
-            Arc::new(crate::invoker::LocalInvoker::new(h_high)),
-            Some("c_high".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_priority("prio_rune", 1),
+                Arc::new(crate::invoker::LocalInvoker::new(h_low)),
+                Some("c_low".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg_with_priority("prio_rune", 10),
+                Arc::new(crate::invoker::LocalInvoker::new(h_high)),
+                Some("c_high".into()),
+            )
+            .unwrap();
 
         let inner = Arc::new(RoundRobinResolver::new());
         let resolver = PriorityResolver::new(inner);
@@ -1357,16 +1726,20 @@ mod tests {
         let h_low = make_handler(|_ctx, _input| async { Ok(Bytes::from("low")) });
         let h_high = make_handler(|_ctx, _input| async { Ok(Bytes::from("high")) });
 
-        relay.register(
-            cfg_with_priority("prio_fb", 1),
-            Arc::new(crate::invoker::LocalInvoker::new(h_low)),
-            Some("c_low".into()),
-        ).unwrap();
-        relay.register(
-            cfg_with_priority("prio_fb", 10),
-            Arc::new(crate::invoker::LocalInvoker::new(h_high)),
-            Some("c_high".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_priority("prio_fb", 1),
+                Arc::new(crate::invoker::LocalInvoker::new(h_low)),
+                Some("c_low".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg_with_priority("prio_fb", 10),
+                Arc::new(crate::invoker::LocalInvoker::new(h_high)),
+                Some("c_high".into()),
+            )
+            .unwrap();
 
         let inner = Arc::new(RoundRobinResolver::new());
         let resolver = PriorityResolver::new(inner);
@@ -1393,16 +1766,20 @@ mod tests {
         let h1 = make_handler(|_ctx, _input| async { Ok(Bytes::from("a")) });
         let h2 = make_handler(|_ctx, _input| async { Ok(Bytes::from("b")) });
 
-        relay.register(
-            cfg_with_priority("same_prio", 5),
-            Arc::new(crate::invoker::LocalInvoker::new(h1)),
-            Some("c1".into()),
-        ).unwrap();
-        relay.register(
-            cfg_with_priority("same_prio", 5),
-            Arc::new(crate::invoker::LocalInvoker::new(h2)),
-            Some("c2".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_priority("same_prio", 5),
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("c1".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg_with_priority("same_prio", 5),
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("c2".into()),
+            )
+            .unwrap();
 
         let inner = Arc::new(RoundRobinResolver::new());
         let resolver = PriorityResolver::new(inner);
@@ -1415,11 +1792,22 @@ mod tests {
         };
 
         // With same priority, inner round-robin should alternate
-        let r1 = relay.resolve("same_prio", &resolver).unwrap()
-            .invoke_once(ctx(), Bytes::new()).await.unwrap();
-        let r2 = relay.resolve("same_prio", &resolver).unwrap()
-            .invoke_once(ctx(), Bytes::new()).await.unwrap();
-        assert_ne!(r1, r2, "same priority should delegate to inner strategy (round-robin alternation)");
+        let r1 = relay
+            .resolve("same_prio", &resolver)
+            .unwrap()
+            .invoke_once(ctx(), Bytes::new())
+            .await
+            .unwrap();
+        let r2 = relay
+            .resolve("same_prio", &resolver)
+            .unwrap()
+            .invoke_once(ctx(), Bytes::new())
+            .await
+            .unwrap();
+        assert_ne!(
+            r1, r2,
+            "same priority should delegate to inner strategy (round-robin alternation)"
+        );
     }
 
     // ---- Priority resolver with no candidates ----
@@ -1439,7 +1827,9 @@ mod tests {
         let relay = Relay::new();
         let resolver = RoundRobinResolver::new();
         let labels = HashMap::new();
-        assert!(relay.resolve_with_labels("nope", &labels, &resolver).is_none());
+        assert!(relay
+            .resolve_with_labels("nope", &labels, &resolver)
+            .is_none());
     }
 
     // ====================================================================
@@ -1458,17 +1848,21 @@ mod tests {
         labels.insert("key,with,commas".to_string(), "val2".to_string());
         labels.insert("key with spaces".to_string(), "val3".to_string());
 
-        relay.register(
-            cfg_with_labels("special_labels", labels.clone()),
-            Arc::new(crate::invoker::LocalInvoker::new(handler)),
-            Some("c1".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_labels("special_labels", labels.clone()),
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some("c1".into()),
+            )
+            .unwrap();
 
         let resolver = RoundRobinResolver::new();
 
         // Exact match on all special-char keys
         assert!(
-            relay.resolve_with_labels("special_labels", &labels, &resolver).is_some(),
+            relay
+                .resolve_with_labels("special_labels", &labels, &resolver)
+                .is_some(),
             "should match labels with special characters in keys"
         );
 
@@ -1476,7 +1870,9 @@ mod tests {
         let mut partial = HashMap::new();
         partial.insert("key=with=equals".to_string(), "val1".to_string());
         assert!(
-            relay.resolve_with_labels("special_labels", &partial, &resolver).is_some(),
+            relay
+                .resolve_with_labels("special_labels", &partial, &resolver)
+                .is_some(),
             "partial match with special-char key should succeed"
         );
 
@@ -1484,7 +1880,9 @@ mod tests {
         let mut wrong = HashMap::new();
         wrong.insert("key=with=equals".to_string(), "wrong".to_string());
         assert!(
-            relay.resolve_with_labels("special_labels", &wrong, &resolver).is_none(),
+            relay
+                .resolve_with_labels("special_labels", &wrong, &resolver)
+                .is_none(),
             "wrong value for special-char key should not match"
         );
     }
@@ -1498,11 +1896,13 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("tag".to_string(), "".to_string());
 
-        relay.register(
-            cfg_with_labels("empty_val", labels),
-            Arc::new(crate::invoker::LocalInvoker::new(handler)),
-            Some("c1".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_labels("empty_val", labels),
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                Some("c1".into()),
+            )
+            .unwrap();
 
         let resolver = RoundRobinResolver::new();
 
@@ -1510,7 +1910,9 @@ mod tests {
         let mut req = HashMap::new();
         req.insert("tag".to_string(), "".to_string());
         assert!(
-            relay.resolve_with_labels("empty_val", &req, &resolver).is_some(),
+            relay
+                .resolve_with_labels("empty_val", &req, &resolver)
+                .is_some(),
             "empty string value should match exactly"
         );
 
@@ -1518,7 +1920,9 @@ mod tests {
         let mut req_nonempty = HashMap::new();
         req_nonempty.insert("tag".to_string(), "something".to_string());
         assert!(
-            relay.resolve_with_labels("empty_val", &req_nonempty, &resolver).is_none(),
+            relay
+                .resolve_with_labels("empty_val", &req_nonempty, &resolver)
+                .is_none(),
             "non-empty value should not match empty label value"
         );
     }
@@ -1540,23 +1944,42 @@ mod tests {
         // Low-priority prod
         let mut cfg_low = cfg_with_labels("combo", labels_prod.clone());
         cfg_low.priority = 1;
-        relay.register(cfg_low, Arc::new(crate::invoker::LocalInvoker::new(h_low)), Some("c_low".into())).unwrap();
+        relay
+            .register(
+                cfg_low,
+                Arc::new(crate::invoker::LocalInvoker::new(h_low)),
+                Some("c_low".into()),
+            )
+            .unwrap();
 
         // High-priority prod
         let mut cfg_high = cfg_with_labels("combo", labels_prod.clone());
         cfg_high.priority = 10;
-        relay.register(cfg_high, Arc::new(crate::invoker::LocalInvoker::new(h_high)), Some("c_high".into())).unwrap();
+        relay
+            .register(
+                cfg_high,
+                Arc::new(crate::invoker::LocalInvoker::new(h_high)),
+                Some("c_high".into()),
+            )
+            .unwrap();
 
         // High-priority staging (should be filtered out by labels)
         let mut cfg_staging = cfg_with_labels("combo", labels_staging);
         cfg_staging.priority = 100;
-        relay.register(cfg_staging, Arc::new(crate::invoker::LocalInvoker::new(h_other)), Some("c_staging".into())).unwrap();
+        relay
+            .register(
+                cfg_staging,
+                Arc::new(crate::invoker::LocalInvoker::new(h_other)),
+                Some("c_staging".into()),
+            )
+            .unwrap();
 
         // Use labels filter for env=prod, then priority should pick the high-priority one
         let inner = Arc::new(RoundRobinResolver::new());
         let prio_resolver = PriorityResolver::new(inner);
 
-        let invoker = relay.resolve_with_labels("combo", &labels_prod, &prio_resolver)
+        let invoker = relay
+            .resolve_with_labels("combo", &labels_prod, &prio_resolver)
             .expect("should find a prod caster");
 
         let ctx = RuneContext {
@@ -1566,7 +1989,11 @@ mod tests {
             timeout: Duration::from_secs(30),
         };
         let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
-        assert_eq!(result, Bytes::from("high"), "should pick high-priority prod, not staging");
+        assert_eq!(
+            result,
+            Bytes::from("high"),
+            "should pick high-priority prod, not staging"
+        );
     }
 
     // ====================================================================
@@ -1580,16 +2007,20 @@ mod tests {
         let h_neg = make_handler(|_ctx, _input| async { Ok(Bytes::from("neg")) });
         let h_pos = make_handler(|_ctx, _input| async { Ok(Bytes::from("pos")) });
 
-        relay.register(
-            cfg_with_priority("neg_prio", -10),
-            Arc::new(crate::invoker::LocalInvoker::new(h_neg)),
-            Some("c_neg".into()),
-        ).unwrap();
-        relay.register(
-            cfg_with_priority("neg_prio", 5),
-            Arc::new(crate::invoker::LocalInvoker::new(h_pos)),
-            Some("c_pos".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_priority("neg_prio", -10),
+                Arc::new(crate::invoker::LocalInvoker::new(h_neg)),
+                Some("c_neg".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg_with_priority("neg_prio", 5),
+                Arc::new(crate::invoker::LocalInvoker::new(h_pos)),
+                Some("c_pos".into()),
+            )
+            .unwrap();
 
         let inner = Arc::new(RoundRobinResolver::new());
         let resolver = PriorityResolver::new(inner);
@@ -1604,7 +2035,11 @@ mod tests {
         // Should pick the positive-priority candidate
         let invoker = relay.resolve("neg_prio", &resolver).unwrap();
         let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
-        assert_eq!(result, Bytes::from("pos"), "positive priority should be selected over negative");
+        assert_eq!(
+            result,
+            Bytes::from("pos"),
+            "positive priority should be selected over negative"
+        );
     }
 
     #[tokio::test]
@@ -1615,21 +2050,27 @@ mod tests {
         let h_mid = make_handler(|_ctx, _input| async { Ok(Bytes::from("mid")) });
         let h_high = make_handler(|_ctx, _input| async { Ok(Bytes::from("high")) });
 
-        relay.register(
-            cfg_with_priority("tri", 1),
-            Arc::new(crate::invoker::LocalInvoker::new(h_low)),
-            Some("c_low".into()),
-        ).unwrap();
-        relay.register(
-            cfg_with_priority("tri", 5),
-            Arc::new(crate::invoker::LocalInvoker::new(h_mid)),
-            Some("c_mid".into()),
-        ).unwrap();
-        relay.register(
-            cfg_with_priority("tri", 10),
-            Arc::new(crate::invoker::LocalInvoker::new(h_high)),
-            Some("c_high".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_priority("tri", 1),
+                Arc::new(crate::invoker::LocalInvoker::new(h_low)),
+                Some("c_low".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg_with_priority("tri", 5),
+                Arc::new(crate::invoker::LocalInvoker::new(h_mid)),
+                Some("c_mid".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg_with_priority("tri", 10),
+                Arc::new(crate::invoker::LocalInvoker::new(h_high)),
+                Some("c_high".into()),
+            )
+            .unwrap();
 
         let inner = Arc::new(RoundRobinResolver::new());
         let resolver = PriorityResolver::new(inner);
@@ -1644,7 +2085,11 @@ mod tests {
         // Should always pick the highest priority (10)
         let invoker = relay.resolve("tri", &resolver).unwrap();
         let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
-        assert_eq!(result, Bytes::from("high"), "should pick highest of three tiers");
+        assert_eq!(
+            result,
+            Bytes::from("high"),
+            "should pick highest of three tiers"
+        );
     }
 
     // ====================================================================
@@ -1667,22 +2112,28 @@ mod tests {
         let h_low = make_handler(|_ctx, _input| async { Ok(Bytes::from("low")) });
 
         // Two high-priority candidates
-        relay.register(
-            cfg_with_priority("prio_ll", 10),
-            Arc::new(crate::invoker::LocalInvoker::new(h1)),
-            Some("c1".into()),
-        ).unwrap();
-        relay.register(
-            cfg_with_priority("prio_ll", 10),
-            Arc::new(crate::invoker::LocalInvoker::new(h2)),
-            Some("c2".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_priority("prio_ll", 10),
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("c1".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                cfg_with_priority("prio_ll", 10),
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("c2".into()),
+            )
+            .unwrap();
         // One low-priority candidate
-        relay.register(
-            cfg_with_priority("prio_ll", 1),
-            Arc::new(crate::invoker::LocalInvoker::new(h_low)),
-            Some("c_low".into()),
-        ).unwrap();
+        relay
+            .register(
+                cfg_with_priority("prio_ll", 1),
+                Arc::new(crate::invoker::LocalInvoker::new(h_low)),
+                Some("c_low".into()),
+            )
+            .unwrap();
 
         let inner = Arc::new(LeastLoadResolver::new(Arc::clone(&session_mgr)));
         let resolver = PriorityResolver::new(inner);
@@ -1724,9 +2175,16 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
+        relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                None,
+            )
+            .unwrap();
 
         // Should resolve with correct method
         assert_eq!(
@@ -1734,10 +2192,7 @@ mod tests {
             Some("post_rune".to_string()),
         );
         // Should NOT resolve with wrong method
-        assert_eq!(
-            relay.resolve_by_gate_path("GET", "/api/foo"),
-            None,
-        );
+        assert_eq!(relay.resolve_by_gate_path("GET", "/api/foo"), None,);
     }
 
     #[test]
@@ -1759,7 +2214,8 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
         let config_get = RuneConfig {
             name: "get_rune".into(),
@@ -1772,11 +2228,24 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
-        relay.register(config_post, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
-        relay.register(config_get, Arc::new(crate::invoker::LocalInvoker::new(h2)), None).unwrap();
+        relay
+            .register(
+                config_post,
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                None,
+            )
+            .unwrap();
+        relay
+            .register(
+                config_get,
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                None,
+            )
+            .unwrap();
 
         // Both should resolve to their respective rune names
         assert_eq!(
@@ -1807,7 +2276,8 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
         let config_get = RuneConfig {
             name: "get_rune".into(),
@@ -1820,18 +2290,34 @@ mod tests {
             }),
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
-        relay.register(config_post, Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
-        relay.register(config_get, Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c2".into())).unwrap();
+        relay
+            .register(
+                config_post,
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("c1".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                config_get,
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("c2".into()),
+            )
+            .unwrap();
 
         // Remove POST caster
         relay.remove_caster("c1");
 
         // POST should be gone, GET should remain
         assert_eq!(relay.resolve_by_gate_path("POST", "/api/bar"), None);
-        assert_eq!(relay.resolve_by_gate_path("GET", "/api/bar"), Some("get_rune".to_string()));
+        assert_eq!(
+            relay.resolve_by_gate_path("GET", "/api/bar"),
+            Some("get_rune".to_string())
+        );
     }
 
     // ====================================================================
@@ -1876,11 +2362,13 @@ mod tests {
 
             // Pre-register "old" caster
             let h_old = make_handler(|_ctx, input| async move { Ok(input) });
-            relay.register(
-                make_cfg(),
-                Arc::new(crate::invoker::LocalInvoker::new(h_old)),
-                Some("old".into()),
-            ).unwrap();
+            relay
+                .register(
+                    make_cfg(),
+                    Arc::new(crate::invoker::LocalInvoker::new(h_old)),
+                    Some("old".into()),
+                )
+                .unwrap();
 
             let barrier = Arc::new(Barrier::new(2));
 
@@ -1899,11 +2387,13 @@ mod tests {
             let t2 = std::thread::spawn(move || {
                 barrier3.wait();
                 let h_new = make_handler(|_ctx, input| async move { Ok(input) });
-                relay3.register(
-                    make_cfg(),
-                    Arc::new(crate::invoker::LocalInvoker::new(h_new)),
-                    Some("new".into()),
-                ).unwrap();
+                relay3
+                    .register(
+                        make_cfg(),
+                        Arc::new(crate::invoker::LocalInvoker::new(h_new)),
+                        Some("new".into()),
+                    )
+                    .unwrap();
             });
 
             t1.join().unwrap();
@@ -1912,9 +2402,10 @@ mod tests {
             // Invariant: gate_path_index must be consistent with entries.
             // If any entry with gate_path "/api/shared" exists,
             // resolve_by_gate_path must return Some.
-            let has_entry_with_path = relay.list().iter().any(|(_, gp)| {
-                gp.as_deref() == Some("/api/shared")
-            });
+            let has_entry_with_path = relay
+                .list()
+                .iter()
+                .any(|(_, gp)| gp.as_deref() == Some("/api/shared"));
             let index_has_path = relay.resolve_by_gate_path("POST", "/api/shared").is_some();
 
             assert_eq!(
@@ -1937,21 +2428,28 @@ mod tests {
             gate: None,
             input_schema: None,
             output_schema: None,
-            priority: 0, labels: Default::default(),
+            priority: 0,
+            labels: Default::default(),
         };
 
         // Register same rune from 3 different casters
         for i in 0..3 {
             let handler = make_handler(|_ctx, input| async move { Ok(input) });
-            relay.register(
-                cfg(),
-                Arc::new(crate::invoker::LocalInvoker::new(handler)),
-                Some(format!("c{}", i)),
-            ).unwrap();
+            relay
+                .register(
+                    cfg(),
+                    Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                    Some(format!("c{}", i)),
+                )
+                .unwrap();
         }
 
         let list = relay.list();
-        assert_eq!(list.len(), 1, "same rune name from 3 casters should appear once in list");
+        assert_eq!(
+            list.len(),
+            1,
+            "same rune name from 3 casters should appear once in list"
+        );
         assert_eq!(list[0].0, "echo");
 
         // But internal entries should have all 3 candidates
@@ -1975,10 +2473,18 @@ mod tests {
                 path: "/api/action".into(),
                 method: "POST".into(),
             }),
-            input_schema: None, output_schema: None,
-            priority: 0, labels: Default::default(),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
+            labels: Default::default(),
         };
-        relay.register(config1, Arc::new(crate::invoker::LocalInvoker::new(h1)), None).unwrap();
+        relay
+            .register(
+                config1,
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                None,
+            )
+            .unwrap();
 
         let config2 = RuneConfig {
             name: "rune_b".into(),
@@ -1989,10 +2495,16 @@ mod tests {
                 path: "/api/action".into(),
                 method: "POST".into(),
             }),
-            input_schema: None, output_schema: None,
-            priority: 0, labels: Default::default(),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
+            labels: Default::default(),
         };
-        let result = relay.register(config2, Arc::new(crate::invoker::LocalInvoker::new(h2)), None);
+        let result = relay.register(
+            config2,
+            Arc::new(crate::invoker::LocalInvoker::new(h2)),
+            None,
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("route conflict"));
     }
@@ -2012,12 +2524,26 @@ mod tests {
                 path: "/api/scale".into(),
                 method: "POST".into(),
             }),
-            input_schema: None, output_schema: None,
-            priority: 0, labels: Default::default(),
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
+            labels: Default::default(),
         };
 
-        relay.register(config.clone(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("c1".into())).unwrap();
-        relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("c2".into())).unwrap();
+        relay
+            .register(
+                config.clone(),
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("c1".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("c2".into()),
+            )
+            .unwrap();
     }
 
     // NF-4: reserved routes should block all /api/v1/ paths
@@ -2027,10 +2553,19 @@ mod tests {
         let handler = make_handler(|_ctx, input| async move { Ok(input) });
         let config = RuneConfig {
             name: "my_rune".into(),
-            gate: Some(crate::rune::GateConfig { path: "/api/v1/keys".into(), method: "GET".into() }),
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/v1/keys".into(),
+                method: "GET".into(),
+            }),
             ..Default::default()
         };
-        assert!(relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).is_err());
+        assert!(relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                None
+            )
+            .is_err());
     }
 
     #[test]
@@ -2039,10 +2574,19 @@ mod tests {
         let handler = make_handler(|_ctx, input| async move { Ok(input) });
         let config = RuneConfig {
             name: "my_rune".into(),
-            gate: Some(crate::rune::GateConfig { path: "/api/v1/casters".into(), method: "GET".into() }),
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/v1/casters".into(),
+                method: "GET".into(),
+            }),
             ..Default::default()
         };
-        assert!(relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).is_err());
+        assert!(relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                None
+            )
+            .is_err());
     }
 
     #[test]
@@ -2051,10 +2595,19 @@ mod tests {
         let handler = make_handler(|_ctx, input| async move { Ok(input) });
         let config = RuneConfig {
             name: "my_rune".into(),
-            gate: Some(crate::rune::GateConfig { path: "/api/v1/openapi.json".into(), method: "GET".into() }),
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/v1/openapi.json".into(),
+                method: "GET".into(),
+            }),
             ..Default::default()
         };
-        assert!(relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).is_err());
+        assert!(relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                None
+            )
+            .is_err());
     }
 
     #[test]
@@ -2063,10 +2616,19 @@ mod tests {
         let handler = make_handler(|_ctx, input| async move { Ok(input) });
         let config = RuneConfig {
             name: "my_rune".into(),
-            gate: Some(crate::rune::GateConfig { path: "/api/v1/status".into(), method: "GET".into() }),
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/v1/status".into(),
+                method: "GET".into(),
+            }),
             ..Default::default()
         };
-        assert!(relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).is_err());
+        assert!(relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                None
+            )
+            .is_err());
     }
 
     #[test]
@@ -2075,10 +2637,19 @@ mod tests {
         let handler = make_handler(|_ctx, input| async move { Ok(input) });
         let config = RuneConfig {
             name: "my_rune".into(),
-            gate: Some(crate::rune::GateConfig { path: "/api/echo".into(), method: "POST".into() }),
+            gate: Some(crate::rune::GateConfig {
+                path: "/api/echo".into(),
+                method: "POST".into(),
+            }),
             ..Default::default()
         };
-        assert!(relay.register(config, Arc::new(crate::invoker::LocalInvoker::new(handler)), None).is_ok());
+        assert!(relay
+            .register(
+                config,
+                Arc::new(crate::invoker::LocalInvoker::new(handler)),
+                None
+            )
+            .is_ok());
     }
 
     // M-3 回归测试: 两个 caster 注册同名 rune 和同 gate_path，
@@ -2098,8 +2669,20 @@ mod tests {
             ..Default::default()
         };
 
-        relay.register(config.clone(), Arc::new(crate::invoker::LocalInvoker::new(h1)), Some("caster_a".into())).unwrap();
-        relay.register(config.clone(), Arc::new(crate::invoker::LocalInvoker::new(h2)), Some("caster_b".into())).unwrap();
+        relay
+            .register(
+                config.clone(),
+                Arc::new(crate::invoker::LocalInvoker::new(h1)),
+                Some("caster_a".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                config.clone(),
+                Arc::new(crate::invoker::LocalInvoker::new(h2)),
+                Some("caster_b".into()),
+            )
+            .unwrap();
 
         // 移除 caster_a
         relay.remove_caster("caster_a");

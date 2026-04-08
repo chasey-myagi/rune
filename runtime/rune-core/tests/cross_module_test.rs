@@ -9,7 +9,9 @@ use rune_core::app::App;
 use rune_core::invoker::LocalInvoker;
 use rune_core::relay::Relay;
 use rune_core::resolver::RoundRobinResolver;
-use rune_core::rune::{make_handler, RuneConfig, RuneContext, RuneError, StreamRuneHandler, StreamSender};
+use rune_core::rune::{
+    make_handler, RuneConfig, RuneContext, RuneError, StreamRuneHandler, StreamSender,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -51,7 +53,12 @@ struct CountingStreamHandler {
 
 #[async_trait::async_trait]
 impl StreamRuneHandler for CountingStreamHandler {
-    async fn execute(&self, _ctx: RuneContext, _input: Bytes, tx: StreamSender) -> Result<(), RuneError> {
+    async fn execute(
+        &self,
+        _ctx: RuneContext,
+        _input: Bytes,
+        tx: StreamSender,
+    ) -> Result<(), RuneError> {
         for i in 0..self.count {
             tx.emit(Bytes::from(format!("chunk-{}", i))).await?;
         }
@@ -93,7 +100,10 @@ async fn app_register_echo_rune_full_chain() {
 #[tokio::test]
 async fn app_register_stream_rune_invoke_stream() {
     let mut app = App::new();
-    app.stream_rune(stream_config("streamer"), CountingStreamHandler { count: 3 });
+    app.stream_rune(
+        stream_config("streamer"),
+        CountingStreamHandler { count: 3 },
+    );
 
     let resolver = RoundRobinResolver::new();
     let invoker = app
@@ -189,7 +199,12 @@ async fn full_chain_with_context_propagation() {
     let mut app = App::new();
     let handler = make_handler(|ctx, input| async move {
         let user = ctx.context.get("user").cloned().unwrap_or_default();
-        let output = format!("rune={} user={} input={}", ctx.rune_name, user, String::from_utf8_lossy(&input));
+        let output = format!(
+            "rune={} user={} input={}",
+            ctx.rune_name,
+            user,
+            String::from_utf8_lossy(&input)
+        );
         Ok(Bytes::from(output))
     });
     app.rune(echo_config("ctx_rune"), handler);
@@ -200,7 +215,9 @@ async fn full_chain_with_context_propagation() {
     let ctx = RuneContext {
         rune_name: "ctx_rune".into(),
         request_id: "r-ctx".into(),
-        context: [("user".to_string(), "alice".to_string())].into_iter().collect(),
+        context: [("user".to_string(), "alice".to_string())]
+            .into_iter()
+            .collect(),
         timeout: Duration::from_secs(10),
     };
 
@@ -212,7 +229,10 @@ async fn full_chain_with_context_propagation() {
 #[tokio::test]
 async fn app_build_returns_functional_components() {
     let mut app = App::new();
-    app.rune(echo_config("built"), make_handler(|_ctx, input| async move { Ok(input) }));
+    app.rune(
+        echo_config("built"),
+        make_handler(|_ctx, input| async move { Ok(input) }),
+    );
     let running = app.build();
 
     let resolver = RoundRobinResolver::new();

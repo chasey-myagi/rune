@@ -21,9 +21,9 @@ pub struct RuneConfig {
     pub description: String,
     pub supports_stream: bool,
     pub gate: Option<GateConfig>,
-    pub input_schema: Option<String>,   // JSON Schema string
-    pub output_schema: Option<String>,  // JSON Schema string
-    pub priority: i32,                  // Caster 优先级（高值优先）
+    pub input_schema: Option<String>,  // JSON Schema string
+    pub output_schema: Option<String>, // JSON Schema string
+    pub priority: i32,                 // Caster 优先级（高值优先）
     pub labels: std::collections::HashMap<String, String>,
 }
 
@@ -35,7 +35,10 @@ pub struct GateConfig {
 
 impl Default for GateConfig {
     fn default() -> Self {
-        Self { path: String::new(), method: "POST".to_string() }
+        Self {
+            path: String::new(),
+            method: "POST".to_string(),
+        }
     }
 }
 
@@ -77,7 +80,12 @@ where
 /// 流式 Rune handler
 #[async_trait::async_trait]
 pub trait StreamRuneHandler: Send + Sync + 'static {
-    async fn execute(&self, ctx: RuneContext, input: Bytes, tx: StreamSender) -> Result<(), RuneError>;
+    async fn execute(
+        &self,
+        ctx: RuneContext,
+        input: Bytes,
+        tx: StreamSender,
+    ) -> Result<(), RuneError>;
 }
 
 /// StreamSender — handler pushes stream events through this
@@ -91,7 +99,9 @@ impl StreamSender {
     }
 
     pub async fn emit(&self, data: Bytes) -> Result<(), RuneError> {
-        self.tx.send(Ok(data)).await
+        self.tx
+            .send(Ok(data))
+            .await
             .map_err(|_| RuneError::Internal(anyhow::anyhow!("stream receiver dropped")))
     }
 

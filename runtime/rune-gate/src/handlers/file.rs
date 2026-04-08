@@ -16,10 +16,7 @@ pub async fn download_file(
     match state.rune.file_broker.get(&file_id) {
         Some(stored) => {
             let headers = [
-                (
-                    axum::http::header::CONTENT_TYPE,
-                    stored.mime_type.clone(),
-                ),
+                (axum::http::header::CONTENT_TYPE, stored.mime_type.clone()),
                 (
                     axum::http::header::CONTENT_DISPOSITION,
                     format!(

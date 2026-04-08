@@ -241,8 +241,12 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "echo");
         assert_eq!(results[0].1, 1); // count
-        // P95 of a single value should be that value
-        assert!((results[0].4 - 100.0).abs() < 0.01, "p95 should be 100.0, got {}", results[0].4);
+                                     // P95 of a single value should be that value
+        assert!(
+            (results[0].4 - 100.0).abs() < 0.01,
+            "p95 should be 100.0, got {}",
+            results[0].4
+        );
     }
 
     #[tokio::test]
@@ -318,8 +322,16 @@ mod tests {
         // Results are sorted by rune_name
         let fast = results.iter().find(|r| r.0 == "fast").unwrap();
         let slow = results.iter().find(|r| r.0 == "slow").unwrap();
-        assert!((fast.4 - 19.0).abs() < 2.0, "fast p95 should be ~19, got {}", fast.4);
-        assert!((slow.4 - 196.0).abs() < 6.0, "slow p95 should be ~196, got {}", slow.4);
+        assert!(
+            (fast.4 - 19.0).abs() < 2.0,
+            "fast p95 should be ~19, got {}",
+            fast.4
+        );
+        assert!(
+            (slow.4 - 196.0).abs() < 6.0,
+            "slow p95 should be ~196, got {}",
+            slow.4
+        );
     }
 
     /// I-2 回归测试: P95 合并应按名称匹配，不依赖隐式排序位置

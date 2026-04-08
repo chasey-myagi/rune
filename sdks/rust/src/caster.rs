@@ -63,7 +63,11 @@ impl Caster {
 
     /// Returns the config of a registered rune by name.
     pub fn get_rune_config(&self, name: &str) -> Option<RuneConfig> {
-        self.runes.read().unwrap().get(name).map(|r| r.config.clone())
+        self.runes
+            .read()
+            .unwrap()
+            .get(name)
+            .map(|r| r.config.clone())
     }
 
     /// Check if a rune is registered as a stream handler.
@@ -122,12 +126,11 @@ impl Caster {
         F: Fn(RuneContext, Bytes, Vec<FileAttachment>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = SdkResult<Bytes>> + Send + 'static,
     {
-        let handler =
-            Arc::new(
-                move |ctx, input, files| -> BoxFuture<'static, SdkResult<Bytes>> {
-                    Box::pin(handler(ctx, input, files))
-                },
-            );
+        let handler = Arc::new(
+            move |ctx, input, files| -> BoxFuture<'static, SdkResult<Bytes>> {
+                Box::pin(handler(ctx, input, files))
+            },
+        );
         self.register_inner(config, HandlerKind::UnaryWithFiles(handler))
     }
 
@@ -139,10 +142,11 @@ impl Caster {
         F: Fn(RuneContext, Bytes, StreamSender) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = SdkResult<()>> + Send + 'static,
     {
-        let handler =
-            Arc::new(move |ctx, input, stream| -> BoxFuture<'static, SdkResult<()>> {
+        let handler = Arc::new(
+            move |ctx, input, stream| -> BoxFuture<'static, SdkResult<()>> {
                 Box::pin(handler(ctx, input, stream))
-            });
+            },
+        );
         let mut cfg = config;
         cfg.supports_stream = true;
         self.register_inner(cfg, HandlerKind::Stream(handler))
@@ -151,18 +155,14 @@ impl Caster {
     /// Register a streaming rune handler that accepts file attachments.
     pub fn stream_rune_with_files<F, Fut>(&self, config: RuneConfig, handler: F) -> SdkResult<()>
     where
-        F: Fn(RuneContext, Bytes, Vec<FileAttachment>, StreamSender) -> Fut
-            + Send
-            + Sync
-            + 'static,
+        F: Fn(RuneContext, Bytes, Vec<FileAttachment>, StreamSender) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = SdkResult<()>> + Send + 'static,
     {
-        let handler =
-            Arc::new(
-                move |ctx, input, files, stream| -> BoxFuture<'static, SdkResult<()>> {
-                    Box::pin(handler(ctx, input, files, stream))
-                },
-            );
+        let handler = Arc::new(
+            move |ctx, input, files, stream| -> BoxFuture<'static, SdkResult<()>> {
+                Box::pin(handler(ctx, input, files, stream))
+            },
+        );
         let mut cfg = config;
         cfg.supports_stream = true;
         self.register_inner(cfg, HandlerKind::StreamWithFiles(handler))
@@ -201,11 +201,7 @@ impl Caster {
                     if self.shutdown_token.is_cancelled() {
                         return Ok(());
                     }
-                    tracing::warn!(
-                        "connection error: {}, reconnecting in {:?}",
-                        e,
-                        delay
-                    );
+                    tracing::warn!("connection error: {}, reconnecting in {:?}", e, delay);
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
                         _ = self.shutdown_token.cancelled() => {
@@ -285,10 +281,7 @@ impl Caster {
                         );
                     } else {
                         tracing::error!("attach rejected: {}", ack.reason);
-                        return Err(SdkError::Other(format!(
-                            "attach rejected: {}",
-                            ack.reason
-                        )));
+                        return Err(SdkError::Other(format!("attach rejected: {}", ack.reason)));
                     }
                 }
                 Some(Payload::Execute(req)) => {
@@ -309,9 +302,7 @@ impl Caster {
                     });
                 }
                 Some(Payload::Cancel(cancel)) => {
-                    if let Some(token) =
-                        cancel_tokens.read().await.get(&cancel.request_id)
-                    {
+                    if let Some(token) = cancel_tokens.read().await.get(&cancel.request_id) {
                         token.cancel();
                     }
                     tracing::info!("cancel requested: {}", cancel.request_id);

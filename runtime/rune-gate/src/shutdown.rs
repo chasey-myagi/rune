@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::Arc;
 
 /// Coordinates graceful shutdown across the gate layer.
 #[derive(Clone)]

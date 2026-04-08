@@ -234,7 +234,11 @@ async fn test_e05_caster_disconnect_removes_runes() {
         .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(
-        body["runes"].as_array().unwrap().iter().any(|r| r["name"] == "e05_temp"),
+        body["runes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "e05_temp"),
         "e05_temp should be registered"
     );
 
@@ -254,7 +258,11 @@ async fn test_e05_caster_disconnect_removes_runes() {
         .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(
-        !body["runes"].as_array().unwrap().iter().any(|r| r["name"] == "e05_temp"),
+        !body["runes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "e05_temp"),
         "e05_temp should be removed after disconnect"
     );
 }
@@ -342,11 +350,10 @@ async fn test_e12_handler_modifies_input() {
         .rune(
             RuneConfig::new("e12_modify"),
             |_ctx: RuneContext, input: Bytes| async move {
-                let mut v: serde_json::Value = serde_json::from_slice(&input)
-                    .map_err(|e| SdkError::Other(e.to_string()))?;
+                let mut v: serde_json::Value =
+                    serde_json::from_slice(&input).map_err(|e| SdkError::Other(e.to_string()))?;
                 v["modified"] = serde_json::json!(true);
-                let out = serde_json::to_vec(&v)
-                    .map_err(|e| SdkError::Other(e.to_string()))?;
+                let out = serde_json::to_vec(&v).map_err(|e| SdkError::Other(e.to_string()))?;
                 Ok(Bytes::from(out))
             },
         )
@@ -494,7 +501,9 @@ async fn test_e20_stream_three_chunks() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{RUNTIME_HTTP}/api/v1/runes/e20_stream/run?stream=true"))
+        .post(format!(
+            "{RUNTIME_HTTP}/api/v1/runes/e20_stream/run?stream=true"
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -525,7 +534,9 @@ async fn test_e21_stream_emit_string() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{RUNTIME_HTTP}/api/v1/runes/e21_str/run?stream=true"))
+        .post(format!(
+            "{RUNTIME_HTTP}/api/v1/runes/e21_str/run?stream=true"
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -557,7 +568,9 @@ async fn test_e22_stream_emit_json() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{RUNTIME_HTTP}/api/v1/runes/e22_json/run?stream=true"))
+        .post(format!(
+            "{RUNTIME_HTTP}/api/v1/runes/e22_json/run?stream=true"
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -587,7 +600,9 @@ async fn test_e23_stream_handler_error() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{RUNTIME_HTTP}/api/v1/runes/e23_err/run?stream=true"))
+        .post(format!(
+            "{RUNTIME_HTTP}/api/v1/runes/e23_err/run?stream=true"
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -723,10 +738,7 @@ async fn test_e31_async_get_completed_task() {
             .await
             .unwrap();
         let task: serde_json::Value = resp.json().await.unwrap();
-        let status = task
-            .get("status")
-            .and_then(|s| s.as_str())
-            .unwrap_or("");
+        let status = task.get("status").and_then(|s| s.as_str()).unwrap_or("");
         if status == "completed" {
             assert!(task.get("output").is_some());
             handle.abort();
@@ -1161,15 +1173,13 @@ async fn test_e51_file_attachment_fields() {
 
     let content = b"hello world";
     let client = reqwest::Client::new();
-    let form = reqwest::multipart::Form::new()
-        .text("input", r#"{}"#)
-        .part(
-            "file",
-            reqwest::multipart::Part::bytes(content.to_vec())
-                .file_name("hello.txt")
-                .mime_str("text/plain")
-                .unwrap(),
-        );
+    let form = reqwest::multipart::Form::new().text("input", r#"{}"#).part(
+        "file",
+        reqwest::multipart::Part::bytes(content.to_vec())
+            .file_name("hello.txt")
+            .mime_str("text/plain")
+            .unwrap(),
+    );
 
     let resp = client
         .post(format!("{RUNTIME_HTTP}/api/v1/runes/e51_check/run"))
@@ -1180,7 +1190,9 @@ async fn test_e51_file_attachment_fields() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     // Gate wraps response with a "files" array containing stored-file metadata
-    let files = body["files"].as_array().expect("response should contain 'files' array");
+    let files = body["files"]
+        .as_array()
+        .expect("response should contain 'files' array");
     assert!(!files.is_empty());
     let f = &files[0];
     assert_eq!(f["filename"], "hello.txt");
@@ -1238,7 +1250,9 @@ async fn test_e52_multiple_file_upload() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     // Gate wraps response with a "files" array containing stored-file metadata
-    let files = body["files"].as_array().expect("response should contain 'files' array");
+    let files = body["files"]
+        .as_array()
+        .expect("response should contain 'files' array");
     assert_eq!(files.len(), 3);
     let uploaded_names: std::collections::HashSet<&str> = files
         .iter()
@@ -1257,15 +1271,13 @@ async fn test_e53_oversized_file() {
     // This depends on server configuration for max file size
     let client = reqwest::Client::new();
     let large_data = vec![0u8; 50_000_000]; // 50MB
-    let form = reqwest::multipart::Form::new()
-        .text("json", r#"{}"#)
-        .part(
-            "file",
-            reqwest::multipart::Part::bytes(large_data)
-                .file_name("huge.bin")
-                .mime_str("application/octet-stream")
-                .unwrap(),
-        );
+    let form = reqwest::multipart::Form::new().text("json", r#"{}"#).part(
+        "file",
+        reqwest::multipart::Part::bytes(large_data)
+            .file_name("huge.bin")
+            .mime_str("application/octet-stream")
+            .unwrap(),
+    );
 
     let resp = client
         .post(format!("{RUNTIME_HTTP}/api/v1/runes/any/run"))

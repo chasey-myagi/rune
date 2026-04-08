@@ -1,11 +1,11 @@
-pub mod rune;
-pub mod invoker;
-pub mod relay;
-pub mod resolver;
-pub mod session;
 pub mod app;
 pub mod auth;
 pub mod config;
 pub mod grpc_service;
+pub mod invoker;
+pub mod relay;
+pub mod resolver;
+pub mod rune;
+pub mod session;
 pub mod telemetry;
 pub mod time_utils;

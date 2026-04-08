@@ -497,11 +497,17 @@ http_port = 50060
 
     // Verify grpc_addr() produces a valid IPv6 SocketAddr
     let addr = config.grpc_addr();
-    assert_eq!(addr, SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 50070));
+    assert_eq!(
+        addr,
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 50070)
+    );
     assert!(addr.is_ipv6());
 
     let http = config.http_addr();
-    assert_eq!(http, SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 50060));
+    assert_eq!(
+        http,
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 50060)
+    );
     assert!(http.is_ipv6());
 }
 
@@ -597,9 +603,15 @@ fn test_multiple_env_vars_all_take_effect() {
     let mut config = AppConfig::default();
     config.apply_env_overrides();
 
-    assert_eq!(config.server.grpc_host, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    assert_eq!(
+        config.server.grpc_host,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+    );
     assert_eq!(config.server.grpc_port, 9999);
-    assert_eq!(config.server.http_host, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    assert_eq!(
+        config.server.http_host,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+    );
     assert_eq!(config.server.http_port, 8888);
     assert!(config.server.dev_mode);
     assert!(!config.auth.enabled);
@@ -857,7 +869,10 @@ fn test_log_file_env_empty_clears_value() {
     std::env::set_var("RUNE_LOG__FILE", "");
     config.apply_env_overrides();
 
-    assert!(config.log.file.is_none(), "empty RUNE_LOG__FILE should clear the value");
+    assert!(
+        config.log.file.is_none(),
+        "empty RUNE_LOG__FILE should clear the value"
+    );
 
     std::env::remove_var("RUNE_LOG__FILE");
 }
@@ -898,18 +913,27 @@ fn test_full_config_roundtrip() {
     // Verify every single field survives the roundtrip
     assert_eq!(loaded.server.grpc_host, IpAddr::V6(Ipv6Addr::LOCALHOST));
     assert_eq!(loaded.server.grpc_port, 12345);
-    assert_eq!(loaded.server.http_host, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+    assert_eq!(
+        loaded.server.http_host,
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))
+    );
     assert_eq!(loaded.server.http_port, 54321);
     assert!(loaded.server.dev_mode);
     assert_eq!(loaded.server.drain_timeout_secs, 30);
     assert!(!loaded.auth.enabled);
-    assert_eq!(loaded.auth.exempt_routes, vec!["/health", "/metrics", "/ready"]);
+    assert_eq!(
+        loaded.auth.exempt_routes,
+        vec!["/health", "/metrics", "/ready"]
+    );
     assert_eq!(loaded.store.db_path, "/custom/path/rune.db");
     assert_eq!(loaded.store.log_retention_days, 7);
     assert_eq!(loaded.session.heartbeat_interval_secs, 5);
     assert_eq!(loaded.session.heartbeat_timeout_secs, 20);
     assert_eq!(loaded.session.max_request_timeout_secs, 60);
-    assert_eq!(loaded.gate.cors_origins, vec!["http://localhost:3000", "https://example.com"]);
+    assert_eq!(
+        loaded.gate.cors_origins,
+        vec!["http://localhost:3000", "https://example.com"]
+    );
     assert_eq!(loaded.gate.max_upload_size_mb, 50);
     assert_eq!(loaded.resolver.strategy, "random");
     assert_eq!(loaded.rate_limit.requests_per_minute, 1200);

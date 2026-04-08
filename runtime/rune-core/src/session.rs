@@ -1,18 +1,18 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use crate::auth::KeyVerifier;
+use crate::invoker::RemoteInvoker;
+use crate::relay::Relay;
+use crate::rune::{RuneConfig, RuneError};
 use bytes::Bytes;
 use dashmap::DashMap;
+use rune_proto::*;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time;
 use tonic::Streaming;
-use rune_proto::*;
-use crate::auth::KeyVerifier;
-use crate::rune::{RuneConfig, RuneError};
-use crate::relay::Relay;
-use crate::invoker::RemoteInvoker;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum SessionState {
@@ -90,7 +90,8 @@ impl SessionManager {
     }
 
     pub fn is_available(&self, caster_id: &str) -> bool {
-        self.sessions.get(caster_id)
+        self.sessions
+            .get(caster_id)
             .map(|s| s.semaphore.available_permits() > 0)
             .unwrap_or(false)
     }
@@ -108,7 +109,8 @@ impl SessionManager {
     /// Return the number of available permits (free concurrency slots) for a caster.
     /// Returns 0 if the caster is not connected.
     pub fn available_permits(&self, caster_id: &str) -> usize {
-        self.sessions.get(caster_id)
+        self.sessions
+            .get(caster_id)
             .map(|s| s.semaphore.available_permits())
             .unwrap_or(0)
     }
@@ -121,13 +123,16 @@ impl SessionManager {
     /// Insert a dummy caster for integration tests in downstream crates.
     pub fn insert_test_caster(&self, caster_id: &str, max_concurrent: usize) {
         let (tx, _rx) = mpsc::channel(16);
-        self.sessions.insert(caster_id.to_string(), CasterState {
-            outbound: tx,
-            pending: Arc::new(DashMap::new()),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::new(Semaphore::new(max_concurrent)),
-            connected_at: Instant::now(),
-        });
+        self.sessions.insert(
+            caster_id.to_string(),
+            CasterState {
+                outbound: tx,
+                pending: Arc::new(DashMap::new()),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::new(Semaphore::new(max_concurrent)),
+                connected_at: Instant::now(),
+            },
+        );
     }
 
     pub async fn handle_session(
@@ -139,7 +144,8 @@ impl SessionManager {
         let mut caster_id: Option<String> = None;
         let mut state = SessionState::Attaching;
         let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
-        let timeout_handles: Arc<DashMap<String, tokio::task::JoinHandle<()>>> = Arc::new(DashMap::new());
+        let timeout_handles: Arc<DashMap<String, tokio::task::JoinHandle<()>>> =
+            Arc::new(DashMap::new());
         let last_heartbeat_ms = Arc::new(AtomicU64::new(now_ms()));
         let semaphore = Arc::new(Semaphore::new(0)); // Attach adds permits
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -156,12 +162,19 @@ impl SessionManager {
             loop {
                 time::sleep(hb_interval).await;
                 let msg = SessionMessage {
-                    payload: Some(session_message::Payload::Heartbeat(Heartbeat { timestamp_ms: now_ms() })),
+                    payload: Some(session_message::Payload::Heartbeat(Heartbeat {
+                        timestamp_ms: now_ms(),
+                    })),
                 };
-                if hb_tx.send(msg).await.is_err() { break; }
+                if hb_tx.send(msg).await.is_err() {
+                    break;
+                }
                 let elapsed = now_ms().saturating_sub(hb_last.load(Ordering::Relaxed));
                 if elapsed > hb_timeout.as_millis() as u64 {
-                    tracing::warn!(elapsed_ms = elapsed, "heartbeat timeout, forcing session shutdown");
+                    tracing::warn!(
+                        elapsed_ms = elapsed,
+                        "heartbeat timeout, forcing session shutdown"
+                    );
                     let _ = hb_shutdown.send(true);
                     break;
                 }
@@ -207,16 +220,23 @@ impl SessionManager {
 
                     tracing::info!(caster_id = %id, runes = attach.runes.len(), max_concurrent = max_conc, "caster attached");
 
-                    let permits = if max_conc > 0 { max_conc as usize } else { usize::MAX >> 1 };
+                    let permits = if max_conc > 0 {
+                        max_conc as usize
+                    } else {
+                        usize::MAX >> 1
+                    };
                     semaphore.add_permits(permits);
 
-                    self.sessions.insert(id.clone(), CasterState {
-                        outbound: outbound_tx.clone(),
-                        pending: Arc::clone(&pending),
-                        timeout_handles: Arc::clone(&timeout_handles),
-                        semaphore: Arc::clone(&semaphore),
-                        connected_at: Instant::now(),
-                    });
+                    self.sessions.insert(
+                        id.clone(),
+                        CasterState {
+                            outbound: outbound_tx.clone(),
+                            pending: Arc::clone(&pending),
+                            timeout_handles: Arc::clone(&timeout_handles),
+                            semaphore: Arc::clone(&semaphore),
+                            connected_at: Instant::now(),
+                        },
+                    );
 
                     let mut configs = Vec::new();
                     for decl in &attach.runes {
@@ -227,10 +247,22 @@ impl SessionManager {
                             supports_stream: decl.supports_stream,
                             gate: decl.gate.as_ref().map(|g| crate::rune::GateConfig {
                                 path: g.path.clone(),
-                                method: if g.method.is_empty() { "POST".to_string() } else { g.method.clone() },
+                                method: if g.method.is_empty() {
+                                    "POST".to_string()
+                                } else {
+                                    g.method.clone()
+                                },
                             }),
-                            input_schema: if decl.input_schema.is_empty() { None } else { Some(decl.input_schema.clone()) },
-                            output_schema: if decl.output_schema.is_empty() { None } else { Some(decl.output_schema.clone()) },
+                            input_schema: if decl.input_schema.is_empty() {
+                                None
+                            } else {
+                                Some(decl.input_schema.clone())
+                            },
+                            output_schema: if decl.output_schema.is_empty() {
+                                None
+                            } else {
+                                Some(decl.output_schema.clone())
+                            },
                             priority: decl.priority,
                             labels: attach.labels.clone(),
                         };
@@ -251,7 +283,8 @@ impl SessionManager {
 
                     let ack = SessionMessage {
                         payload: Some(session_message::Payload::AttachAck(AttachAck {
-                            accepted: true, reason: String::new(),
+                            accepted: true,
+                            reason: String::new(),
                             supported_features: Vec::new(),
                         })),
                     };
@@ -268,18 +301,32 @@ impl SessionManager {
                         let outcome = match result.status() {
                             Status::Completed => Ok(Bytes::from(result.output)),
                             _ => Err(RuneError::ExecutionFailed {
-                                code: result.error.as_ref().map(|e| e.code.clone()).unwrap_or_default(),
-                                message: result.error.as_ref().map(|e| e.message.clone()).unwrap_or_default(),
+                                code: result
+                                    .error
+                                    .as_ref()
+                                    .map(|e| e.code.clone())
+                                    .unwrap_or_default(),
+                                message: result
+                                    .error
+                                    .as_ref()
+                                    .map(|e| e.message.clone())
+                                    .unwrap_or_default(),
                             }),
                         };
                         match p.tx {
-                            PendingResponse::Once(tx) => { let _ = tx.send(outcome); }
-                            PendingResponse::Stream(tx) => { let _ = tx.send(outcome).await; }
+                            PendingResponse::Once(tx) => {
+                                let _ = tx.send(outcome);
+                            }
+                            PendingResponse::Stream(tx) => {
+                                let _ = tx.send(outcome).await;
+                            }
                         }
                     }
                 }
 
-                Some(session_message::Payload::StreamEvent(event)) if state == SessionState::Active => {
+                Some(session_message::Payload::StreamEvent(event))
+                    if state == SessionState::Active =>
+                {
                     let req_id = event.request_id.clone();
                     if let Some(p) = pending.get(&req_id) {
                         if let PendingResponse::Stream(ref tx) = p.tx {
@@ -295,10 +342,20 @@ impl SessionManager {
                         // permit auto-returned when PendingRequest is dropped
                         if let PendingResponse::Stream(tx) = p.tx {
                             if end.status() != Status::Completed {
-                                let _ = tx.send(Err(RuneError::ExecutionFailed {
-                                    code: end.error.as_ref().map(|e| e.code.clone()).unwrap_or_default(),
-                                    message: end.error.as_ref().map(|e| e.message.clone()).unwrap_or_default(),
-                                })).await;
+                                let _ = tx
+                                    .send(Err(RuneError::ExecutionFailed {
+                                        code: end
+                                            .error
+                                            .as_ref()
+                                            .map(|e| e.code.clone())
+                                            .unwrap_or_default(),
+                                        message: end
+                                            .error
+                                            .as_ref()
+                                            .map(|e| e.message.clone())
+                                            .unwrap_or_default(),
+                                    }))
+                                    .await;
                             }
                         }
                     }
@@ -331,10 +388,17 @@ impl SessionManager {
             let keys: Vec<String> = pending.iter().map(|e| e.key().clone()).collect();
             for req_id in keys {
                 if let Some((_, p)) = pending.remove(&req_id) {
-                    let err = Err(RuneError::Internal(anyhow::anyhow!("caster '{}' disconnected", id)));
+                    let err = Err(RuneError::Internal(anyhow::anyhow!(
+                        "caster '{}' disconnected",
+                        id
+                    )));
                     match p.tx {
-                        PendingResponse::Once(tx) => { let _ = tx.send(err); }
-                        PendingResponse::Stream(tx) => { let _ = tx.send(err).await; }
+                        PendingResponse::Once(tx) => {
+                            let _ = tx.send(err);
+                        }
+                        PendingResponse::Stream(tx) => {
+                            let _ = tx.send(err).await;
+                        }
                     }
                 }
             }
@@ -342,8 +406,13 @@ impl SessionManager {
     }
 
     pub async fn execute(
-        &self, caster_id: &str, request_id: &str, rune_name: &str, input: Bytes,
-        context: HashMap<String, String>, timeout: Duration,
+        &self,
+        caster_id: &str,
+        request_id: &str,
+        rune_name: &str,
+        input: Bytes,
+        context: HashMap<String, String>,
+        timeout: Duration,
     ) -> Result<Bytes, RuneError> {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
         let permit = Arc::clone(&session.semaphore)
@@ -351,10 +420,15 @@ impl SessionManager {
             .map_err(|_| RuneError::Unavailable)?;
 
         let (tx, rx) = oneshot::channel();
-        session.pending.insert(request_id.to_string(), PendingRequest {
-            tx: PendingResponse::Once(tx), created_at: Instant::now(), timeout,
-            _permit: permit,
-        });
+        session.pending.insert(
+            request_id.to_string(),
+            PendingRequest {
+                tx: PendingResponse::Once(tx),
+                created_at: Instant::now(),
+                timeout,
+                _permit: permit,
+            },
+        );
 
         spawn_request_timeout(
             Arc::clone(&session.pending),
@@ -365,8 +439,10 @@ impl SessionManager {
 
         let msg = SessionMessage {
             payload: Some(session_message::Payload::Execute(ExecuteRequest {
-                request_id: request_id.to_string(), rune_name: rune_name.to_string(),
-                input: input.to_vec(), context,
+                request_id: request_id.to_string(),
+                rune_name: rune_name.to_string(),
+                input: input.to_vec(),
+                context,
                 timeout_ms: safe_timeout_ms(timeout),
                 attachments: Vec::new(),
             })),
@@ -379,12 +455,18 @@ impl SessionManager {
             return Err(RuneError::Unavailable);
         }
         drop(session);
-        rx.await.map_err(|_| RuneError::Internal(anyhow::anyhow!("response channel dropped")))?
+        rx.await
+            .map_err(|_| RuneError::Internal(anyhow::anyhow!("response channel dropped")))?
     }
 
     pub async fn execute_stream(
-        &self, caster_id: &str, request_id: &str, rune_name: &str, input: Bytes,
-        context: HashMap<String, String>, timeout: Duration,
+        &self,
+        caster_id: &str,
+        request_id: &str,
+        rune_name: &str,
+        input: Bytes,
+        context: HashMap<String, String>,
+        timeout: Duration,
     ) -> Result<mpsc::Receiver<Result<Bytes, RuneError>>, RuneError> {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
         let permit = Arc::clone(&session.semaphore)
@@ -392,10 +474,15 @@ impl SessionManager {
             .map_err(|_| RuneError::Unavailable)?;
 
         let (tx, rx) = mpsc::channel(32);
-        session.pending.insert(request_id.to_string(), PendingRequest {
-            tx: PendingResponse::Stream(tx), created_at: Instant::now(), timeout,
-            _permit: permit,
-        });
+        session.pending.insert(
+            request_id.to_string(),
+            PendingRequest {
+                tx: PendingResponse::Stream(tx),
+                created_at: Instant::now(),
+                timeout,
+                _permit: permit,
+            },
+        );
 
         spawn_request_timeout(
             Arc::clone(&session.pending),
@@ -406,8 +493,10 @@ impl SessionManager {
 
         let msg = SessionMessage {
             payload: Some(session_message::Payload::Execute(ExecuteRequest {
-                request_id: request_id.to_string(), rune_name: rune_name.to_string(),
-                input: input.to_vec(), context,
+                request_id: request_id.to_string(),
+                rune_name: rune_name.to_string(),
+                input: input.to_vec(),
+                context,
                 timeout_ms: safe_timeout_ms(timeout),
                 attachments: Vec::new(),
             })),
@@ -437,20 +526,30 @@ impl SessionManager {
         false
     }
 
-    pub async fn cancel(&self, caster_id: &str, request_id: &str, reason: &str) -> Result<(), RuneError> {
+    pub async fn cancel(
+        &self,
+        caster_id: &str,
+        request_id: &str,
+        reason: &str,
+    ) -> Result<(), RuneError> {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
         if let Some((_, p)) = session.pending.remove(request_id) {
             abort_timeout_handle(&session.timeout_handles, request_id);
             // permit auto-returned when PendingRequest is dropped
             let err = Err(RuneError::Cancelled);
             match p.tx {
-                PendingResponse::Once(tx) => { let _ = tx.send(err); }
-                PendingResponse::Stream(tx) => { let _ = tx.send(err).await; }
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(err);
+                }
+                PendingResponse::Stream(tx) => {
+                    let _ = tx.send(err).await;
+                }
             }
         }
         let msg = SessionMessage {
             payload: Some(session_message::Payload::Cancel(CancelRequest {
-                request_id: request_id.to_string(), reason: reason.to_string(),
+                request_id: request_id.to_string(),
+                reason: reason.to_string(),
             })),
         };
         let _ = session.outbound.send(msg).await;
@@ -479,8 +578,12 @@ fn spawn_request_timeout(
         if let Some((_, p)) = pending.remove(&req_id_clone) {
             tracing::warn!(request_id = %req_id_clone, "request timed out");
             match p.tx {
-                PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
-                PendingResponse::Stream(tx) => { let _ = tx.send(Err(RuneError::Timeout)).await; }
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(Err(RuneError::Timeout));
+                }
+                PendingResponse::Stream(tx) => {
+                    let _ = tx.send(Err(RuneError::Timeout)).await;
+                }
             }
         }
         // Clean up our own handle entry
@@ -523,7 +626,9 @@ mod tests {
     }
 
     /// Helper: creates a SessionManager with one registered caster session.
-    fn setup_session(max_concurrent: usize) -> (
+    fn setup_session(
+        max_concurrent: usize,
+    ) -> (
         Arc<SessionManager>,
         String,
         Arc<Semaphore>,
@@ -536,13 +641,16 @@ mod tests {
         let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
         let caster_id = "test-caster".to_string();
 
-        mgr.sessions.insert(caster_id.clone(), CasterState {
-            outbound: tx,
-            pending: Arc::clone(&pending),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::clone(&semaphore),
-            connected_at: Instant::now(),
-        });
+        mgr.sessions.insert(
+            caster_id.clone(),
+            CasterState {
+                outbound: tx,
+                pending: Arc::clone(&pending),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::clone(&semaphore),
+                connected_at: Instant::now(),
+            },
+        );
 
         (mgr, caster_id, semaphore, pending, rx)
     }
@@ -550,7 +658,9 @@ mod tests {
     /// Poll until a key appears in the pending map (max 1 second).
     async fn wait_for_pending(pending: &DashMap<String, PendingRequest>, key: &str) {
         for _ in 0..100 {
-            if pending.contains_key(key) { return; }
+            if pending.contains_key(key) {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("timed out waiting for pending key '{}'", key);
@@ -565,7 +675,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "r-1", "echo", Bytes::from("hello"), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "r-1",
+                    "echo",
+                    Bytes::from("hello"),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -574,7 +692,9 @@ mod tests {
 
         if let Some((_, p)) = pending.remove("r-1") {
             match p.tx {
-                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("world"))); }
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(Ok(Bytes::from("world")));
+                }
                 _ => panic!("expected Once"),
             }
         }
@@ -592,7 +712,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "r-timeout", "slow", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "r-timeout",
+                    "slow",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -601,7 +729,9 @@ mod tests {
 
         if let Some((_, p)) = pending.remove("r-timeout") {
             match p.tx {
-                PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(Err(RuneError::Timeout));
+                }
                 _ => panic!("expected Once"),
             }
         }
@@ -609,8 +739,15 @@ mod tests {
         assert_eq!(sem.available_permits(), 2);
 
         let late_found = pending.remove("r-timeout");
-        assert!(late_found.is_none(), "late result should find nothing in pending");
-        assert_eq!(sem.available_permits(), 2, "late result must not inflate permits");
+        assert!(
+            late_found.is_none(),
+            "late result should find nothing in pending"
+        );
+        assert_eq!(
+            sem.available_permits(),
+            2,
+            "late result must not inflate permits"
+        );
 
         let result = handle.await.unwrap();
         assert!(matches!(result, Err(RuneError::Timeout)));
@@ -624,14 +761,24 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "r-cancel", "slow", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "r-cancel",
+                    "slow",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
         wait_for_pending(&pending, "r-cancel").await;
         assert_eq!(sem.available_permits(), 1);
 
-        mgr.cancel(&caster_id, "r-cancel", "user requested").await.unwrap();
+        mgr.cancel(&caster_id, "r-cancel", "user requested")
+            .await
+            .unwrap();
         assert_eq!(sem.available_permits(), 2, "cancel must return permit");
 
         let result = handle.await.unwrap();
@@ -646,16 +793,35 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "r-1", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "r-1",
+                    "echo",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
         wait_for_pending(&pending, "r-1").await;
         assert_eq!(sem.available_permits(), 0);
 
-        let result = mgr.execute(&caster_id, "r-2", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await;
-        assert!(matches!(result, Err(RuneError::Unavailable)),
-            "second request must be rejected when max_concurrent=1");
+        let result = mgr
+            .execute(
+                &caster_id,
+                "r-2",
+                "echo",
+                Bytes::new(),
+                Default::default(),
+                DEFAULT_TIMEOUT,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(RuneError::Unavailable)),
+            "second request must be rejected when max_concurrent=1"
+        );
     }
 
     #[tokio::test]
@@ -666,12 +832,15 @@ mod tests {
         for i in 0..3 {
             let (tx, _rx) = oneshot::channel();
             let permit = Arc::clone(&dummy_sem).try_acquire_owned().unwrap();
-            pending.insert(format!("r-{}", i), PendingRequest {
-                tx: PendingResponse::Once(tx),
-                created_at: Instant::now(),
-                timeout: DEFAULT_TIMEOUT,
-                _permit: permit,
-            });
+            pending.insert(
+                format!("r-{}", i),
+                PendingRequest {
+                    tx: PendingResponse::Once(tx),
+                    created_at: Instant::now(),
+                    timeout: DEFAULT_TIMEOUT,
+                    _permit: permit,
+                },
+            );
         }
 
         assert_eq!(pending.len(), 3);
@@ -681,7 +850,10 @@ mod tests {
             let _ = pending.remove(&req_id);
         }
 
-        assert!(pending.is_empty(), "all pending should be cleared after disconnect");
+        assert!(
+            pending.is_empty(),
+            "all pending should be cleared after disconnect"
+        );
     }
 
     #[tokio::test]
@@ -691,20 +863,26 @@ mod tests {
         assert_eq!(mgr.caster_count(), 0);
 
         let (tx, _rx) = mpsc::channel(16);
-        mgr.sessions.insert("caster-1".to_string(), CasterState {
-            outbound: tx.clone(),
-            pending: Arc::new(DashMap::new()),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::new(Semaphore::new(1)),
-            connected_at: Instant::now(),
-        });
-        mgr.sessions.insert("caster-2".to_string(), CasterState {
-            outbound: tx,
-            pending: Arc::new(DashMap::new()),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::new(Semaphore::new(1)),
-            connected_at: Instant::now(),
-        });
+        mgr.sessions.insert(
+            "caster-1".to_string(),
+            CasterState {
+                outbound: tx.clone(),
+                pending: Arc::new(DashMap::new()),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::new(Semaphore::new(1)),
+                connected_at: Instant::now(),
+            },
+        );
+        mgr.sessions.insert(
+            "caster-2".to_string(),
+            CasterState {
+                outbound: tx,
+                pending: Arc::new(DashMap::new()),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::new(Semaphore::new(1)),
+                connected_at: Instant::now(),
+            },
+        );
 
         assert_eq!(mgr.caster_count(), 2);
         let mut ids = mgr.list_caster_ids();
@@ -723,7 +901,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute_stream(&cid, "rs-1", "streamer", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute_stream(
+                    &cid,
+                    "rs-1",
+                    "streamer",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -759,30 +945,45 @@ mod tests {
         let (tx1, _rx1) = mpsc::channel(16);
         let sem1 = Arc::new(Semaphore::new(5));
         let pending1: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
-        mgr.sessions.insert("caster-A".to_string(), CasterState {
-            outbound: tx1,
-            pending: Arc::clone(&pending1),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::clone(&sem1),
-            connected_at: Instant::now(),
-        });
+        mgr.sessions.insert(
+            "caster-A".to_string(),
+            CasterState {
+                outbound: tx1,
+                pending: Arc::clone(&pending1),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::clone(&sem1),
+                connected_at: Instant::now(),
+            },
+        );
 
         let (tx2, _rx2) = mpsc::channel(16);
         let sem2 = Arc::new(Semaphore::new(5));
         let pending2: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
-        mgr.sessions.insert("caster-B".to_string(), CasterState {
-            outbound: tx2,
-            pending: Arc::clone(&pending2),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::clone(&sem2),
-            connected_at: Instant::now(),
-        });
+        mgr.sessions.insert(
+            "caster-B".to_string(),
+            CasterState {
+                outbound: tx2,
+                pending: Arc::clone(&pending2),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::clone(&sem2),
+                connected_at: Instant::now(),
+            },
+        );
 
         // Launch a request on caster-A
         let handle = {
             let mgr_clone = Arc::clone(&mgr);
             tokio::spawn(async move {
-                mgr_clone.execute("caster-A", "cross-req-1", "slow_rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr_clone
+                    .execute(
+                        "caster-A",
+                        "cross-req-1",
+                        "slow_rune",
+                        Bytes::new(),
+                        Default::default(),
+                        DEFAULT_TIMEOUT,
+                    )
+                    .await
             })
         };
 
@@ -790,7 +991,9 @@ mod tests {
         assert_eq!(sem1.available_permits(), 4);
 
         // Cancel from the manager level (without knowing which caster owns the request)
-        let cancelled = mgr.cancel_by_request_id("cross-req-1", "user cancelled").await;
+        let cancelled = mgr
+            .cancel_by_request_id("cross-req-1", "user cancelled")
+            .await;
         assert!(cancelled, "cancel_by_request_id should find the request");
 
         // Verify the request was resolved with an error
@@ -805,7 +1008,10 @@ mod tests {
     async fn test_cancel_by_request_id_nonexistent() {
         let mgr = default_session_manager();
         let cancelled = mgr.cancel_by_request_id("does-not-exist", "reason").await;
-        assert!(!cancelled, "cancel should return false for non-existent request");
+        assert!(
+            !cancelled,
+            "cancel should return false for non-existent request"
+        );
     }
 
     // ---- Scenario 14: on_caster_attach callback verification ----
@@ -882,7 +1088,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "serial-1", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "serial-1",
+                    "echo",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -890,7 +1104,16 @@ mod tests {
         assert_eq!(sem.available_permits(), 0);
 
         // Second request should be rejected immediately
-        let result2 = mgr.execute(&caster_id, "serial-2", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await;
+        let result2 = mgr
+            .execute(
+                &caster_id,
+                "serial-2",
+                "echo",
+                Bytes::new(),
+                Default::default(),
+                DEFAULT_TIMEOUT,
+            )
+            .await;
         assert!(
             matches!(result2, Err(RuneError::Unavailable)),
             "second request must be Unavailable when max_concurrent=1"
@@ -899,7 +1122,9 @@ mod tests {
         // Complete first request (permit auto-returned on PendingRequest drop)
         if let Some((_, p)) = pending.remove("serial-1") {
             match p.tx {
-                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done"))); }
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(Ok(Bytes::from("done")));
+                }
                 _ => panic!("expected Once"),
             }
         }
@@ -913,7 +1138,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "serial-3", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "serial-3",
+                    "echo",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -923,7 +1156,9 @@ mod tests {
         // Complete third request (permit auto-returned on PendingRequest drop)
         if let Some((_, p)) = pending.remove("serial-3") {
             match p.tx {
-                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done3"))); }
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(Ok(Bytes::from("done3")));
+                }
                 _ => panic!("expected Once"),
             }
         }
@@ -944,7 +1179,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "timeout-req", "slow", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "timeout-req",
+                    "slow",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -954,7 +1197,9 @@ mod tests {
         // Simulate timeout by removing pending (permit auto-returned on drop)
         if let Some((_, p)) = pending.remove("timeout-req") {
             match p.tx {
-                PendingResponse::Once(tx) => { let _ = tx.send(Err(RuneError::Timeout)); }
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(Err(RuneError::Timeout));
+                }
                 _ => panic!("expected Once"),
             }
         }
@@ -963,14 +1208,26 @@ mod tests {
         assert!(matches!(result, Err(RuneError::Timeout)));
 
         // Permit should be available again
-        assert_eq!(sem.available_permits(), 1, "permit must be returned after timeout");
+        assert_eq!(
+            sem.available_permits(),
+            1,
+            "permit must be returned after timeout"
+        );
 
         // A new request should now succeed
         let handle2 = {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "after-timeout", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "after-timeout",
+                    "echo",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -980,7 +1237,9 @@ mod tests {
         // Complete it (permit auto-returned on PendingRequest drop)
         if let Some((_, p)) = pending.remove("after-timeout") {
             match p.tx {
-                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("ok"))); }
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(Ok(Bytes::from("ok")));
+                }
                 _ => panic!("expected Once"),
             }
         }
@@ -1003,13 +1262,16 @@ mod tests {
             let (tx, rx) = mpsc::channel(16);
             let sem = Arc::new(Semaphore::new(5));
             let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
-            mgr.sessions.insert(format!("caster-{}", i), CasterState {
-                outbound: tx,
-                pending: Arc::clone(&pending),
-                timeout_handles: Arc::new(DashMap::new()),
-                semaphore: Arc::clone(&sem),
-                connected_at: Instant::now(),
-            });
+            mgr.sessions.insert(
+                format!("caster-{}", i),
+                CasterState {
+                    outbound: tx,
+                    pending: Arc::clone(&pending),
+                    timeout_handles: Arc::new(DashMap::new()),
+                    semaphore: Arc::clone(&sem),
+                    connected_at: Instant::now(),
+                },
+            );
             pending_maps.push(pending);
             sems.push(sem);
             rxs.push(rx);
@@ -1022,7 +1284,16 @@ mod tests {
             let cid = format!("caster-{}", i);
             let rid = format!("req-{}", i);
             let handle = tokio::spawn(async move {
-                mgr_clone.execute(&cid, &rid, "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr_clone
+                    .execute(
+                        &cid,
+                        &rid,
+                        "rune",
+                        Bytes::new(),
+                        Default::default(),
+                        DEFAULT_TIMEOUT,
+                    )
+                    .await
             });
             handles.push(handle);
         }
@@ -1037,14 +1308,35 @@ mod tests {
         assert!(cancelled);
 
         // caster-1's request should be cancelled
-        assert!(!pending_maps[1].contains_key("req-1"), "req-1 should be removed from pending");
-        assert_eq!(sems[1].available_permits(), 5, "caster-1 permit should be returned");
+        assert!(
+            !pending_maps[1].contains_key("req-1"),
+            "req-1 should be removed from pending"
+        );
+        assert_eq!(
+            sems[1].available_permits(),
+            5,
+            "caster-1 permit should be returned"
+        );
 
         // caster-0 and caster-2 requests should still be pending
-        assert!(pending_maps[0].contains_key("req-0"), "req-0 should still be pending");
-        assert!(pending_maps[2].contains_key("req-2"), "req-2 should still be pending");
-        assert_eq!(sems[0].available_permits(), 4, "caster-0 permit should still be consumed");
-        assert_eq!(sems[2].available_permits(), 4, "caster-2 permit should still be consumed");
+        assert!(
+            pending_maps[0].contains_key("req-0"),
+            "req-0 should still be pending"
+        );
+        assert!(
+            pending_maps[2].contains_key("req-2"),
+            "req-2 should still be pending"
+        );
+        assert_eq!(
+            sems[0].available_permits(),
+            4,
+            "caster-0 permit should still be consumed"
+        );
+        assert_eq!(
+            sems[2].available_permits(),
+            4,
+            "caster-2 permit should still be consumed"
+        );
 
         // Verify the cancelled request's result
         let result1 = handles.remove(1).await.unwrap();
@@ -1054,7 +1346,9 @@ mod tests {
         for i in [0, 2] {
             if let Some((_, p)) = pending_maps[i].remove(&format!("req-{}", i)) {
                 match p.tx {
-                    PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done"))); }
+                    PendingResponse::Once(tx) => {
+                        let _ = tx.send(Ok(Bytes::from("done")));
+                    }
                     _ => panic!("expected Once"),
                 }
             }
@@ -1073,7 +1367,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute_stream(&cid, "stream-cancel", "streamer", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute_stream(
+                    &cid,
+                    "stream-cancel",
+                    "streamer",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -1081,10 +1383,16 @@ mod tests {
         assert_eq!(sem.available_permits(), 1);
 
         // Cancel the streaming request
-        mgr.cancel(&caster_id, "stream-cancel", "user cancel").await.unwrap();
+        mgr.cancel(&caster_id, "stream-cancel", "user cancel")
+            .await
+            .unwrap();
 
         // Permit should be returned
-        assert_eq!(sem.available_permits(), 2, "cancel must return permit for stream request");
+        assert_eq!(
+            sem.available_permits(),
+            2,
+            "cancel must return permit for stream request"
+        );
 
         // The stream receiver should eventually get the cancellation error
         let _stream_rx = handle.await.unwrap().unwrap();
@@ -1100,13 +1408,16 @@ mod tests {
         let (tx1, _rx1) = mpsc::channel(16);
         let sem1 = Arc::new(Semaphore::new(3));
         let pending1: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
-        mgr.sessions.insert("reconnect-caster".to_string(), CasterState {
-            outbound: tx1,
-            pending: Arc::clone(&pending1),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::clone(&sem1),
-            connected_at: Instant::now(),
-        });
+        mgr.sessions.insert(
+            "reconnect-caster".to_string(),
+            CasterState {
+                outbound: tx1,
+                pending: Arc::clone(&pending1),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::clone(&sem1),
+                connected_at: Instant::now(),
+            },
+        );
 
         assert!(mgr.is_available("reconnect-caster"));
         assert_eq!(mgr.caster_count(), 1);
@@ -1120,13 +1431,16 @@ mod tests {
         let (tx2, _rx2) = mpsc::channel(16);
         let sem2 = Arc::new(Semaphore::new(5));
         let pending2: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
-        mgr.sessions.insert("reconnect-caster".to_string(), CasterState {
-            outbound: tx2,
-            pending: Arc::clone(&pending2),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::clone(&sem2),
-            connected_at: Instant::now(),
-        });
+        mgr.sessions.insert(
+            "reconnect-caster".to_string(),
+            CasterState {
+                outbound: tx2,
+                pending: Arc::clone(&pending2),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::clone(&sem2),
+                connected_at: Instant::now(),
+            },
+        );
 
         // Should be available again with new capacity
         assert!(mgr.is_available("reconnect-caster"));
@@ -1146,23 +1460,32 @@ mod tests {
         // Set up a session with 1 permit
         let (tx, _rx) = mpsc::channel(16);
         let sem = Arc::new(Semaphore::new(1));
-        mgr.sessions.insert("one-permit".to_string(), CasterState {
-            outbound: tx,
-            pending: Arc::new(DashMap::new()),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::clone(&sem),
-            connected_at: Instant::now(),
-        });
+        mgr.sessions.insert(
+            "one-permit".to_string(),
+            CasterState {
+                outbound: tx,
+                pending: Arc::new(DashMap::new()),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::clone(&sem),
+                connected_at: Instant::now(),
+            },
+        );
 
         assert!(mgr.is_available("one-permit"));
 
         // Consume the permit
         let _permit = sem.try_acquire().unwrap();
-        assert!(!mgr.is_available("one-permit"), "should be unavailable when all permits consumed");
+        assert!(
+            !mgr.is_available("one-permit"),
+            "should be unavailable when all permits consumed"
+        );
 
         // Release the permit
         drop(_permit);
-        assert!(mgr.is_available("one-permit"), "should be available again after permit release");
+        assert!(
+            mgr.is_available("one-permit"),
+            "should be available again after permit release"
+        );
     }
 
     // ---- Execute on non-existent caster ----
@@ -1171,9 +1494,16 @@ mod tests {
     async fn test_execute_nonexistent_caster() {
         let mgr = default_session_manager();
 
-        let result = mgr.execute(
-            "nonexistent", "req-1", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT
-        ).await;
+        let result = mgr
+            .execute(
+                "nonexistent",
+                "req-1",
+                "rune",
+                Bytes::new(),
+                Default::default(),
+                DEFAULT_TIMEOUT,
+            )
+            .await;
 
         assert!(matches!(result, Err(RuneError::Unavailable)));
     }
@@ -1182,9 +1512,16 @@ mod tests {
     async fn test_execute_stream_nonexistent_caster() {
         let mgr = default_session_manager();
 
-        let result = mgr.execute_stream(
-            "nonexistent", "req-1", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT
-        ).await;
+        let result = mgr
+            .execute_stream(
+                "nonexistent",
+                "req-1",
+                "rune",
+                Bytes::new(),
+                Default::default(),
+                DEFAULT_TIMEOUT,
+            )
+            .await;
 
         assert!(matches!(result, Err(RuneError::Unavailable)));
     }
@@ -1213,7 +1550,15 @@ mod tests {
             let cid = caster_id.clone();
             let rid = format!("concurrent-{}", i);
             handles.push(tokio::spawn(async move {
-                mgr.execute(&cid, &rid, "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    &rid,
+                    "echo",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             }));
         }
 
@@ -1224,16 +1569,25 @@ mod tests {
         assert_eq!(sem.available_permits(), 0);
 
         // Fourth request should be rejected
-        let result = mgr.execute(
-            &caster_id, "concurrent-3", "echo", Bytes::new(), Default::default(), DEFAULT_TIMEOUT
-        ).await;
+        let result = mgr
+            .execute(
+                &caster_id,
+                "concurrent-3",
+                "echo",
+                Bytes::new(),
+                Default::default(),
+                DEFAULT_TIMEOUT,
+            )
+            .await;
         assert!(matches!(result, Err(RuneError::Unavailable)));
 
         // Complete all requests (permit auto-returned on PendingRequest drop)
         for i in 0..3 {
             if let Some((_, p)) = pending.remove(&format!("concurrent-{}", i)) {
                 match p.tx {
-                    PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("ok"))); }
+                    PendingResponse::Once(tx) => {
+                        let _ = tx.send(Ok(Bytes::from("ok")));
+                    }
                     _ => panic!("expected Once"),
                 }
             }
@@ -1262,7 +1616,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "err-req", "failing_rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "err-req",
+                    "failing_rune",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -1301,7 +1663,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute_stream(&cid, "stream-multi", "streamer", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute_stream(
+                    &cid,
+                    "stream-multi",
+                    "streamer",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -1340,7 +1710,10 @@ mod tests {
 
         // Cancel a request that was never made
         let result = mgr.cancel(&caster_id, "ghost-request", "no reason").await;
-        assert!(result.is_ok(), "cancelling non-existent request should not error");
+        assert!(
+            result.is_ok(),
+            "cancelling non-existent request should not error"
+        );
         // Permits unchanged
         assert_eq!(sem.available_permits(), 2);
     }
@@ -1355,7 +1728,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "done-req", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "done-req",
+                    "rune",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -1364,7 +1745,9 @@ mod tests {
         // Complete the request first (permit auto-returned on PendingRequest drop)
         if let Some((_, p)) = pending.remove("done-req") {
             match p.tx {
-                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("completed"))); }
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(Ok(Bytes::from("completed")));
+                }
                 _ => panic!("expected Once"),
             }
         }
@@ -1374,8 +1757,15 @@ mod tests {
 
         // Now try to cancel the already-completed request
         let cancel_result = mgr.cancel(&caster_id, "done-req", "too late").await;
-        assert!(cancel_result.is_ok(), "cancel after completion should not error");
-        assert_eq!(sem.available_permits(), 2, "permits should remain unchanged");
+        assert!(
+            cancel_result.is_ok(),
+            "cancel after completion should not error"
+        );
+        assert_eq!(
+            sem.available_permits(),
+            2,
+            "permits should remain unchanged"
+        );
     }
 
     // ---- many casters connected ----
@@ -1387,13 +1777,16 @@ mod tests {
 
         for i in 0..count {
             let (tx, _rx) = mpsc::channel(16);
-            mgr.sessions.insert(format!("caster-{}", i), CasterState {
-                outbound: tx,
-                pending: Arc::new(DashMap::new()),
-                timeout_handles: Arc::new(DashMap::new()),
-                semaphore: Arc::new(Semaphore::new(10)),
-                connected_at: Instant::now(),
-            });
+            mgr.sessions.insert(
+                format!("caster-{}", i),
+                CasterState {
+                    outbound: tx,
+                    pending: Arc::new(DashMap::new()),
+                    timeout_handles: Arc::new(DashMap::new()),
+                    semaphore: Arc::new(Semaphore::new(10)),
+                    connected_at: Instant::now(),
+                },
+            );
         }
 
         assert_eq!(mgr.caster_count(), count);
@@ -1415,13 +1808,16 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(16);
         let sem = Arc::new(Semaphore::new(7));
-        mgr.sessions.insert("caster-q".to_string(), CasterState {
-            outbound: tx,
-            pending: Arc::new(DashMap::new()),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::clone(&sem),
-            connected_at: Instant::now(),
-        });
+        mgr.sessions.insert(
+            "caster-q".to_string(),
+            CasterState {
+                outbound: tx,
+                pending: Arc::new(DashMap::new()),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::clone(&sem),
+                connected_at: Instant::now(),
+            },
+        );
 
         assert_eq!(mgr.available_permits("caster-q"), 7);
 
@@ -1439,23 +1835,35 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let semaphore = Arc::new(Semaphore::new(5));
         let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
-        mgr.sessions.insert("dying-caster".to_string(), CasterState {
-            outbound: tx,
-            pending: Arc::clone(&pending),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::clone(&semaphore),
-            connected_at: Instant::now(),
-        });
+        mgr.sessions.insert(
+            "dying-caster".to_string(),
+            CasterState {
+                outbound: tx,
+                pending: Arc::clone(&pending),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::clone(&semaphore),
+                connected_at: Instant::now(),
+            },
+        );
 
         // Drop the receiver to close the channel
         drop(rx);
 
-        let result = mgr.execute(
-            "dying-caster", "req-dead", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT,
-        ).await;
+        let result = mgr
+            .execute(
+                "dying-caster",
+                "req-dead",
+                "rune",
+                Bytes::new(),
+                Default::default(),
+                DEFAULT_TIMEOUT,
+            )
+            .await;
 
-        assert!(matches!(result, Err(RuneError::Unavailable)),
-            "execute on closed outbound should return Unavailable");
+        assert!(
+            matches!(result, Err(RuneError::Unavailable)),
+            "execute on closed outbound should return Unavailable"
+        );
         // Pending should be cleaned up
         assert!(!pending.contains_key("req-dead"));
         // Permit should be returned
@@ -1470,19 +1878,29 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let semaphore = Arc::new(Semaphore::new(3));
         let pending: Arc<DashMap<String, PendingRequest>> = Arc::new(DashMap::new());
-        mgr.sessions.insert("dying-stream".to_string(), CasterState {
-            outbound: tx,
-            pending: Arc::clone(&pending),
-            timeout_handles: Arc::new(DashMap::new()),
-            semaphore: Arc::clone(&semaphore),
-            connected_at: Instant::now(),
-        });
+        mgr.sessions.insert(
+            "dying-stream".to_string(),
+            CasterState {
+                outbound: tx,
+                pending: Arc::clone(&pending),
+                timeout_handles: Arc::new(DashMap::new()),
+                semaphore: Arc::clone(&semaphore),
+                connected_at: Instant::now(),
+            },
+        );
 
         drop(rx);
 
-        let result = mgr.execute_stream(
-            "dying-stream", "req-s-dead", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT,
-        ).await;
+        let result = mgr
+            .execute_stream(
+                "dying-stream",
+                "req-s-dead",
+                "rune",
+                Bytes::new(),
+                Default::default(),
+                DEFAULT_TIMEOUT,
+            )
+            .await;
 
         assert!(matches!(result, Err(RuneError::Unavailable)));
         assert!(!pending.contains_key("req-s-dead"));
@@ -1503,7 +1921,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "ctx-req", "rune", Bytes::from("data"), ctx_map, DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "ctx-req",
+                    "rune",
+                    Bytes::from("data"),
+                    ctx_map,
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -1514,8 +1940,14 @@ mod tests {
                 assert_eq!(exec.request_id, "ctx-req");
                 assert_eq!(exec.rune_name, "rune");
                 assert_eq!(exec.input, b"data");
-                assert_eq!(exec.context.get("user_id").map(|s| s.as_str()), Some("u-123"));
-                assert_eq!(exec.context.get("trace_id").map(|s| s.as_str()), Some("t-456"));
+                assert_eq!(
+                    exec.context.get("user_id").map(|s| s.as_str()),
+                    Some("u-123")
+                );
+                assert_eq!(
+                    exec.context.get("trace_id").map(|s| s.as_str()),
+                    Some("t-456")
+                );
                 assert_eq!(exec.timeout_ms, 30_000);
             }
             other => panic!("expected Execute payload, got {:?}", other),
@@ -1524,7 +1956,9 @@ mod tests {
         // Complete the request (permit auto-returned on PendingRequest drop)
         if let Some((_, p)) = pending.remove("ctx-req") {
             match p.tx {
-                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("done"))); }
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(Ok(Bytes::from("done")));
+                }
                 _ => panic!("expected Once"),
             }
         }
@@ -1541,7 +1975,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "cancel-msg-req", "rune", Bytes::new(), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    "cancel-msg-req",
+                    "rune",
+                    Bytes::new(),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             })
         };
 
@@ -1551,7 +1993,9 @@ mod tests {
         let _exec_msg = rx.recv().await.unwrap();
 
         // Cancel
-        mgr.cancel(&caster_id, "cancel-msg-req", "user wants to stop").await.unwrap();
+        mgr.cancel(&caster_id, "cancel-msg-req", "user wants to stop")
+            .await
+            .unwrap();
 
         // Read cancel message
         let cancel_msg = rx.recv().await.expect("should receive CancelRequest");
@@ -1579,7 +2023,15 @@ mod tests {
             let cid = caster_id.clone();
             let rid = format!("ord-{}", i);
             handles.push(tokio::spawn(async move {
-                mgr.execute(&cid, &rid, "rune", Bytes::from(format!("data-{}", i)), Default::default(), DEFAULT_TIMEOUT).await
+                mgr.execute(
+                    &cid,
+                    &rid,
+                    "rune",
+                    Bytes::from(format!("data-{}", i)),
+                    Default::default(),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
             }));
         }
 
@@ -1602,7 +2054,9 @@ mod tests {
             let key = format!("ord-{}", i);
             if let Some((_, p)) = pending.remove(&key) {
                 match p.tx {
-                    PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::from("ok"))); }
+                    PendingResponse::Once(tx) => {
+                        let _ = tx.send(Ok(Bytes::from("ok")));
+                    }
                     _ => panic!("expected Once"),
                 }
             }
@@ -1623,7 +2077,15 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             let cid = caster_id.clone();
             tokio::spawn(async move {
-                mgr.execute(&cid, "timeout-val", "rune", Bytes::new(), Default::default(), custom_timeout).await
+                mgr.execute(
+                    &cid,
+                    "timeout-val",
+                    "rune",
+                    Bytes::new(),
+                    Default::default(),
+                    custom_timeout,
+                )
+                .await
             })
         };
 
@@ -1636,7 +2098,9 @@ mod tests {
 
         if let Some((_, p)) = pending.remove("timeout-val") {
             match p.tx {
-                PendingResponse::Once(tx) => { let _ = tx.send(Ok(Bytes::new())); }
+                PendingResponse::Once(tx) => {
+                    let _ = tx.send(Ok(Bytes::new()));
+                }
                 _ => panic!("expected Once"),
             }
         }
@@ -1648,10 +2112,7 @@ mod tests {
     #[test]
     fn test_new_dev_has_dev_mode_true() {
         // new_dev() (test-only constructor) defaults to dev_mode=true
-        let mgr = SessionManager::new_dev(
-            Duration::from_secs(10),
-            Duration::from_secs(35),
-        );
+        let mgr = SessionManager::new_dev(Duration::from_secs(10), Duration::from_secs(35));
         assert!(mgr.dev_mode, "new_dev() should have dev_mode=true");
     }
 
@@ -1664,7 +2125,10 @@ mod tests {
             verifier,
             false,
         );
-        assert!(!mgr.dev_mode, "with_auth(dev_mode=false) should have dev_mode=false");
+        assert!(
+            !mgr.dev_mode,
+            "with_auth(dev_mode=false) should have dev_mode=false"
+        );
     }
 
     #[test]
@@ -1676,7 +2140,10 @@ mod tests {
             verifier,
             true,
         );
-        assert!(mgr.dev_mode, "with_auth(dev_mode=true) should have dev_mode=true");
+        assert!(
+            mgr.dev_mode,
+            "with_auth(dev_mode=true) should have dev_mode=true"
+        );
     }
 
     // MF-1: safe_timeout_ms should clamp large durations to u32::MAX

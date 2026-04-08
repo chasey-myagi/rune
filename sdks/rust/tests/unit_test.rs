@@ -156,9 +156,10 @@ fn test_u10_caster_id_custom() {
 async fn test_u11_register_unary_handler() {
     let caster = Caster::new(CasterConfig::default());
     caster
-        .rune(RuneConfig::new("echo"), |_ctx: RuneContext, input: Bytes| async move {
-            Ok(input)
-        })
+        .rune(
+            RuneConfig::new("echo"),
+            |_ctx: RuneContext, input: Bytes| async move { Ok(input) },
+        )
         .unwrap();
     assert_eq!(caster.rune_count(), 1);
     assert!(caster.get_rune_config("echo").is_some());
@@ -186,14 +187,16 @@ async fn test_u12_register_stream_handler() {
 async fn test_u13_register_multiple_runes() {
     let caster = Caster::new(CasterConfig::default());
     caster
-        .rune(RuneConfig::new("a"), |_ctx: RuneContext, input: Bytes| async move {
-            Ok(input)
-        })
+        .rune(
+            RuneConfig::new("a"),
+            |_ctx: RuneContext, input: Bytes| async move { Ok(input) },
+        )
         .unwrap();
     caster
-        .rune(RuneConfig::new("b"), |_ctx: RuneContext, input: Bytes| async move {
-            Ok(input)
-        })
+        .rune(
+            RuneConfig::new("b"),
+            |_ctx: RuneContext, input: Bytes| async move { Ok(input) },
+        )
         .unwrap();
     caster
         .stream_rune(
@@ -211,14 +214,16 @@ async fn test_u13_register_multiple_runes() {
 async fn test_u14_duplicate_rune_error() {
     let caster = Caster::new(CasterConfig::default());
     caster
-        .rune(RuneConfig::new("dup"), |_ctx: RuneContext, input: Bytes| async move {
-            Ok(input)
-        })
+        .rune(
+            RuneConfig::new("dup"),
+            |_ctx: RuneContext, input: Bytes| async move { Ok(input) },
+        )
         .unwrap();
     let err = caster
-        .rune(RuneConfig::new("dup"), |_ctx: RuneContext, input: Bytes| async move {
-            Ok(input)
-        })
+        .rune(
+            RuneConfig::new("dup"),
+            |_ctx: RuneContext, input: Bytes| async move { Ok(input) },
+        )
         .unwrap_err();
     assert!(matches!(err, SdkError::DuplicateRune(_)));
 }
@@ -298,8 +303,7 @@ async fn test_u18_register_with_priority() {
 #[tokio::test]
 async fn test_u19_handler_can_be_called_directly() {
     // Verify handler can be invoked without gRPC by calling the closure directly
-    let handler =
-        |_ctx: RuneContext, input: Bytes| async move { Ok::<Bytes, SdkError>(input) };
+    let handler = |_ctx: RuneContext, input: Bytes| async move { Ok::<Bytes, SdkError>(input) };
     let ctx = RuneContext {
         rune_name: "echo".into(),
         request_id: "test".into(),
@@ -497,9 +501,7 @@ async fn test_u35_unary_handler_with_files() {
     caster
         .rune_with_files(
             RuneConfig::new("with_files"),
-            |_ctx: RuneContext, input: Bytes, _files: Vec<FileAttachment>| async move {
-                Ok(input)
-            },
+            |_ctx: RuneContext, input: Bytes, _files: Vec<FileAttachment>| async move { Ok(input) },
         )
         .unwrap();
     assert!(caster.rune_accepts_files("with_files"));
@@ -654,11 +656,7 @@ async fn test_nf9_run_exits_after_stop() {
     });
 
     // run() should not hang forever; it should exit after stop() is called
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        caster.run(),
-    )
-    .await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), caster.run()).await;
 
     stop_handle.await.unwrap();
 

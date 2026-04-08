@@ -48,7 +48,10 @@ mod tests {
     fn telemetry_config_deserialize_with_otlp() {
         let toml_str = r#"otlp_endpoint = "http://localhost:4317""#;
         let config: TelemetryConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.otlp_endpoint.as_deref(), Some("http://localhost:4317"));
+        assert_eq!(
+            config.otlp_endpoint.as_deref(),
+            Some("http://localhost:4317")
+        );
         assert!(config.prometheus_port.is_none());
     }
 
@@ -82,10 +85,7 @@ prometheus_port = 9464
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let deserialized: TelemetryConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(
-            config.otlp_endpoint,
-            deserialized.otlp_endpoint
-        );
+        assert_eq!(config.otlp_endpoint, deserialized.otlp_endpoint);
         assert_eq!(config.prometheus_port, deserialized.prometheus_port);
     }
 

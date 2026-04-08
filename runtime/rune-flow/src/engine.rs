@@ -1,10 +1,10 @@
+use crate::dag::{topological_layers, validate_dag, DagError, FlowDefinition};
 use bytes::Bytes;
-use std::collections::HashMap;
-use std::sync::Arc;
-use rune_core::rune::{RuneContext, RuneError};
 use rune_core::relay::Relay;
 use rune_core::resolver::Resolver;
-use crate::dag::{FlowDefinition, DagError, validate_dag, topological_layers};
+use rune_core::rune::{RuneContext, RuneError};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Step 执行状态
 #[derive(Debug, Clone)]
@@ -72,7 +72,11 @@ impl FlowEngine {
     }
 
     /// Create a FlowEngine with a custom step timeout.
-    pub fn with_timeout(relay: Arc<Relay>, resolver: Arc<dyn Resolver>, step_timeout: std::time::Duration) -> Self {
+    pub fn with_timeout(
+        relay: Arc<Relay>,
+        resolver: Arc<dyn Resolver>,
+        step_timeout: std::time::Duration,
+    ) -> Self {
         Self {
             flows: HashMap::new(),
             relay,
@@ -119,7 +123,11 @@ impl FlowEngine {
 
     /// Execute a pre-fetched FlowDefinition without looking it up from the
     /// internal registry.  Delegates to [`FlowRunner::execute_flow`].
-    pub async fn execute_flow(&self, flow: &FlowDefinition, input: Bytes) -> Result<FlowResult, FlowError> {
+    pub async fn execute_flow(
+        &self,
+        flow: &FlowDefinition,
+        input: Bytes,
+    ) -> Result<FlowResult, FlowError> {
         self.runner().execute_flow(flow, input).await
     }
 }
@@ -130,8 +138,11 @@ impl FlowRunner {
     /// This is the core execution logic.  Because `FlowRunner` only holds
     /// cheap `Arc` clones, callers can drop the engine lock before calling
     /// this method.
-    pub async fn execute_flow(&self, flow: &FlowDefinition, input: Bytes) -> Result<FlowResult, FlowError> {
-
+    pub async fn execute_flow(
+        &self,
+        flow: &FlowDefinition,
+        input: Bytes,
+    ) -> Result<FlowResult, FlowError> {
         // 空 flow: passthrough
         if flow.steps.is_empty() {
             return Ok(FlowResult {
@@ -149,8 +160,7 @@ impl FlowRunner {
         let mut steps_executed: usize = 0;
 
         // 解析 flow 原始输入为 JSON（用于 $input 引用和 condition 上下文）
-        let flow_input_json: Option<serde_json::Value> =
-            serde_json::from_slice(&input).ok();
+        let flow_input_json: Option<serde_json::Value> = serde_json::from_slice(&input).ok();
 
         for layer in &layers {
             // 检查该层是否有上游失败
@@ -158,7 +168,10 @@ impl FlowRunner {
             for &step_idx in layer {
                 let step_def = &flow.steps[step_idx];
                 for dep in &step_def.depends_on {
-                    if matches!(step_statuses.get(dep.as_str()), Some(StepStatus::Failed { .. })) {
+                    if matches!(
+                        step_statuses.get(dep.as_str()),
+                        Some(StepStatus::Failed { .. })
+                    ) {
                         has_failed_upstream = true;
                         break;
                     }
@@ -225,12 +238,8 @@ impl FlowRunner {
                 let step_def = &flow.steps[step_idx];
 
                 // 构造 step input
-                let step_input = Self::build_step_input(
-                    step_def,
-                    &input,
-                    &step_outputs,
-                    &flow_input_json,
-                )?;
+                let step_input =
+                    Self::build_step_input(step_def, &input, &step_outputs, &flow_input_json)?;
 
                 // Resolve rune invoker
                 let invoker = self.relay.resolve(&step_def.rune, self.resolver.as_ref());
@@ -256,9 +265,8 @@ impl FlowRunner {
                     }
                     None => {
                         // Rune not found
-                        join_set.spawn(async move {
-                            Err((step_idx, RuneError::NotFound(rune_name)))
-                        });
+                        join_set
+                            .spawn(async move { Err((step_idx, RuneError::NotFound(rune_name))) });
                     }
                 }
             }
@@ -416,9 +424,8 @@ fn resolve_path(
 
         // 获取 step output
         let step_output = match step_outputs.get(step_name) {
-            Some(Some(bytes)) => {
-                serde_json::from_slice::<serde_json::Value>(bytes).unwrap_or(serde_json::Value::Null)
-            }
+            Some(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(bytes)
+                .unwrap_or(serde_json::Value::Null),
             Some(None) => serde_json::Value::Null, // skipped step
             None => serde_json::Value::Null,
         };
@@ -475,7 +482,8 @@ pub fn evaluate_condition(
 
     // 解析简单的比较表达式: lhs operator rhs
     // 支持: steps.X.output.field == value, steps.X.output.field > value 等
-    if let Some(result) = evaluate_comparison(trimmed, step_statuses, step_outputs, flow_input_json) {
+    if let Some(result) = evaluate_comparison(trimmed, step_statuses, step_outputs, flow_input_json)
+    {
         return result;
     }
 
@@ -549,10 +557,8 @@ fn resolve_condition_value(
         }
         let step_name = parts[0];
         let step_output = match step_outputs.get(step_name) {
-            Some(Some(bytes)) => {
-                serde_json::from_slice::<serde_json::Value>(bytes)
-                    .unwrap_or(serde_json::Value::Null)
-            }
+            Some(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(bytes)
+                .unwrap_or(serde_json::Value::Null),
             _ => serde_json::Value::Null,
         };
 
@@ -611,10 +617,7 @@ fn compare_values(lhs: &serde_json::Value, rhs: &serde_json::Value, op: &str) ->
     }
 }
 
-fn compare_numeric(
-    lhs: &serde_json::Value,
-    rhs: &serde_json::Value,
-) -> Option<std::cmp::Ordering> {
+fn compare_numeric(lhs: &serde_json::Value, rhs: &serde_json::Value) -> Option<std::cmp::Ordering> {
     let l = as_f64(lhs)?;
     let r = as_f64(rhs)?;
     l.partial_cmp(&r)
@@ -659,16 +662,11 @@ mod tests {
 
         let flow_input = Bytes::from(r#"{"field1": "hello", "field2": 42}"#);
         let step_outputs: HashMap<String, Option<Bytes>> = HashMap::new();
-        let flow_input_json: Option<serde_json::Value> =
-            serde_json::from_slice(&flow_input).ok();
+        let flow_input_json: Option<serde_json::Value> = serde_json::from_slice(&flow_input).ok();
 
         // 修复前这里用 unwrap()，修复后返回 Result
-        let result = FlowRunner::build_step_input(
-            &step_def,
-            &flow_input,
-            &step_outputs,
-            &flow_input_json,
-        );
+        let result =
+            FlowRunner::build_step_input(&step_def, &flow_input, &step_outputs, &flow_input_json);
         assert!(result.is_ok(), "build_step_input should return Ok");
 
         let output = result.unwrap();
@@ -690,15 +688,10 @@ mod tests {
 
         let flow_input = Bytes::from(r#"{"data": "test"}"#);
         let step_outputs: HashMap<String, Option<Bytes>> = HashMap::new();
-        let flow_input_json: Option<serde_json::Value> =
-            serde_json::from_slice(&flow_input).ok();
+        let flow_input_json: Option<serde_json::Value> = serde_json::from_slice(&flow_input).ok();
 
-        let result = FlowRunner::build_step_input(
-            &step_def,
-            &flow_input,
-            &step_outputs,
-            &flow_input_json,
-        );
+        let result =
+            FlowRunner::build_step_input(&step_def, &flow_input, &step_outputs, &flow_input_json);
         assert!(result.is_ok());
         // 无依赖无 mapping，应该 passthrough flow input
         assert_eq!(result.unwrap(), flow_input);

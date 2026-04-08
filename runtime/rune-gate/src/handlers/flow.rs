@@ -2,10 +2,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Sse, sse::Event},
+    response::{sse::Event, IntoResponse, Sse},
+    Json,
 };
 use bytes::Bytes;
 use rune_flow::dag::FlowDefinition;
@@ -14,7 +14,7 @@ use rune_store::TaskStatus;
 use tokio::sync::mpsc;
 
 use crate::error::{error_response, map_flow_error};
-use crate::state::{GateState, RunParams, unique_request_id};
+use crate::state::{unique_request_id, GateState, RunParams};
 
 pub async fn create_flow(
     State(state): State<GateState>,
@@ -22,7 +22,13 @@ pub async fn create_flow(
 ) -> axum::response::Response {
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
         Ok(b) => b,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "BAD_REQUEST", "failed to read body"),
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "failed to read body",
+            )
+        }
     };
 
     if body.is_empty() {
@@ -46,12 +52,20 @@ pub async fn create_flow(
 
     // Validate: name must not be empty
     if flow.name.is_empty() {
-        return error_response(StatusCode::BAD_REQUEST, "INVALID_INPUT", "flow name must not be empty");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "INVALID_INPUT",
+            "flow name must not be empty",
+        );
     }
 
     // Validate: steps must not be empty
     if flow.steps.is_empty() {
-        return error_response(StatusCode::BAD_REQUEST, "INVALID_INPUT", "flow must have at least one step");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "INVALID_INPUT",
+            "flow must have at least one step",
+        );
     }
 
     let mut engine = state.flow.flow_engine.write().await;
@@ -73,9 +87,7 @@ pub async fn create_flow(
     (StatusCode::CREATED, Json(serde_json::json!(flow))).into_response()
 }
 
-pub async fn list_flows(
-    State(state): State<GateState>,
-) -> impl IntoResponse {
+pub async fn list_flows(State(state): State<GateState>) -> impl IntoResponse {
     let engine = state.flow.flow_engine.read().await;
     let entries: Vec<serde_json::Value> = engine
         .list()
@@ -132,7 +144,13 @@ pub async fn run_flow(
 ) -> axum::response::Response {
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
         Ok(b) => b,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "BAD_REQUEST", "failed to read body"),
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "failed to read body",
+            )
+        }
     };
 
     // Default to empty JSON object when body is empty (consistent with rune run)
@@ -208,14 +226,23 @@ pub async fn run_flow_async(
     let task_id = unique_request_id();
     let input_str = String::from_utf8_lossy(&body).to_string();
 
-    if let Err(e) = state.admin.store.insert_task(&task_id, &format!("flow:{}", flow_name), Some(&input_str)).await {
+    if let Err(e) = state
+        .admin
+        .store
+        .insert_task(&task_id, &format!("flow:{}", flow_name), Some(&input_str))
+        .await
+    {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL",
             &e.to_string(),
         );
     }
-    let _ = state.admin.store.update_task_status(&task_id, TaskStatus::Running, None, None).await;
+    let _ = state
+        .admin
+        .store
+        .update_task_status(&task_id, TaskStatus::Running, None, None)
+        .await;
 
     let store = Arc::clone(&state.admin.store);
     let tid = task_id.clone();
@@ -230,20 +257,19 @@ pub async fn run_flow_async(
                     "output": val,
                     "steps_executed": result.steps_executed,
                 });
-                let _ = store.update_task_status(
-                    &tid,
-                    TaskStatus::Completed,
-                    Some(&combined.to_string()),
-                    None,
-                ).await;
+                let _ = store
+                    .update_task_status(
+                        &tid,
+                        TaskStatus::Completed,
+                        Some(&combined.to_string()),
+                        None,
+                    )
+                    .await;
             }
             Err(e) => {
-                let _ = store.update_task_status(
-                    &tid,
-                    TaskStatus::Failed,
-                    None,
-                    Some(&e.to_string()),
-                ).await;
+                let _ = store
+                    .update_task_status(&tid, TaskStatus::Failed, None, Some(&e.to_string()))
+                    .await;
             }
         }
     });

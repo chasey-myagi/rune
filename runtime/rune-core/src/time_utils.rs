@@ -63,7 +63,11 @@ mod tests {
         let ms = now_ms();
         // Should be after 2024-01-01 and before 2100-01-01
         assert!(ms > 1_704_067_200_000, "timestamp too old: {}", ms);
-        assert!(ms < 4_102_444_800_000, "timestamp too far in the future: {}", ms);
+        assert!(
+            ms < 4_102_444_800_000,
+            "timestamp too far in the future: {}",
+            ms
+        );
     }
 
     #[test]

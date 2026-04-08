@@ -11,8 +11,8 @@ use crate::client::RuneClient;
 /// malformed JSON like `"{bad"` are rejected with a clear error message.
 pub fn resolve_input(input: Option<&str>, input_file: Option<&str>) -> Result<Value> {
     if let Some(raw) = input {
-        let value: Value = serde_json::from_str(raw)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON input: {}", e))?;
+        let value: Value =
+            serde_json::from_str(raw).map_err(|e| anyhow::anyhow!("Invalid JSON input: {}", e))?;
         return Ok(value);
     }
 

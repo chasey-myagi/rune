@@ -258,8 +258,7 @@ fn hash_key(raw_key: &str) -> String {
 }
 
 fn hmac_key(raw_key: &str, secret: &[u8]) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(secret).expect("HMAC-SHA256 accepts any key size");
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC-SHA256 accepts any key size");
     mac.update(raw_key.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
@@ -283,14 +282,27 @@ mod tests {
         let result = store.create_key(KeyType::Gate, "test").await.unwrap();
 
         let prefix = &result.api_key.key_prefix;
-        assert!(prefix.starts_with("rk_"), "prefix should start with rk_, got: {}", prefix);
+        assert!(
+            prefix.starts_with("rk_"),
+            "prefix should start with rk_, got: {}",
+            prefix
+        );
         // "rk_" (3 chars) + 16 hex chars = 19 chars total
-        assert_eq!(prefix.len(), 19, "prefix should be 19 chars (rk_ + 16 hex), got {} ({} chars)", prefix, prefix.len());
+        assert_eq!(
+            prefix.len(),
+            19,
+            "prefix should be 19 chars (rk_ + 16 hex), got {} ({} chars)",
+            prefix,
+            prefix.len()
+        );
 
         // The hex part after "rk_" should be valid hex
         let hex_part = &prefix[3..];
-        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()),
-            "prefix hex part should be valid hex, got: {}", hex_part);
+        assert!(
+            hex_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "prefix hex part should be valid hex, got: {}",
+            hex_part
+        );
     }
 
     #[tokio::test]
@@ -324,14 +336,20 @@ mod tests {
             .verify_key_hmac(&result.raw_key, KeyType::Gate, secret)
             .await
             .unwrap();
-        assert!(verified.is_some(), "HMAC verify with correct secret should succeed");
+        assert!(
+            verified.is_some(),
+            "HMAC verify with correct secret should succeed"
+        );
 
         // 用错误 secret 验证应该失败
         let verified = store
             .verify_key_hmac(&result.raw_key, KeyType::Gate, b"wrong-secret")
             .await
             .unwrap();
-        assert!(verified.is_none(), "HMAC verify with wrong secret should fail");
+        assert!(
+            verified.is_none(),
+            "HMAC verify with wrong secret should fail"
+        );
     }
 
     #[tokio::test]
@@ -361,6 +379,9 @@ mod tests {
 
         let hash_a = hmac_key(raw_key, secret_a);
         let hash_b = hmac_key(raw_key, secret_b);
-        assert_ne!(hash_a, hash_b, "different secrets must produce different hashes");
+        assert_ne!(
+            hash_a, hash_b,
+            "different secrets must produce different hashes"
+        );
     }
 }

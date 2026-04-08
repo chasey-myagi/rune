@@ -17,7 +17,7 @@ use rune_core::invoker::{LocalInvoker, LocalStreamInvoker};
 use rune_core::relay::Relay;
 use rune_core::resolver::{Resolver, RoundRobinResolver};
 use rune_core::rune::{
-    GateConfig, RuneConfig, RuneContext, RuneError, StreamRuneHandler, StreamSender, make_handler,
+    make_handler, GateConfig, RuneConfig, RuneContext, RuneError, StreamRuneHandler, StreamSender,
 };
 use rune_core::session::SessionManager;
 use rune_flow::engine::FlowEngine;
@@ -295,9 +295,7 @@ fn build_guarantee_state() -> (GateState, Arc<Relay>, Arc<RuneStore>) {
             max_upload_size_mb: 1,
             request_timeout: Duration::from_secs(30),
         },
-        flow: gate::FlowState {
-            flow_engine,
-        },
+        flow: gate::FlowState { flow_engine },
         admin: gate::AdminState {
             store: store.clone(),
             started_at: Instant::now(),
@@ -351,7 +349,6 @@ fn client() -> Client {
         .unwrap()
 }
 
-
 // ===========================================================================
 // G1  Unified invocation
 // ===========================================================================
@@ -387,7 +384,10 @@ async fn test_guarantee_01_unified_invocation() {
     assert_eq!(r2.status(), 200);
     let j2: serde_json::Value = r2.json().await.unwrap();
 
-    assert_eq!(j1, j2, "debug endpoint and gate_path must return identical results");
+    assert_eq!(
+        j1, j2,
+        "debug endpoint and gate_path must return identical results"
+    );
 }
 
 // ===========================================================================
@@ -413,10 +413,7 @@ async fn test_guarantee_02_three_modes() {
 
     // stream
     let r_stream = c
-        .post(format!(
-            "{}/api/v1/runes/echo_stream/run?stream=true",
-            base
-        ))
+        .post(format!("{}/api/v1/runes/echo_stream/run?stream=true", base))
         .body("hello")
         .header("content-type", "text/plain")
         .send()
@@ -431,10 +428,7 @@ async fn test_guarantee_02_three_modes() {
 
     // async
     let r_async = c
-        .post(format!(
-            "{}/api/v1/runes/echo_stream/run?async=true",
-            base
-        ))
+        .post(format!("{}/api/v1/runes/echo_stream/run?async=true", base))
         .body("hello")
         .header("content-type", "text/plain")
         .send()
@@ -467,10 +461,7 @@ async fn test_guarantee_03_real_streaming() {
 
     let start = Instant::now();
     let resp = c
-        .post(format!(
-            "{}/api/v1/runes/slow_stream/run?stream=true",
-            base
-        ))
+        .post(format!("{}/api/v1/runes/slow_stream/run?stream=true", base))
         .body("g3")
         .header("content-type", "text/plain")
         .send()
@@ -511,9 +502,7 @@ async fn test_guarantee_04_timeout_convergence() {
     let (state, relay, _store) = build_guarantee_state();
 
     // Register a rune whose handler returns Timeout
-    let timeout_handler = make_handler(|_ctx, _input| async move {
-        Err(RuneError::Timeout)
-    });
+    let timeout_handler = make_handler(|_ctx, _input| async move { Err(RuneError::Timeout) });
     relay
         .register(
             RuneConfig {
@@ -578,10 +567,7 @@ async fn test_guarantee_05_cancel_convergence() {
 
     // Launch async with slow rune
     let resp = c
-        .post(format!(
-            "{}/api/v1/runes/slow_sync/run?async=true",
-            base
-        ))
+        .post(format!("{}/api/v1/runes/slow_sync/run?async=true", base))
         .body("{}")
         .header("content-type", "application/json")
         .send()
@@ -660,7 +646,11 @@ async fn test_guarantee_07_no_state_pollution() {
 
     // Health check should still pass
     let health = c.get(format!("{}/health", base)).send().await.unwrap();
-    assert_eq!(health.status(), 200, "server must stay healthy after late result");
+    assert_eq!(
+        health.status(),
+        200,
+        "server must stay healthy after late result"
+    );
 
     // Echo must still work correctly
     let resp = c
@@ -671,7 +661,10 @@ async fn test_guarantee_07_no_state_pollution() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let j: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(j["after_late"], true, "echo must return correct data after late result");
+    assert_eq!(
+        j["after_late"], true,
+        "echo must return correct data after late result"
+    );
 }
 
 // ===========================================================================
@@ -1058,11 +1051,7 @@ async fn test_guarantee_16_label_strictness() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resp2.status(),
-        200,
-        "matching labels should succeed"
-    );
+    assert_eq!(resp2.status(), 200, "matching labels should succeed");
 
     // Request with no labels → normal resolve (picks any) → 200
     let resp3 = c

@@ -1,4 +1,4 @@
-use axum::{Json, http::StatusCode, response::IntoResponse};
+use axum::{http::StatusCode, response::IntoResponse, Json};
 use rune_core::rune::RuneError;
 use rune_flow::engine::FlowError;
 
@@ -43,11 +43,15 @@ pub fn map_flow_error(e: FlowError) -> axum::response::Response {
         FlowError::DagError(_) => {
             error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string())
         }
-        FlowError::NoTerminalStep => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "NO_TERMINAL_STEP", &e.to_string())
-        }
-        FlowError::SerializationFailed(_) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "SERIALIZATION_FAILED", &e.to_string())
-        }
+        FlowError::NoTerminalStep => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "NO_TERMINAL_STEP",
+            &e.to_string(),
+        ),
+        FlowError::SerializationFailed(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SERIALIZATION_FAILED",
+            &e.to_string(),
+        ),
     }
 }

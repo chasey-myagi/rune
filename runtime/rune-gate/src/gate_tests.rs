@@ -4,9 +4,9 @@
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
     use std::time::Instant;
-    use std::collections::HashSet;
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -17,7 +17,7 @@ mod tests {
     use rune_core::invoker::LocalInvoker;
     use rune_core::relay::Relay;
     use rune_core::resolver::{Resolver, RoundRobinResolver};
-    use rune_core::rune::{GateConfig, RuneConfig, RuneError, make_handler};
+    use rune_core::rune::{make_handler, GateConfig, RuneConfig, RuneError};
     use rune_flow::engine::FlowEngine;
     use rune_store::{RuneStore, TaskStatus};
     use tower::ServiceExt;
@@ -26,7 +26,9 @@ mod tests {
     use crate::rate_limit::RateLimitState;
     use crate::router::build_router;
     use crate::shutdown::ShutdownCoordinator;
-    use crate::state::{GateState, AuthState, RuneState, FlowState, AdminState, DEFAULT_REQUEST_TIMEOUT};
+    use crate::state::{
+        AdminState, AuthState, FlowState, GateState, RuneState, DEFAULT_REQUEST_TIMEOUT,
+    };
     fn test_state() -> GateState {
         let relay = Arc::new(Relay::new());
         let resolver = Arc::new(RoundRobinResolver::new());
@@ -48,7 +50,8 @@ mod tests {
                     }),
                     input_schema: None,
                     output_schema: None,
-                    priority: 0, labels: Default::default(),
+                    priority: 0,
+                    labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(echo_handler)),
                 None,
@@ -67,16 +70,18 @@ mod tests {
                     gate: None,
                     input_schema: None,
                     output_schema: None,
-                    priority: 0, labels: Default::default(),
+                    priority: 0,
+                    labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(internal_handler)),
                 None,
             )
             .unwrap();
 
-        let flow_engine = Arc::new(tokio::sync::RwLock::new(
-            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-        ));
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+            Arc::clone(&relay),
+            Arc::clone(&resolver) as Arc<dyn Resolver>,
+        )));
 
         GateState {
             auth: AuthState {
@@ -95,9 +100,7 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState {
-                flow_engine,
-            },
+            flow: FlowState { flow_engine },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -227,11 +230,7 @@ mod tests {
     async fn test_list_runes() {
         let app = test_router();
         let response = app
-            .oneshot(
-                Request::get("/api/v1/runes")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/runes").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -246,7 +245,8 @@ mod tests {
     async fn test_auth_blocks_without_key() {
         let mut state = test_state();
         state.auth.auth_enabled = true;
-        state.auth.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
+        state.auth.key_verifier =
+            Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
         let app = build_router(state, None);
 
         let response = app
@@ -267,7 +267,8 @@ mod tests {
     async fn test_auth_allows_exempt_route() {
         let mut state = test_state();
         state.auth.auth_enabled = true;
-        state.auth.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
+        state.auth.key_verifier =
+            Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
         let app = build_router(state, None);
 
         let response = app
@@ -283,10 +284,13 @@ mod tests {
         let mut state = test_state();
         state.auth.auth_enabled = true;
         let key_result = state
-            .admin.store
-            .create_key(rune_store::KeyType::Gate, "test").await
+            .admin
+            .store
+            .create_key(rune_store::KeyType::Gate, "test")
+            .await
             .unwrap();
-        state.auth.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
+        state.auth.key_verifier =
+            Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
         let app = build_router(state, None);
 
         let response = app
@@ -348,11 +352,7 @@ mod tests {
         // List keys
         let app2 = build_router(state.clone(), None);
         let response = app2
-            .oneshot(
-                Request::get("/api/v1/keys")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/keys").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -478,12 +478,16 @@ mod tests {
 
         // Insert a task and mark it completed
         state
-            .admin.store
-            .insert_task("done-task", "echo", Some("input")).await
+            .admin
+            .store
+            .insert_task("done-task", "echo", Some("input"))
+            .await
             .unwrap();
         state
-            .admin.store
-            .update_task_status("done-task", TaskStatus::Completed, Some("result"), None).await
+            .admin
+            .store
+            .update_task_status("done-task", TaskStatus::Completed, Some("result"), None)
+            .await
             .unwrap();
 
         let app = build_router(state, None);
@@ -520,12 +524,16 @@ mod tests {
 
         // Insert a task and mark it failed
         state
-            .admin.store
-            .insert_task("fail-task", "echo", Some("input")).await
+            .admin
+            .store
+            .insert_task("fail-task", "echo", Some("input"))
+            .await
             .unwrap();
         state
-            .admin.store
-            .update_task_status("fail-task", TaskStatus::Failed, None, Some("boom")).await
+            .admin
+            .store
+            .update_task_status("fail-task", TaskStatus::Failed, None, Some("boom"))
+            .await
             .unwrap();
 
         let app = build_router(state, None);
@@ -644,11 +652,7 @@ mod tests {
         // Fresh state with no calls made — stats should return 0 total
         let app = test_router();
         let response = app
-            .oneshot(
-                Request::get("/api/v1/stats")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/stats").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -679,8 +683,10 @@ mod tests {
         // "bearer " (lowercase) should fail to strip the prefix and return 401.
         let state = auth_state();
         let key_result = state
-            .admin.store
-            .create_key(rune_store::KeyType::Gate, "test").await
+            .admin
+            .store
+            .create_key(rune_store::KeyType::Gate, "test")
+            .await
             .unwrap();
         let app = build_router(state, None);
 
@@ -704,8 +710,10 @@ mod tests {
         // "BEARER " (all caps) should also fail — middleware uses strip_prefix("Bearer ")
         let state = auth_state();
         let key_result = state
-            .admin.store
-            .create_key(rune_store::KeyType::Gate, "test").await
+            .admin
+            .store
+            .create_key(rune_store::KeyType::Gate, "test")
+            .await
             .unwrap();
         let app = build_router(state, None);
 
@@ -730,8 +738,10 @@ mod tests {
         // which is not a valid key, so verification should fail with 401.
         let state = auth_state();
         let key_result = state
-            .admin.store
-            .create_key(rune_store::KeyType::Gate, "test").await
+            .admin
+            .store
+            .create_key(rune_store::KeyType::Gate, "test")
+            .await
             .unwrap();
         let app = build_router(state, None);
 
@@ -740,10 +750,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/echo")
-                    .header(
-                        "authorization",
-                        format!("Bearer  {}", key_result.raw_key),
-                    )
+                    .header("authorization", format!("Bearer  {}", key_result.raw_key))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -759,8 +766,10 @@ mod tests {
         // Passing just the raw key without "Bearer " prefix should return 401
         let state = auth_state();
         let key_result = state
-            .admin.store
-            .create_key(rune_store::KeyType::Gate, "test").await
+            .admin
+            .store
+            .create_key(rune_store::KeyType::Gate, "test")
+            .await
             .unwrap();
         let app = build_router(state, None);
 
@@ -838,8 +847,7 @@ mod tests {
         // tower-http CorsLayer with explicit origins will not set ACAO for disallowed origins
         let acao = response.headers().get("access-control-allow-origin");
         assert!(
-            acao.is_none()
-                || acao.unwrap().to_str().unwrap() != "https://evil.example.com",
+            acao.is_none() || acao.unwrap().to_str().unwrap() != "https://evil.example.com",
             "ACAO should NOT echo an unlisted origin"
         );
     }
@@ -868,10 +876,7 @@ mod tests {
             .headers()
             .get("access-control-allow-origin")
             .expect("should have ACAO for allowed origin");
-        assert_eq!(
-            acao.to_str().unwrap(),
-            "https://allowed.example.com"
-        );
+        assert_eq!(acao.to_str().unwrap(), "https://allowed.example.com");
     }
 
     // =======================================================================
@@ -897,7 +902,11 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 1024)
             .await
             .unwrap();
-        assert!(body.is_empty(), "echo of empty body should be empty, got {} bytes", body.len());
+        assert!(
+            body.is_empty(),
+            "echo of empty body should be empty, got {} bytes",
+            body.len()
+        );
     }
 
     // =======================================================================
@@ -991,7 +1000,8 @@ mod tests {
                         }),
                         input_schema: None,
                         output_schema: None,
-                        priority: 0, labels: Default::default(),
+                        priority: 0,
+                        labels: Default::default(),
                     },
                     Arc::new(LocalInvoker::new(handler)),
                     None,
@@ -999,9 +1009,10 @@ mod tests {
                 .unwrap();
         }
 
-        let flow_engine = Arc::new(tokio::sync::RwLock::new(
-            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-        ));
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+            Arc::clone(&relay),
+            Arc::clone(&resolver) as Arc<dyn Resolver>,
+        )));
         let state = GateState {
             auth: AuthState {
                 key_verifier,
@@ -1019,9 +1030,7 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState {
-                flow_engine,
-            },
+            flow: FlowState { flow_engine },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -1045,14 +1054,20 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(response.status(), StatusCode::OK, "path {} should route correctly", path);
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "path {} should route correctly",
+                path
+            );
             let body = axum::body::to_bytes(response.into_body(), 4096)
                 .await
                 .unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(
                 json["rune"], expected_name,
-                "path {} should return rune={}", path, expected_name
+                "path {} should return rune={}",
+                path, expected_name
             );
         }
     }
@@ -1106,7 +1121,10 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "completed");
-        assert!(json["output"].is_string(), "completed task should have output field");
+        assert!(
+            json["output"].is_string(),
+            "completed task should have output field"
+        );
         // The output should contain the original input (echo)
         let output_str = json["output"].as_str().unwrap();
         assert!(
@@ -1126,17 +1144,21 @@ mod tests {
 
         // Manually insert a failed task
         state
-            .admin.store
-            .insert_task("fail-async", "echo", Some("input")).await
+            .admin
+            .store
+            .insert_task("fail-async", "echo", Some("input"))
+            .await
             .unwrap();
         state
-            .admin.store
+            .admin
+            .store
             .update_task_status(
                 "fail-async",
                 TaskStatus::Failed,
                 None,
                 Some("handler crashed"),
-            ).await
+            )
+            .await
             .unwrap();
 
         let app = build_router(state, None);
@@ -1155,7 +1177,10 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "failed");
-        assert!(json["error"].is_string(), "failed task should have error field");
+        assert!(
+            json["error"].is_string(),
+            "failed task should have error field"
+        );
         assert!(
             json["error"].as_str().unwrap().contains("handler crashed"),
             "error should contain the failure message"
@@ -1172,12 +1197,16 @@ mod tests {
 
         // Insert a task in running state
         state
-            .admin.store
-            .insert_task("cancel-run", "echo", Some("data")).await
+            .admin
+            .store
+            .insert_task("cancel-run", "echo", Some("data"))
+            .await
             .unwrap();
         state
-            .admin.store
-            .update_task_status("cancel-run", TaskStatus::Running, None, None).await
+            .admin
+            .store
+            .update_task_status("cancel-run", TaskStatus::Running, None, None)
+            .await
             .unwrap();
 
         let app = build_router(state.clone(), None);
@@ -1201,7 +1230,13 @@ mod tests {
         assert_eq!(json["task_id"], "cancel-run");
 
         // Verify store state
-        let task = state.admin.store.get_task("cancel-run").await.unwrap().unwrap();
+        let task = state
+            .admin
+            .store
+            .get_task("cancel-run")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(task.status, TaskStatus::Cancelled);
     }
 
@@ -1215,12 +1250,21 @@ mod tests {
 
         // Insert and cancel
         state
-            .admin.store
-            .insert_task("idempotent-cancel", "echo", Some("data")).await
+            .admin
+            .store
+            .insert_task("idempotent-cancel", "echo", Some("data"))
+            .await
             .unwrap();
         state
-            .admin.store
-            .update_task_status("idempotent-cancel", TaskStatus::Cancelled, None, Some("first cancel")).await
+            .admin
+            .store
+            .update_task_status(
+                "idempotent-cancel",
+                TaskStatus::Cancelled,
+                None,
+                Some("first cancel"),
+            )
+            .await
             .unwrap();
 
         // First DELETE on already-cancelled
@@ -1340,7 +1384,8 @@ mod tests {
                         }),
                         input_schema: None,
                         output_schema: None,
-                        priority: 0, labels: Default::default(),
+                        priority: 0,
+                        labels: Default::default(),
                     },
                     Arc::new(LocalInvoker::new(handler)),
                     None,
@@ -1348,9 +1393,10 @@ mod tests {
                 .unwrap();
         }
 
-        let flow_engine = Arc::new(tokio::sync::RwLock::new(
-            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-        ));
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+            Arc::clone(&relay),
+            Arc::clone(&resolver) as Arc<dyn Resolver>,
+        )));
         let state = GateState {
             auth: AuthState {
                 key_verifier,
@@ -1368,9 +1414,7 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState {
-                flow_engine,
-            },
+            flow: FlowState { flow_engine },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -1383,11 +1427,7 @@ mod tests {
 
         let app = build_router(state, None);
         let response = app
-            .oneshot(
-                Request::get("/api/v1/runes")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/runes").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -1402,14 +1442,21 @@ mod tests {
         // Verify each rune has name and gate_path fields
         for rune in runes {
             assert!(rune["name"].is_string(), "each rune should have a name");
-            assert!(rune["gate_path"].is_string(), "each rune should have a gate_path");
+            assert!(
+                rune["gate_path"].is_string(),
+                "each rune should have a gate_path"
+            );
         }
 
         // Verify specific names are present
         let names: Vec<&str> = runes.iter().map(|r| r["name"].as_str().unwrap()).collect();
         for i in 0..5 {
             let expected = format!("rune_{}", i);
-            assert!(names.contains(&expected.as_str()), "should contain {}", expected);
+            assert!(
+                names.contains(&expected.as_str()),
+                "should contain {}",
+                expected
+            );
         }
     }
 
@@ -1421,11 +1468,7 @@ mod tests {
     async fn test_mgmt_casters_endpoint() {
         let app = test_router();
         let response = app
-            .oneshot(
-                Request::get("/api/v1/casters")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/casters").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -1435,7 +1478,10 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         // No casters registered in test state, so list should be empty
-        assert!(json["casters"].is_array(), "response should have 'casters' array");
+        assert!(
+            json["casters"].is_array(),
+            "response should have 'casters' array"
+        );
         assert_eq!(json["casters"].as_array().unwrap().len(), 0);
     }
 
@@ -1447,11 +1493,7 @@ mod tests {
     async fn test_mgmt_status_all_fields() {
         let app = test_router();
         let response = app
-            .oneshot(
-                Request::get("/api/v1/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/status").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -1462,10 +1504,19 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         // Verify all expected fields exist with correct types
-        assert!(json["uptime_secs"].is_u64(), "uptime_secs should be a number");
+        assert!(
+            json["uptime_secs"].is_u64(),
+            "uptime_secs should be a number"
+        );
         assert!(json["rune_count"].is_u64(), "rune_count should be a number");
-        assert!(json["caster_count"].is_u64(), "caster_count should be a number");
-        assert!(json["dev_mode"].is_boolean(), "dev_mode should be a boolean");
+        assert!(
+            json["caster_count"].is_u64(),
+            "caster_count should be a number"
+        );
+        assert!(
+            json["dev_mode"].is_boolean(),
+            "dev_mode should be a boolean"
+        );
 
         // test_state sets dev_mode=true and registers 2 runes
         assert_eq!(json["dev_mode"], true);
@@ -1516,11 +1567,7 @@ mod tests {
         // Query stats
         let app = build_router(state, None);
         let response = app
-            .oneshot(
-                Request::get("/api/v1/stats")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/stats").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -1530,7 +1577,10 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert_eq!(json["total_calls"], 5, "total should be 5 (3 echo + 2 internal)");
+        assert_eq!(
+            json["total_calls"], 5,
+            "total should be 5 (3 echo + 2 internal)"
+        );
 
         let by_rune = json["by_rune"].as_array().unwrap();
         assert_eq!(by_rune.len(), 2, "should have stats for 2 runes");
@@ -1561,8 +1611,10 @@ mod tests {
 
         // Insert a task in pending state (insert_task default is pending)
         state
-            .admin.store
-            .insert_task("pending-cancel", "echo", Some("data")).await
+            .admin
+            .store
+            .insert_task("pending-cancel", "echo", Some("data"))
+            .await
             .unwrap();
 
         let app = build_router(state.clone(), None);
@@ -1584,7 +1636,13 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "cancelled");
 
-        let task = state.admin.store.get_task("pending-cancel").await.unwrap().unwrap();
+        let task = state
+            .admin
+            .store
+            .get_task("pending-cancel")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(task.status, TaskStatus::Cancelled);
     }
 
@@ -1770,7 +1828,10 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["logs"].is_array(), "should return a logs array even with negative limit");
+        assert!(
+            json["logs"].is_array(),
+            "should return a logs array even with negative limit"
+        );
     }
 
     #[tokio::test]
@@ -1812,7 +1873,11 @@ mod tests {
         let logs = json["logs"].as_array().unwrap();
         // We only inserted 3 logs, so even with limit=1000 (capped to 500),
         // we should get exactly 3.
-        assert_eq!(logs.len(), 3, "should return all 3 logs (capped at 500, but only 3 exist)");
+        assert_eq!(
+            logs.len(),
+            3,
+            "should return all 3 logs (capped at 500, but only 3 exist)"
+        );
     }
 
     #[tokio::test]
@@ -1884,16 +1949,18 @@ mod tests {
                     }),
                     input_schema: None,
                     output_schema: None,
-                    priority: 0, labels: Default::default(),
+                    priority: 0,
+                    labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(handler)),
                 None,
             )
             .unwrap();
 
-        let flow_engine = Arc::new(tokio::sync::RwLock::new(
-            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-        ));
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+            Arc::clone(&relay),
+            Arc::clone(&resolver) as Arc<dyn Resolver>,
+        )));
         let state = GateState {
             auth: AuthState {
                 key_verifier,
@@ -1911,9 +1978,7 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState {
-                flow_engine,
-            },
+            flow: FlowState { flow_engine },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -1948,11 +2013,7 @@ mod tests {
         // But the rune IS listed in /api/v1/runes
         let app2 = build_router(state, None);
         let response = app2
-            .oneshot(
-                Request::get("/api/v1/runes")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/runes").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -1988,16 +2049,18 @@ mod tests {
                     }),
                     input_schema: None,
                     output_schema: None,
-                    priority: 0, labels: Default::default(),
+                    priority: 0,
+                    labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(handler)),
                 None,
             )
             .unwrap();
 
-        let flow_engine = Arc::new(tokio::sync::RwLock::new(
-            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-        ));
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+            Arc::clone(&relay),
+            Arc::clone(&resolver) as Arc<dyn Resolver>,
+        )));
         let state = GateState {
             auth: AuthState {
                 key_verifier,
@@ -2015,9 +2078,7 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState {
-                flow_engine,
-            },
+            flow: FlowState { flow_engine },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -2079,16 +2140,18 @@ mod tests {
                     }),
                     input_schema: None,
                     output_schema: None,
-                    priority: 0, labels: Default::default(),
+                    priority: 0,
+                    labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(handler)),
                 None,
             )
             .unwrap();
 
-        let flow_engine = Arc::new(tokio::sync::RwLock::new(
-            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-        ));
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+            Arc::clone(&relay),
+            Arc::clone(&resolver) as Arc<dyn Resolver>,
+        )));
         let state = GateState {
             auth: AuthState {
                 key_verifier,
@@ -2106,9 +2169,7 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState {
-                flow_engine,
-            },
+            flow: FlowState { flow_engine },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -2255,8 +2316,7 @@ mod tests {
                 }
                 None => {
                     body.extend_from_slice(
-                        format!("Content-Disposition: form-data; name=\"{}\"\r\n", name)
-                            .as_bytes(),
+                        format!("Content-Disposition: form-data; name=\"{}\"\r\n", name).as_bytes(),
                     );
                 }
             }
@@ -2289,8 +2349,7 @@ mod tests {
                 }
                 None => {
                     body.extend_from_slice(
-                        format!("Content-Disposition: form-data; name=\"{}\"\r\n", name)
-                            .as_bytes(),
+                        format!("Content-Disposition: form-data; name=\"{}\"\r\n", name).as_bytes(),
                     );
                 }
             }
@@ -2370,7 +2429,10 @@ mod tests {
         assert_eq!(f["mime_type"], "text/plain");
         assert_eq!(f["size"], file_content.len() as u64);
         assert!(f["file_id"].is_string(), "file should have a file_id");
-        assert!(!f["file_id"].as_str().unwrap().is_empty(), "file_id should not be empty");
+        assert!(
+            !f["file_id"].as_str().unwrap().is_empty(),
+            "file_id should not be empty"
+        );
     }
 
     // =========================================================================
@@ -2418,7 +2480,12 @@ mod tests {
             &[
                 ("file1", Some("a.txt"), "text/plain", b"file a content"),
                 ("file2", Some("b.txt"), "text/plain", b"file b content"),
-                ("file3", Some("c.bin"), "application/octet-stream", b"\x00\x01\x02"),
+                (
+                    "file3",
+                    Some("c.bin"),
+                    "application/octet-stream",
+                    b"\x00\x01\x02",
+                ),
             ],
         );
 
@@ -2430,7 +2497,10 @@ mod tests {
         assert_eq!(files.len(), 3, "should have 3 files");
 
         // Verify each file has distinct filename and correct size
-        let filenames: Vec<&str> = files.iter().map(|f| f["filename"].as_str().unwrap()).collect();
+        let filenames: Vec<&str> = files
+            .iter()
+            .map(|f| f["filename"].as_str().unwrap())
+            .collect();
         assert!(filenames.contains(&"a.txt"));
         assert!(filenames.contains(&"b.txt"));
         assert!(filenames.contains(&"c.bin"));
@@ -2482,7 +2552,12 @@ mod tests {
         let small_data = vec![0x41u8; 1024 * 1024]; // 1MB
         let body = build_multipart_body(
             boundary,
-            &[("file", Some("small.bin"), "application/octet-stream", &small_data)],
+            &[(
+                "file",
+                Some("small.bin"),
+                "application/octet-stream",
+                &small_data,
+            )],
         );
 
         let response = send_multipart(app, "/echo", boundary, body).await;
@@ -2509,7 +2584,12 @@ mod tests {
         let exact_data = vec![0x42u8; 1 * 1024 * 1024];
         let body = build_multipart_body(
             boundary,
-            &[("file", Some("exact.bin"), "application/octet-stream", &exact_data)],
+            &[(
+                "file",
+                Some("exact.bin"),
+                "application/octet-stream",
+                &exact_data,
+            )],
         );
 
         let response = send_multipart(app, "/echo", boundary, body).await;
@@ -2533,7 +2613,12 @@ mod tests {
         let big_data = vec![0x43u8; 2 * 1024 * 1024]; // 2MB > 1MB limit
         let body = build_multipart_body(
             boundary,
-            &[("file", Some("big.bin"), "application/octet-stream", &big_data)],
+            &[(
+                "file",
+                Some("big.bin"),
+                "application/octet-stream",
+                &big_data,
+            )],
         );
 
         let response = send_multipart(app, "/echo", boundary, body).await;
@@ -2543,7 +2628,10 @@ mod tests {
         assert!(json["error"].is_object(), "413 should have error object");
         assert_eq!(json["error"]["code"], "PAYLOAD_TOO_LARGE");
         assert!(
-            json["error"]["message"].as_str().unwrap_or("").contains("size"),
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("size"),
             "error message should mention size"
         );
     }
@@ -2587,7 +2675,12 @@ mod tests {
         let data_4mb = vec![0x55u8; 4 * 1024 * 1024];
         let body = build_multipart_body(
             boundary,
-            &[("file", Some("exact4mb.bin"), "application/octet-stream", &data_4mb)],
+            &[(
+                "file",
+                Some("exact4mb.bin"),
+                "application/octet-stream",
+                &data_4mb,
+            )],
         );
 
         let response = send_multipart(app, "/echo", boundary, body).await;
@@ -2613,7 +2706,12 @@ mod tests {
         let small_data = vec![0x50u8; 3 * 1024 * 1024]; // 3MB
         let body = build_multipart_body(
             boundary,
-            &[("file", Some("small_inline.bin"), "application/octet-stream", &small_data)],
+            &[(
+                "file",
+                Some("small_inline.bin"),
+                "application/octet-stream",
+                &small_data,
+            )],
         );
 
         let response = send_multipart(app, "/echo", boundary, body).await;
@@ -2640,7 +2738,12 @@ mod tests {
         let large_data = vec![0x51u8; 5 * 1024 * 1024]; // 5MB
         let body = build_multipart_body(
             boundary,
-            &[("file", Some("large_broker.bin"), "application/octet-stream", &large_data)],
+            &[(
+                "file",
+                Some("large_broker.bin"),
+                "application/octet-stream",
+                &large_data,
+            )],
         );
 
         let response = send_multipart(app, "/echo", boundary, body).await;
@@ -2673,8 +2776,18 @@ mod tests {
         let body = build_multipart_body(
             boundary,
             &[
-                ("file1", Some("small.bin"), "application/octet-stream", &small),
-                ("file2", Some("large.bin"), "application/octet-stream", &large),
+                (
+                    "file1",
+                    Some("small.bin"),
+                    "application/octet-stream",
+                    &small,
+                ),
+                (
+                    "file2",
+                    Some("large.bin"),
+                    "application/octet-stream",
+                    &large,
+                ),
             ],
         );
 
@@ -2818,7 +2931,12 @@ mod tests {
         let boundary = "----TestBoundaryCleanup";
         let body = build_multipart_body(
             boundary,
-            &[("file", Some("temp.dat"), "application/octet-stream", b"temp data")],
+            &[(
+                "file",
+                Some("temp.dat"),
+                "application/octet-stream",
+                b"temp data",
+            )],
         );
         let upload_resp = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(upload_resp.status(), StatusCode::OK);
@@ -2829,7 +2947,11 @@ mod tests {
             .expect("should have file_id");
 
         // Step 2: Look up the request_id from the broker, then mark it completed
-        let stored = state.rune.file_broker.get(file_id).expect("file should exist before cleanup");
+        let stored = state
+            .rune
+            .file_broker
+            .get(file_id)
+            .expect("file should exist before cleanup");
         let request_id = stored.request_id.clone();
         state.rune.file_broker.complete_request(&request_id);
 
@@ -2954,7 +3076,12 @@ mod tests {
         let boundary = "----TestBoundaryMeta";
         let body = build_multipart_body(
             boundary,
-            &[("file", Some("report-2024.pdf"), "application/pdf", b"pdf content here")],
+            &[(
+                "file",
+                Some("report-2024.pdf"),
+                "application/pdf",
+                b"pdf content here",
+            )],
         );
 
         let response = send_multipart(app, "/echo", boundary, body).await;
@@ -3002,10 +3129,8 @@ mod tests {
     async fn test_empty_file_zero_bytes_accepted() {
         let app = test_router();
         let boundary = "----TestBoundaryEmpty";
-        let body = build_multipart_body(
-            boundary,
-            &[("file", Some("empty.txt"), "text/plain", b"")],
-        );
+        let body =
+            build_multipart_body(boundary, &[("file", Some("empty.txt"), "text/plain", b"")]);
 
         let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -3048,7 +3173,12 @@ mod tests {
         let boundary = "----TestBoundaryCJK";
         let body = build_multipart_body(
             boundary,
-            &[("file", Some("\u{62a5}\u{544a}\u{6587}\u{4ef6}.pdf"), "application/pdf", b"pdf")],
+            &[(
+                "file",
+                Some("\u{62a5}\u{544a}\u{6587}\u{4ef6}.pdf"),
+                "application/pdf",
+                b"pdf",
+            )],
         );
 
         let response = send_multipart(app, "/echo", boundary, body).await;
@@ -3069,7 +3199,12 @@ mod tests {
         let boundary = "----TestBoundaryPathSep";
         let body = build_multipart_body(
             boundary,
-            &[("file", Some("../../etc/passwd"), "text/plain", b"not really")],
+            &[(
+                "file",
+                Some("../../etc/passwd"),
+                "text/plain",
+                b"not really",
+            )],
         );
 
         let response = send_multipart(app, "/echo", boundary, body).await;
@@ -3175,7 +3310,12 @@ mod tests {
         // Use build_multipart_body with None for filename
         let body = build_multipart_body(
             boundary,
-            &[("file", None, "application/octet-stream", b"data without filename")],
+            &[(
+                "file",
+                None,
+                "application/octet-stream",
+                b"data without filename",
+            )],
         );
 
         let response = send_multipart(app, "/echo", boundary, body).await;
@@ -3217,7 +3357,12 @@ mod tests {
         let boundary = "----TestBoundaryBinaryIntegrity";
         let body = build_multipart_body(
             boundary,
-            &[("file", Some("binary.bin"), "application/octet-stream", &binary_data)],
+            &[(
+                "file",
+                Some("binary.bin"),
+                "application/octet-stream",
+                &binary_data,
+            )],
         );
         let upload_resp = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(upload_resp.status(), StatusCode::OK);
@@ -3288,10 +3433,8 @@ mod tests {
     async fn test_multipart_debug_route_nonexistent_rune_404() {
         let app = test_router();
         let boundary = "----TestBoundaryDebug404";
-        let body = build_multipart_body(
-            boundary,
-            &[("file", Some("x.txt"), "text/plain", b"data")],
-        );
+        let body =
+            build_multipart_body(boundary, &[("file", Some("x.txt"), "text/plain", b"data")]);
 
         let response = send_multipart(app, "/api/v1/runes/nonexistent/run", boundary, body).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -3473,7 +3616,10 @@ mod tests {
             .unwrap();
 
         let status = response.status().as_u16();
-        assert_eq!(status, 400, "JSON body with multipart content-type should return 400");
+        assert_eq!(
+            status, 400,
+            "JSON body with multipart content-type should return 400"
+        );
 
         let json = json_body(response).await;
         assert_eq!(json["error"]["code"], "BAD_REQUEST");
@@ -3583,10 +3729,8 @@ mod tests {
         let app = build_router(state, None);
         let boundary = "----TestBoundaryZeroLimit";
         // Even a 1-byte file should be rejected
-        let body = build_multipart_body(
-            boundary,
-            &[("file", Some("tiny.txt"), "text/plain", b"x")],
-        );
+        let body =
+            build_multipart_body(boundary, &[("file", Some("tiny.txt"), "text/plain", b"x")]);
 
         let response = send_multipart(app, "/echo", boundary, body).await;
         assert_eq!(
@@ -3608,8 +3752,16 @@ mod tests {
         let state = test_state();
         let files_data = vec![
             ("doc.txt", "text/plain", b"Hello World".as_slice()),
-            ("data.json", "application/json", br#"{"key":"value"}"#.as_slice()),
-            ("image.bin", "application/octet-stream", &[0xFFu8, 0xD8, 0xFF, 0xE0] as &[u8]),
+            (
+                "data.json",
+                "application/json",
+                br#"{"key":"value"}"#.as_slice(),
+            ),
+            (
+                "image.bin",
+                "application/octet-stream",
+                &[0xFFu8, 0xD8, 0xFF, 0xE0] as &[u8],
+            ),
         ];
 
         // Step 1: Upload all files
@@ -3838,9 +3990,8 @@ mod tests {
         }"#;
 
         // Rune with schema: returns valid output
-        let echo_with_schema = make_handler(|_ctx, _input| async move {
-            Ok(Bytes::from(r#"{"result": "ok"}"#))
-        });
+        let echo_with_schema =
+            make_handler(|_ctx, _input| async move { Ok(Bytes::from(r#"{"result": "ok"}"#)) });
         relay
             .register(
                 RuneConfig {
@@ -3854,7 +4005,8 @@ mod tests {
                     }),
                     input_schema: Some(input_schema.to_string()),
                     output_schema: Some(output_schema.to_string()),
-                    priority: 0, labels: Default::default(),
+                    priority: 0,
+                    labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(echo_with_schema)),
                 None,
@@ -3876,7 +4028,8 @@ mod tests {
                     }),
                     input_schema: None,
                     output_schema: None,
-                    priority: 0, labels: Default::default(),
+                    priority: 0,
+                    labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(no_schema_handler)),
                 None,
@@ -3901,16 +4054,18 @@ mod tests {
                     }),
                     input_schema: Some(input_schema.to_string()),
                     output_schema: Some(output_schema.to_string()),
-                    priority: 0, labels: Default::default(),
+                    priority: 0,
+                    labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(bad_output_handler)),
                 None,
             )
             .unwrap();
 
-        let flow_engine = Arc::new(tokio::sync::RwLock::new(
-            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-        ));
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+            Arc::clone(&relay),
+            Arc::clone(&resolver) as Arc<dyn Resolver>,
+        )));
         GateState {
             auth: AuthState {
                 key_verifier,
@@ -3928,9 +4083,7 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState {
-                flow_engine,
-            },
+            flow: FlowState { flow_engine },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -3989,7 +4142,9 @@ mod tests {
         assert!(json["error"].is_object(), "should have error object");
         let error_msg = json["error"]["message"].as_str().unwrap_or("");
         assert!(
-            error_msg.contains("age") || error_msg.contains("required") || error_msg.contains("validation"),
+            error_msg.contains("age")
+                || error_msg.contains("required")
+                || error_msg.contains("validation"),
             "error should mention the validation issue, got: {}",
             error_msg
         );
@@ -4042,8 +4197,10 @@ mod tests {
         assert!(json["paths"].is_object());
 
         // Should include the validated rune path
-        assert!(json["paths"]["/validated"].is_object(),
-            "OpenAPI should include /validated path");
+        assert!(
+            json["paths"]["/validated"].is_object(),
+            "OpenAPI should include /validated path"
+        );
     }
 
     #[tokio::test]
@@ -4216,11 +4373,7 @@ mod tests {
         broker.complete_request("req-1");
 
         // req-1's files should be cleaned up
-        assert_eq!(
-            broker.files.len(),
-            1,
-            "only req-1 files should be removed"
-        );
+        assert_eq!(broker.files.len(), 1, "only req-1 files should be removed");
         // req-2's files should still be accessible
         assert!(
             broker.get(&id2).is_some(),
@@ -4330,7 +4483,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].is_object(), "error should be structured: {}", json);
+        assert!(
+            json["error"].is_object(),
+            "error should be structured: {}",
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -4362,7 +4519,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"]["message"].as_str().unwrap().to_lowercase().contains("cycle"));
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("cycle"));
     }
 
     #[tokio::test]
@@ -4392,7 +4553,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"]["message"].as_str().unwrap().to_lowercase().contains("duplicate"));
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("duplicate"));
     }
 
     #[tokio::test]
@@ -4423,7 +4588,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"]["message"].as_str().unwrap().to_lowercase().contains("input_mapping"));
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("input_mapping"));
     }
 
     #[tokio::test]
@@ -4464,7 +4633,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].is_object(), "error should be structured: {}", json);
+        assert!(
+            json["error"].is_object(),
+            "error should be structured: {}",
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -4479,11 +4652,7 @@ mod tests {
         let app = create_flow_helper(state.clone()).await;
 
         let response = app
-            .oneshot(
-                Request::get("/api/v1/flows")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/flows").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -4504,11 +4673,7 @@ mod tests {
     async fn test_flow_list_empty() {
         let app = test_router();
         let response = app
-            .oneshot(
-                Request::get("/api/v1/flows")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/flows").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -4568,7 +4733,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].is_object(), "error should be structured: {}", json);
+        assert!(
+            json["error"].is_object(),
+            "error should be structured: {}",
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -4615,7 +4784,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].is_object(), "error should be structured: {}", json);
+        assert!(
+            json["error"].is_object(),
+            "error should be structured: {}",
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -4630,11 +4803,7 @@ mod tests {
         let app = create_flow_helper(state.clone()).await;
 
         let response = app
-            .oneshot(
-                Request::get("/api/v1/flows")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/flows").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -4686,11 +4855,7 @@ mod tests {
         // List
         let app3 = build_router(state.clone(), None);
         let response = app3
-            .oneshot(
-                Request::get("/api/v1/flows")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/flows").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -4758,7 +4923,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].is_object(), "error should be structured: {}", json);
+        assert!(
+            json["error"].is_object(),
+            "error should be structured: {}",
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -4768,15 +4937,15 @@ mod tests {
         let state = test_state();
 
         // Register a flow referencing a rune that fails
-        let fail_handler =
-            make_handler(|_ctx, _input| async move {
-                Err(RuneError::ExecutionFailed {
-                    code: "STEP_FAILED".into(),
-                    message: "boom".into(),
-                })
-            });
+        let fail_handler = make_handler(|_ctx, _input| async move {
+            Err(RuneError::ExecutionFailed {
+                code: "STEP_FAILED".into(),
+                message: "boom".into(),
+            })
+        });
         state
-            .rune.relay
+            .rune
+            .relay
             .register(
                 RuneConfig {
                     name: "fail-rune".into(),
@@ -4786,7 +4955,8 @@ mod tests {
                     gate: None,
                     input_schema: None,
                     output_schema: None,
-                    priority: 0, labels: Default::default(),
+                    priority: 0,
+                    labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(fail_handler)),
                 None,
@@ -4832,7 +5002,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].is_object(), "error should be structured: {}", json);
+        assert!(
+            json["error"].is_object(),
+            "error should be structured: {}",
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -5172,7 +5346,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].is_object(), "error should be structured: {}", json);
+        assert!(
+            json["error"].is_object(),
+            "error should be structured: {}",
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -5187,11 +5365,7 @@ mod tests {
         let app = create_flow_helper(state.clone()).await;
 
         let response = app
-            .oneshot(
-                Request::get("/api/v1/flows")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/flows").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -5215,11 +5389,7 @@ mod tests {
         let app = build_router(state, None);
 
         let response = app
-            .oneshot(
-                Request::get("/api/v1/flows")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/flows").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -5276,7 +5446,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].is_object(), "error should be structured: {}", json);
+        assert!(
+            json["error"].is_object(),
+            "error should be structured: {}",
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -5328,8 +5502,10 @@ mod tests {
     async fn test_flow_create_with_valid_token() {
         let state = auth_state();
         let key_result = state
-            .admin.store
-            .create_key(rune_store::KeyType::Gate, "flow-test").await
+            .admin
+            .store
+            .create_key(rune_store::KeyType::Gate, "flow-test")
+            .await
             .unwrap();
         let app = build_router(state, None);
 
@@ -5427,23 +5603,22 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::CREATED, "Failed to create {}", name);
+            assert_eq!(
+                resp.status(),
+                StatusCode::CREATED,
+                "Failed to create {}",
+                name
+            );
         }
 
         // List all flows
         let app = build_router(state.clone(), None);
         let resp = app
-            .oneshot(
-                Request::get("/api/v1/flows")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/flows").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 8192)
-            .await
-            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let arr = json.as_array().unwrap();
         assert_eq!(arr.len(), 3, "Expected 3 flows, got {}", arr.len());
@@ -5574,9 +5749,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp2.status(), StatusCode::OK);
-        let run_body = axum::body::to_bytes(resp2.into_body(), 8192)
-            .await
-            .unwrap();
+        let run_body = axum::body::to_bytes(resp2.into_body(), 8192).await.unwrap();
         let run_json: serde_json::Value = serde_json::from_slice(&run_body).unwrap();
         // Output should exist — at minimum it should be a JSON object
         assert!(run_json.is_object(), "Run output should be a JSON object");
@@ -5637,7 +5810,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
-        assert!(json["error"].is_object(), "error should be structured: {}", json);
+        assert!(
+            json["error"].is_object(),
+            "error should be structured: {}",
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -5667,7 +5844,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
-        assert!(json["error"].is_object(), "error should be structured: {}", json);
+        assert!(
+            json["error"].is_object(),
+            "error should be structured: {}",
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -5699,7 +5880,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
-        assert!(json["error"].is_object(), "error should be structured: {}", json);
+        assert!(
+            json["error"].is_object(),
+            "error should be structured: {}",
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -5769,24 +5954,33 @@ mod tests {
         };
 
         let echo_handler = make_handler(|_ctx, input| async move { Ok(input) });
-        relay.register(
-            RuneConfig {
-                name: "echo".into(),
-                version: "1.0.0".into(),
-                description: "test echo".into(),
-                supports_stream: false,
-                gate: Some(GateConfig { path: "/echo".into(), method: "POST".into() }),
-                input_schema: None,
-                output_schema: None,
-                priority: 0, labels: Default::default(),
-            },
-            Arc::new(LocalInvoker::new(echo_handler)),
-            None,
-        ).unwrap();
+        relay
+            .register(
+                RuneConfig {
+                    name: "echo".into(),
+                    version: "1.0.0".into(),
+                    description: "test echo".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/echo".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(LocalInvoker::new(echo_handler)),
+                None,
+            )
+            .unwrap();
 
         // Create a gate key
         let raw_key = if !dev_mode {
-            let key_result = store.create_key(rune_store::KeyType::Gate, "rate_test").await.unwrap();
+            let key_result = store
+                .create_key(rune_store::KeyType::Gate, "rate_test")
+                .await
+                .unwrap();
             key_result.raw_key
         } else {
             "dev-key".to_string()
@@ -5816,16 +6010,18 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState {
-                flow_engine,
-            },
+            flow: FlowState { flow_engine },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
                 dev_mode,
             },
             cors_origins: Arc::new(vec![]),
-            rate_limiter: if dev_mode { None } else { Some(RateLimitState::new(requests_per_minute, 1)) },
+            rate_limiter: if dev_mode {
+                None
+            } else {
+                Some(RateLimitState::new(requests_per_minute, 1))
+            },
             shutdown: ShutdownCoordinator::new(),
         };
 
@@ -5839,15 +6035,18 @@ mod tests {
 
         for i in 0..5 {
             let app = build_router(state.clone(), None);
-            let response = app.oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header("authorization", format!("Bearer {}", key))
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
-                    .unwrap(),
-            ).await.unwrap();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("authorization", format!("Bearer {}", key))
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(
                 response.status(),
                 StatusCode::OK,
@@ -5864,18 +6063,26 @@ mod tests {
 
         for i in 0..6 {
             let app = build_router(state.clone(), None);
-            let response = app.oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header("authorization", format!("Bearer {}", key))
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
-                    .unwrap(),
-            ).await.unwrap();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("authorization", format!("Bearer {}", key))
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
 
             if i < 5 {
-                assert_eq!(response.status(), StatusCode::OK, "request {} should succeed", i);
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "request {} should succeed",
+                    i
+                );
             } else {
                 assert_eq!(
                     response.status(),
@@ -5891,36 +6098,53 @@ mod tests {
     async fn test_rate_limit_different_keys_independent() {
         // Two different keys should have independent counters
         let (state, _key1) = rate_limit_state(2, false).await;
-        let key2_result = state.admin.store.create_key(rune_store::KeyType::Gate, "key2").await.unwrap();
-        let key1 = state.admin.store.create_key(rune_store::KeyType::Gate, "key1b").await.unwrap().raw_key;
+        let key2_result = state
+            .admin
+            .store
+            .create_key(rune_store::KeyType::Gate, "key2")
+            .await
+            .unwrap();
+        let key1 = state
+            .admin
+            .store
+            .create_key(rune_store::KeyType::Gate, "key1b")
+            .await
+            .unwrap()
+            .raw_key;
         let key2 = key2_result.raw_key;
 
         // Key1: 2 requests → both OK
         for i in 0..2 {
             let app = build_router(state.clone(), None);
-            let response = app.oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header("authorization", format!("Bearer {}", key1))
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(r#"{{"k1":{}}}"#, i)))
-                    .unwrap(),
-            ).await.unwrap();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("authorization", format!("Bearer {}", key1))
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"k1":{}}}"#, i)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
         }
 
         // Key2: should still be able to make requests (independent counter)
         let app = build_router(state.clone(), None);
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key2))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"k2":1}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key2))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"k2":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -5931,18 +6155,22 @@ mod tests {
 
         for i in 0..10 {
             let app = build_router(state.clone(), None);
-            let response = app.oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(r#"{{"dev":{}}}"#, i)))
-                    .unwrap(),
-            ).await.unwrap();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"dev":{}}}"#, i)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(
                 response.status(),
                 StatusCode::OK,
-                "dev mode should not rate limit (request {})", i
+                "dev mode should not rate limit (request {})",
+                i
             );
         }
 
@@ -5956,33 +6184,45 @@ mod tests {
 
         // First request: OK
         let app = build_router(state.clone(), None);
-        let _ = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":1}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let _ = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         // Second request: should be 429
         let app = build_router(state.clone(), None);
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":2}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         let retry_after = response.headers().get("retry-after");
-        assert!(retry_after.is_some(), "429 response should include Retry-After header");
+        assert!(
+            retry_after.is_some(),
+            "429 response should include Retry-After header"
+        );
         let retry_secs: u64 = retry_after.unwrap().to_str().unwrap().parse().unwrap();
-        assert!(retry_secs > 0 && retry_secs <= 60, "Retry-After should be between 1-60 seconds");
+        assert!(
+            retry_secs > 0 && retry_secs <= 60,
+            "Retry-After should be between 1-60 seconds"
+        );
     }
 
     #[tokio::test]
@@ -5992,30 +6232,38 @@ mod tests {
 
         // Exhaust limit
         let app = build_router(state.clone(), None);
-        let _ = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":1}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let _ = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         // Trigger 429
         let app = build_router(state.clone(), None);
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":2}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"]["code"], "RATE_LIMITED");
     }
@@ -6030,27 +6278,33 @@ mod tests {
 
         // Exhaust limit
         let app = build_router(state.clone(), None);
-        let _ = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":1}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let _ = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         // Verify rate limited
         let app = build_router(state.clone(), None);
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":2}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
         // Wait for window to expire (60 seconds is too long for tests,
@@ -6068,9 +6322,10 @@ mod tests {
         // Even with limit=1, health should always work
         for _ in 0..5 {
             let app = build_router(state.clone(), None);
-            let response = app.oneshot(
-                Request::get("/health").body(Body::empty()).unwrap(),
-            ).await.unwrap();
+            let response = app
+                .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
         }
     }
@@ -6082,14 +6337,17 @@ mod tests {
         let (state, _key) = rate_limit_state(1, false).await;
 
         let app = build_router(state, None);
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":1}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         // Should be 401 (auth fails before rate limit)
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -6102,24 +6360,30 @@ mod tests {
 
         // Exhaust rate limit on /echo
         let app = build_router(state.clone(), None);
-        let _ = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":1}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let _ = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         // Management routes should still work
         let app = build_router(state.clone(), None);
-        let response = app.oneshot(
-            Request::get("/api/v1/status")
-                .header("authorization", format!("Bearer {}", key))
-                .body(Body::empty())
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/status")
+                    .header("authorization", format!("Bearer {}", key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -6137,14 +6401,17 @@ mod tests {
         let app = build_router(state, None);
         // Simulating: the shutdown coordinator should be in draining state
         // For now, this test documents the expected behavior
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"msg":"after_shutdown"}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"msg":"after_shutdown"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         // When draining, should return 503
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -6162,23 +6429,31 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             Ok(input)
         });
-        relay.register(
-            RuneConfig {
-                name: "slow".into(),
-                version: "1.0.0".into(),
-                description: "slow handler".into(),
-                supports_stream: false,
-                gate: Some(GateConfig { path: "/slow".into(), method: "POST".into() }),
-                input_schema: None, output_schema: None,
-                priority: 0, labels: Default::default(),
-            },
-            Arc::new(LocalInvoker::new(slow_handler)),
-            None,
-        ).unwrap();
+        relay
+            .register(
+                RuneConfig {
+                    name: "slow".into(),
+                    version: "1.0.0".into(),
+                    description: "slow handler".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/slow".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(LocalInvoker::new(slow_handler)),
+                None,
+            )
+            .unwrap();
 
-        let flow_engine = Arc::new(tokio::sync::RwLock::new(
-            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-        ));
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+            Arc::clone(&relay),
+            Arc::clone(&resolver) as Arc<dyn Resolver>,
+        )));
 
         let state = GateState {
             auth: AuthState {
@@ -6187,7 +6462,8 @@ mod tests {
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
             },
             rune: RuneState {
-                relay, resolver,
+                relay,
+                resolver,
                 session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                     std::time::Duration::from_secs(10),
                     std::time::Duration::from_secs(35),
@@ -6196,9 +6472,7 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState {
-                flow_engine,
-            },
+            flow: FlowState { flow_engine },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -6221,7 +6495,9 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"in_flight":true}"#))
                     .unwrap(),
-            ).await.unwrap()
+            )
+            .await
+            .unwrap()
         });
 
         // Small delay so the request starts processing, then trigger shutdown
@@ -6231,7 +6507,9 @@ mod tests {
         // The in-flight request should still complete successfully
         let response = handle.await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["in_flight"], true);
     }
@@ -6251,23 +6529,31 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             Ok(input)
         });
-        relay.register(
-            RuneConfig {
-                name: "very_slow".into(),
-                version: "1.0.0".into(),
-                description: "extremely slow handler".into(),
-                supports_stream: false,
-                gate: Some(GateConfig { path: "/very_slow".into(), method: "POST".into() }),
-                input_schema: None, output_schema: None,
-                priority: 0, labels: Default::default(),
-            },
-            Arc::new(LocalInvoker::new(very_slow_handler)),
-            None,
-        ).unwrap();
+        relay
+            .register(
+                RuneConfig {
+                    name: "very_slow".into(),
+                    version: "1.0.0".into(),
+                    description: "extremely slow handler".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/very_slow".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(LocalInvoker::new(very_slow_handler)),
+                None,
+            )
+            .unwrap();
 
-        let flow_engine = Arc::new(tokio::sync::RwLock::new(
-            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-        ));
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+            Arc::clone(&relay),
+            Arc::clone(&resolver) as Arc<dyn Resolver>,
+        )));
 
         let state = GateState {
             auth: AuthState {
@@ -6276,7 +6562,8 @@ mod tests {
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
             },
             rune: RuneState {
-                relay, resolver,
+                relay,
+                resolver,
                 session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                     std::time::Duration::from_secs(10),
                     std::time::Duration::from_secs(35),
@@ -6285,9 +6572,7 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState {
-                flow_engine,
-            },
+            flow: FlowState { flow_engine },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -6309,12 +6594,16 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"slow":true}"#))
                     .unwrap(),
-            ).await
+            )
+            .await
         });
 
         // Give the request time to start, then verify it's still pending
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(!handle.is_finished(), "slow request should still be in progress");
+        assert!(
+            !handle.is_finished(),
+            "slow request should still be in progress"
+        );
 
         // NOTE: Drain timeout is enforced at the server level (main.rs),
         // not the router level. The router only rejects new requests via
@@ -6322,8 +6611,10 @@ mod tests {
         // drain_timeout is handled by the tokio runtime dropping tasks.
         handle.abort();
         let result = handle.await;
-        assert!(result.is_err() || result.unwrap().is_err(),
-            "after force-close, the request should not succeed normally");
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "after force-close, the request should not succeed normally"
+        );
     }
 
     // ====================================================================
@@ -6337,14 +6628,17 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"msg":"log_test"}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"msg":"log_test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         // When tracing buffer capture is implemented:
@@ -6364,14 +6658,17 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"msg":"log_fields"}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"msg":"log_fields"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         // When tracing buffer capture is implemented:
@@ -6396,35 +6693,50 @@ mod tests {
         // Make a few successful calls first
         for i in 0..3 {
             let app = build_router(state.clone(), None);
-            let _ = app.oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
-                    .unwrap(),
-            ).await.unwrap();
+            let _ = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
         }
 
         // Allow async logs to flush
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let app = build_router(state, None);
-        let response = app.oneshot(
-            Request::get("/api/v1/stats").body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(Request::get("/api/v1/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         // Should have by_rune array with success_rate field
         let by_rune = json["by_rune"].as_array().unwrap();
-        assert!(!by_rune.is_empty(), "by_rune should not be empty after 3 calls");
+        assert!(
+            !by_rune.is_empty(),
+            "by_rune should not be empty after 3 calls"
+        );
         let rune_stat = &by_rune[0];
-        assert!(rune_stat.get("success_rate").is_some(), "should have success_rate field");
+        assert!(
+            rune_stat.get("success_rate").is_some(),
+            "should have success_rate field"
+        );
         let rate = rune_stat["success_rate"].as_f64().unwrap();
-        assert!(rate >= 0.0 && rate <= 1.0, "success_rate should be between 0 and 1");
+        assert!(
+            rate >= 0.0 && rate <= 1.0,
+            "success_rate should be between 0 and 1"
+        );
     }
 
     #[tokio::test]
@@ -6435,31 +6747,43 @@ mod tests {
         // Make some calls
         for i in 0..5 {
             let app = build_router(state.clone(), None);
-            let _ = app.oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
-                    .unwrap(),
-            ).await.unwrap();
+            let _ = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let app = build_router(state, None);
-        let response = app.oneshot(
-            Request::get("/api/v1/stats").body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(Request::get("/api/v1/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         let by_rune = json["by_rune"].as_array().unwrap();
-        assert!(!by_rune.is_empty(), "by_rune should not be empty after 5 calls");
+        assert!(
+            !by_rune.is_empty(),
+            "by_rune should not be empty after 5 calls"
+        );
         let rune_stat = &by_rune[0];
-        assert!(rune_stat.get("p95_latency_ms").is_some(), "should have p95_latency_ms field");
+        assert!(
+            rune_stat.get("p95_latency_ms").is_some(),
+            "should have p95_latency_ms field"
+        );
         let p95 = rune_stat["p95_latency_ms"].as_f64().unwrap();
         assert!(p95 >= 0.0, "p95_latency_ms should be non-negative");
     }
@@ -6474,12 +6798,15 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::get("/api/v1/casters").body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(Request::get("/api/v1/casters").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         // Should have casters array (may be empty in test)
@@ -6494,12 +6821,15 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::get("/api/v1/casters").body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(Request::get("/api/v1/casters").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         // Verify response structure supports detailed caster info
@@ -6523,15 +6853,18 @@ mod tests {
         // NOTE: Future enhancement — register casters with labels to test positive routing
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/runes/echo/run")
-                .header("content-type", "application/json")
-                .header("x-rune-labels", "env=prod")
-                .body(Body::from(r#"{"msg":"label_test"}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/echo/run")
+                    .header("content-type", "application/json")
+                    .header("x-rune-labels", "env=prod")
+                    .body(Body::from(r#"{"msg":"label_test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         // With no caster matching the label, should return 503
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -6543,14 +6876,17 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/runes/echo/run")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"msg":"no_label"}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/echo/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"msg":"no_label"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         // Without labels, default routing should work
         assert_eq!(response.status(), StatusCode::OK);
@@ -6566,15 +6902,18 @@ mod tests {
         let (state, key) = rate_limit_state(0, false).await;
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":1}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(
             response.status(),
@@ -6594,15 +6933,18 @@ mod tests {
             let k = key.clone();
             handles.push(tokio::spawn(async move {
                 let app = build_router(s, None);
-                let response = app.oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/echo")
-                        .header("authorization", format!("Bearer {}", k))
-                        .header("content-type", "application/json")
-                        .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
-                        .unwrap(),
-                ).await.unwrap();
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/echo")
+                            .header("authorization", format!("Bearer {}", k))
+                            .header("content-type", "application/json")
+                            .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
                 response.status()
             }));
         }
@@ -6617,7 +6959,10 @@ mod tests {
             }
         }
         assert_eq!(ok_count, 3, "exactly 3 requests should succeed");
-        assert_eq!(limited_count, 2, "exactly 2 requests should be rate limited");
+        assert_eq!(
+            limited_count, 2,
+            "exactly 2 requests should be rate limited"
+        );
     }
 
     #[tokio::test]
@@ -6626,15 +6971,18 @@ mod tests {
         let (state, _key) = rate_limit_state(5, false).await;
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", "Bearer ")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":1}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", "Bearer ")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         // Empty bearer should fail auth (401), not panic
         assert_eq!(
@@ -6651,28 +6999,34 @@ mod tests {
 
         // Exhaust rate limit
         let app = build_router(state.clone(), None);
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":1}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
         // Verify it's now limited
         let app = build_router(state.clone(), None);
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":2}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
         // Wait for window to reset (implementation should support short windows for testing)
@@ -6680,15 +7034,18 @@ mod tests {
 
         // After reset, request should succeed again
         let app = build_router(state.clone(), None);
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":3}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":3}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(
             response.status(),
             StatusCode::OK,
@@ -6712,23 +7069,31 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             Ok(input)
         });
-        relay.register(
-            RuneConfig {
-                name: "slow".into(),
-                version: "1.0.0".into(),
-                description: "slow handler".into(),
-                supports_stream: false,
-                gate: Some(GateConfig { path: "/slow".into(), method: "POST".into() }),
-                input_schema: None, output_schema: None,
-                priority: 0, labels: Default::default(),
-            },
-            Arc::new(LocalInvoker::new(slow_handler)),
-            None,
-        ).unwrap();
+        relay
+            .register(
+                RuneConfig {
+                    name: "slow".into(),
+                    version: "1.0.0".into(),
+                    description: "slow handler".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/slow".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(LocalInvoker::new(slow_handler)),
+                None,
+            )
+            .unwrap();
 
-        let flow_engine = Arc::new(tokio::sync::RwLock::new(
-            FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-        ));
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+            Arc::clone(&relay),
+            Arc::clone(&resolver) as Arc<dyn Resolver>,
+        )));
 
         let state = GateState {
             auth: AuthState {
@@ -6737,7 +7102,8 @@ mod tests {
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
             },
             rune: RuneState {
-                relay, resolver,
+                relay,
+                resolver,
                 session_mgr: Arc::new(rune_core::session::SessionManager::new_dev(
                     std::time::Duration::from_secs(10),
                     std::time::Duration::from_secs(35),
@@ -6746,9 +7112,7 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState {
-                flow_engine,
-            },
+            flow: FlowState { flow_engine },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -6765,14 +7129,17 @@ mod tests {
             let s = state.clone();
             handles.push(tokio::spawn(async move {
                 let app = build_router(s, None);
-                let response = app.oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/slow")
-                        .header("content-type", "application/json")
-                        .body(Body::from(format!(r#"{{"id":{}}}"#, i)))
-                        .unwrap(),
-                ).await.unwrap();
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/slow")
+                            .header("content-type", "application/json")
+                            .body(Body::from(format!(r#"{{"id":{}}}"#, i)))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
                 response.status()
             }));
         }
@@ -6801,9 +7168,10 @@ mod tests {
         let app = build_router(state, None);
 
         // Verify the server is responsive before shutdown
-        let response = app.oneshot(
-            Request::get("/health").body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
         // Trigger shutdown signal twice in rapid succession
@@ -6822,9 +7190,10 @@ mod tests {
         state.shutdown.start_drain();
 
         let app = build_router(state, None);
-        let response = app.oneshot(
-            Request::get("/health").body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
 
         // During draining, health should return 503 so LB stops routing
         assert_eq!(
@@ -6844,14 +7213,17 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/nonexistent_rune")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"msg":"error_test"}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/nonexistent_rune")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"msg":"error_test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         // When tracing buffer is implemented:
@@ -6869,14 +7241,17 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"msg":"latency_test"}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"msg":"latency_test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         // When tracing buffer is implemented:
@@ -6903,44 +7278,54 @@ mod tests {
         // 3 successful requests to /echo
         for i in 0..3 {
             let app = build_router(state.clone(), None);
-            let response = app.oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
-                    .unwrap(),
-            ).await.unwrap();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
         }
 
         // 2 failed requests (bad rune via debug route)
         for _ in 0..2 {
             let app = build_router(state.clone(), None);
-            let _ = app.oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/runes/nonexistent/run")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"fail":true}"#))
-                    .unwrap(),
-            ).await.unwrap();
+            let _ = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/runes/nonexistent/run")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"fail":true}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let app = build_router(state, None);
-        let response = app.oneshot(
-            Request::get("/api/v1/stats").body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(Request::get("/api/v1/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         let by_rune = json["by_rune"].as_array().unwrap();
         // Find the echo rune stats
-        let echo_stat = by_rune.iter()
+        let echo_stat = by_rune
+            .iter()
             .find(|r| r["rune_name"] == "echo")
             .expect("should have stats for echo rune");
         // success_rate for echo should be 1.0 (all 3 echo calls succeeded)
@@ -6958,12 +7343,15 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::get("/api/v1/stats").body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(Request::get("/api/v1/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(json["total_calls"], 0);
@@ -6983,37 +7371,44 @@ mod tests {
         // Exhaust rate limit with label header
         for i in 0..2 {
             let app = build_router(state.clone(), None);
-            let response = app.oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header("authorization", format!("Bearer {}", key))
-                    .header("content-type", "application/json")
-                    .header("x-rune-labels", "env=prod")
-                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
-                    .unwrap(),
-            ).await.unwrap();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("authorization", format!("Bearer {}", key))
+                        .header("content-type", "application/json")
+                        .header("x-rune-labels", "env=prod")
+                        .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             // May be OK or 503 (no matching label), but should not panic
             assert!(
                 response.status() == StatusCode::OK
                     || response.status() == StatusCode::SERVICE_UNAVAILABLE,
                 "request {} should either succeed or get 503 (no label match), got {}",
-                i, response.status()
+                i,
+                response.status()
             );
         }
 
         // 3rd request with same key should be rate limited regardless of labels
         let app = build_router(state.clone(), None);
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .header("x-rune-labels", "env=staging")
-                .body(Body::from(r#"{"n":3}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .header("x-rune-labels", "env=staging")
+                    .body(Body::from(r#"{"n":3}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(
             response.status(),
@@ -7034,15 +7429,18 @@ mod tests {
         // Make a couple requests to populate rate limit state
         for i in 0..2 {
             let app = build_router(state.clone(), None);
-            let response = app.oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/echo")
-                    .header("authorization", format!("Bearer {}", key))
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
-                    .unwrap(),
-            ).await.unwrap();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("authorization", format!("Bearer {}", key))
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"n":{}}}"#, i)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
         }
 
@@ -7050,15 +7448,18 @@ mod tests {
         state.shutdown.start_drain();
         // After shutdown, new requests should get 503 (not 429)
         let app = build_router(state.clone(), None);
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/echo")
-                .header("authorization", format!("Bearer {}", key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"n":99}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {}", key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"n":99}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(
             response.status(),
@@ -7079,25 +7480,38 @@ mod tests {
         let app = build_router(state, None);
 
         // Try to run a non-existent flow
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/flows/nonexistent_flow/run")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"x":1}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/nonexistent_flow/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"x":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         // Must be structured format: {"error":{"code":"..","message":".."}}
-        assert!(json["error"].is_object(),
+        assert!(
+            json["error"].is_object(),
             "flow error should be {{\"error\":{{\"code\":\"..\",\"message\":\"..\"}}}} but got: {}",
-            json);
-        assert!(json["error"]["code"].is_string(), "error.code must be a string");
-        assert!(json["error"]["message"].is_string(), "error.message must be a string");
+            json
+        );
+        assert!(
+            json["error"]["code"].is_string(),
+            "error.code must be a string"
+        );
+        assert!(
+            json["error"]["message"].is_string(),
+            "error.message must be a string"
+        );
     }
 
     #[tokio::test]
@@ -7106,22 +7520,29 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/flows")
-                .header("content-type", "application/json")
-                .body(Body::empty())
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json["error"].is_object(),
+        assert!(
+            json["error"].is_object(),
             "flow create error should use structured format but got: {}",
-            json);
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -7131,21 +7552,28 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/v1/flows/no_such_flow")
-                .body(Body::empty())
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/flows/no_such_flow")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json["error"].is_object(),
+        assert!(
+            json["error"].is_object(),
             "flow GET not found error should use structured format but got: {}",
-            json);
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -7155,21 +7583,28 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/v1/flows/no_such_flow")
-                .body(Body::empty())
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/flows/no_such_flow")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json["error"].is_object(),
+        assert!(
+            json["error"].is_object(),
             "flow DELETE not found should use structured format but got: {}",
-            json);
+            json
+        );
         assert!(json["error"]["code"].is_string());
         assert!(json["error"]["message"].is_string());
     }
@@ -7198,7 +7633,11 @@ mod tests {
         state.rune.file_broker.complete_request(request_id);
 
         // Verify file is removed
-        assert_eq!(state.rune.file_broker.files.len(), 0, "FileBroker should have no files after complete_request");
+        assert_eq!(
+            state.rune.file_broker.files.len(),
+            0,
+            "FileBroker should have no files after complete_request"
+        );
     }
 
     // =======================================================================
@@ -7261,7 +7700,10 @@ mod tests {
             .unwrap();
 
         // Index should exist before removal
-        assert_eq!(relay.resolve_by_gate_path("POST", "/rm_path"), Some("rm_rune".to_string()));
+        assert_eq!(
+            relay.resolve_by_gate_path("POST", "/rm_path"),
+            Some("rm_rune".to_string())
+        );
 
         // Remove the caster
         relay.remove_caster("caster-1");
@@ -7279,7 +7721,11 @@ mod tests {
 
         // /echo is registered with gate_path="/echo" method="POST" — verify reverse index
         let resolved = state.rune.relay.resolve_by_gate_path("POST", "/echo");
-        assert_eq!(resolved, Some("echo".to_string()), "reverse index should map POST:/echo → echo");
+        assert_eq!(
+            resolved,
+            Some("echo".to_string()),
+            "reverse index should map POST:/echo → echo"
+        );
 
         // Also verify the HTTP route still works via the fallback handler
         let response = app
@@ -7321,7 +7767,11 @@ mod tests {
         let _ = rl.check("trigger-cleanup");
 
         // Expired entries should have been evicted; only the trigger key remains
-        assert!(rl.entry_count() <= 1, "expired entries should be cleaned, got {}", rl.entry_count());
+        assert!(
+            rl.entry_count() <= 1,
+            "expired entries should be cleaned, got {}",
+            rl.entry_count()
+        );
     }
 
     // =======================================================================
@@ -7335,7 +7785,8 @@ mod tests {
         let mut state = test_state();
         state.auth.auth_enabled = true;
         state.admin.dev_mode = false;
-        state.auth.key_verifier = Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
+        state.auth.key_verifier =
+            Arc::new(rune_store::StoreKeyVerifier::new(state.admin.store.clone()));
 
         // Start drain BEFORE building the router
         state.shutdown.start_drain();
@@ -7362,7 +7813,9 @@ mod tests {
             "drain should return 503 before auth checks (expected 503, got {})",
             response.status()
         );
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"]["code"], "SERVICE_UNAVAILABLE");
     }
@@ -7508,15 +7961,14 @@ mod tests {
         state.admin.started_at = std::time::Instant::now() - std::time::Duration::from_secs(1000);
 
         // Insert a caster that connected "now" via the public test helper
-        state.rune.session_mgr.insert_test_caster("test-caster-1", 5);
+        state
+            .rune
+            .session_mgr
+            .insert_test_caster("test-caster-1", 5);
 
         let app = build_router(state, None);
         let resp = app
-            .oneshot(
-                Request::get("/api/v1/casters")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/api/v1/casters").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -7547,11 +7999,20 @@ mod tests {
         let task_id = "cas-test-1";
 
         // Insert and move to running
-        store.insert_task(task_id, "echo", Some("{}")).await.unwrap();
-        store.update_task_status(task_id, TaskStatus::Running, None, None).await.unwrap();
+        store
+            .insert_task(task_id, "echo", Some("{}"))
+            .await
+            .unwrap();
+        store
+            .update_task_status(task_id, TaskStatus::Running, None, None)
+            .await
+            .unwrap();
 
         // Simulate cancel
-        store.update_task_status(task_id, TaskStatus::Cancelled, None, Some("user cancelled")).await.unwrap();
+        store
+            .update_task_status(task_id, TaskStatus::Cancelled, None, Some("user cancelled"))
+            .await
+            .unwrap();
 
         // Now try to complete — should return false (not updated)
         let updated = store
@@ -7570,8 +8031,14 @@ mod tests {
         let store = Arc::new(RuneStore::open_in_memory().unwrap());
         let task_id = "cas-test-2";
 
-        store.insert_task(task_id, "echo", Some("{}")).await.unwrap();
-        store.update_task_status(task_id, TaskStatus::Running, None, None).await.unwrap();
+        store
+            .insert_task(task_id, "echo", Some("{}"))
+            .await
+            .unwrap();
+        store
+            .update_task_status(task_id, TaskStatus::Running, None, None)
+            .await
+            .unwrap();
 
         let updated = store
             .complete_task_if_not_cancelled(task_id, TaskStatus::Completed, Some("done"), None)
@@ -7595,48 +8062,59 @@ mod tests {
         let state = test_state();
         // Register a stream-capable rune
         let handler = make_handler(|_ctx, input| async move { Ok(input) });
-        state.rune.relay.register(
-            RuneConfig {
-                name: "stream_log_test".into(),
-                version: "1.0.0".into(),
-                description: "test".into(),
-                supports_stream: true,
-                gate: None,
-                input_schema: None,
-                output_schema: None,
-                priority: 0,
-                labels: Default::default(),
-            },
-            Arc::new(LocalInvoker::new(handler)),
-            None,
-        ).unwrap();
+        state
+            .rune
+            .relay
+            .register(
+                RuneConfig {
+                    name: "stream_log_test".into(),
+                    version: "1.0.0".into(),
+                    description: "test".into(),
+                    supports_stream: true,
+                    gate: None,
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(LocalInvoker::new(handler)),
+                None,
+            )
+            .unwrap();
 
         let app = build_router(state.clone(), None);
 
-        let response = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/runes/stream_log_test/run?stream=true")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"hello":"world"}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/stream_log_test/run?stream=true")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"hello":"world"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
 
         // Consume the SSE stream to let the spawn task finish
-        let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         assert!(!body.is_empty(), "stream should produce output");
 
         // Give the background task time to insert the log
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Check that a call log was recorded with mode=stream
-        let logs = state.admin.store.query_logs(Some("stream_log_test"), 10).await.unwrap();
-        assert!(
-            !logs.is_empty(),
-            "stream mode should record a call log"
-        );
+        let logs = state
+            .admin
+            .store
+            .query_logs(Some("stream_log_test"), 10)
+            .await
+            .unwrap();
+        assert!(!logs.is_empty(), "stream mode should record a call log");
         assert_eq!(logs[0].mode, "stream");
         assert_eq!(logs[0].rune_name, "stream_log_test");
     }
@@ -7652,13 +8130,16 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let resp = app.oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/v1/casters")
-                .body(Body::empty())
-                .unwrap(),
-        ).await.unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/casters")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
@@ -7683,26 +8164,33 @@ mod tests {
             "steps": [{"name": "step1", "rune": "echo", "depends_on": []}]
         });
 
-        let create_resp = app.clone().oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/flows")
-                .header("content-type", "application/json")
-                .body(Body::from(flow_json.to_string()))
-                .unwrap(),
-        ).await.unwrap();
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(flow_json.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(create_resp.status(), StatusCode::CREATED);
 
         // Run the flow with empty body — should succeed, not 422
         let app2 = build_router(state, None);
-        let run_resp = app2.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/flows/empty_body_test/run")
-                .header("content-type", "application/json")
-                .body(Body::empty())
-                .unwrap(),
-        ).await.unwrap();
+        let run_resp = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/empty_body_test/run")
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_ne!(
             run_resp.status(),
@@ -7722,20 +8210,29 @@ mod tests {
         let state = test_state();
         let app = build_router(state, None);
 
-        let resp = app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/flows/nonexistent/run")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"x":1}"#))
-                .unwrap(),
-        ).await.unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/nonexistent/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"x":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"]["code"].is_string(), "error.code must be present");
-        assert!(json["error"]["message"].is_string(), "error.message must be present");
+        assert!(
+            json["error"]["code"].is_string(),
+            "error.code must be present"
+        );
+        assert!(
+            json["error"]["message"].is_string(),
+            "error.message must be present"
+        );
     }
 
     // =========================================================================
@@ -7775,25 +8272,53 @@ mod tests {
             .route("/health", axum::routing::get(|| async { "ok" }))
             .route("/healthz", axum::routing::get(|| async { "ok" }))
             .route("/health/deep", axum::routing::get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
             .with_state(state);
 
         // /health — should be exempt (exact match)
-        let resp = app.clone().oneshot(
-            Request::builder().uri("/health").body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "/health should be exempt");
 
         // /health/deep — should be exempt (starts_with "/health/")
-        let resp = app.clone().oneshot(
-            Request::builder().uri("/health/deep").body(Body::empty()).unwrap(),
-        ).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "/health/deep should be exempt");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health/deep")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "/health/deep should be exempt"
+        );
 
         // /healthz — should NOT be exempt (not exact match, not "/health/...")
-        let resp = app.clone().oneshot(
-            Request::builder().uri("/healthz").body(Body::empty()).unwrap(),
-        ).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(
             resp.status(),
             StatusCode::UNAUTHORIZED,
@@ -7818,13 +8343,16 @@ mod tests {
         );
 
         let app = build_router(state, None);
-        let resp = app.oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(&format!("/api/v1/files/{}", file_id))
-                .body(Body::empty())
-                .unwrap(),
-        ).await.unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(&format!("/api/v1/files/{}", file_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();

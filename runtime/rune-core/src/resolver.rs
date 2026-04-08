@@ -1,7 +1,7 @@
+use crate::relay::RuneEntry;
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use dashmap::DashMap;
-use crate::relay::RuneEntry;
 
 /// Resolver trait — picks one candidate from the registry
 pub trait Resolver: Send + Sync {
@@ -15,14 +15,19 @@ pub struct RoundRobinResolver {
 
 impl RoundRobinResolver {
     pub fn new() -> Self {
-        Self { counters: DashMap::new() }
+        Self {
+            counters: DashMap::new(),
+        }
     }
 }
 
 impl Resolver for RoundRobinResolver {
     fn pick<'a>(&self, rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry> {
-        if candidates.is_empty() { return None; }
-        let idx = self.counters
+        if candidates.is_empty() {
+            return None;
+        }
+        let idx = self
+            .counters
             .entry(rune_name.to_string())
             .or_insert_with(|| AtomicUsize::new(0))
             .fetch_add(1, Ordering::Relaxed);
@@ -45,7 +50,9 @@ impl RandomResolver {
 
 impl Resolver for RandomResolver {
     fn pick<'a>(&self, _rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry> {
-        if candidates.is_empty() { return None; }
+        if candidates.is_empty() {
+            return None;
+        }
         use rand::Rng;
         let idx = rand::thread_rng().gen_range(0..candidates.len());
         Some(&candidates[idx])
@@ -67,7 +74,9 @@ impl LeastLoadResolver {
 
 impl Resolver for LeastLoadResolver {
     fn pick<'a>(&self, _rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry> {
-        if candidates.is_empty() { return None; }
+        if candidates.is_empty() {
+            return None;
+        }
 
         // Pick the candidate with the most available permits (least load).
         // If a candidate has no caster_id (in-process), treat as max permits.
@@ -104,14 +113,12 @@ impl PriorityResolver {
 
 impl Resolver for PriorityResolver {
     fn pick<'a>(&self, rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry> {
-        if candidates.is_empty() { return None; }
+        if candidates.is_empty() {
+            return None;
+        }
 
         // Find the maximum priority value
-        let max_priority = candidates
-            .iter()
-            .map(|e| e.config.priority)
-            .max()
-            .unwrap();
+        let max_priority = candidates.iter().map(|e| e.config.priority).max().unwrap();
 
         // Collect indices of top-tier candidates
         let top_indices: Vec<usize> = candidates
@@ -126,22 +133,30 @@ impl Resolver for PriorityResolver {
             self.inner.pick(rune_name, candidates)
         } else {
             // Build a temporary vec of top-tier entries for inner resolver
-            let top_tier: Vec<RuneEntry> = top_indices.iter().map(|&i| candidates[i].clone()).collect();
+            let top_tier: Vec<RuneEntry> =
+                top_indices.iter().map(|&i| candidates[i].clone()).collect();
             let picked = self.inner.pick(rune_name, &top_tier)?;
             // Safe index lookup: match by (name, caster_id) value equality,
             // which is robust even if inner resolver clones or rebinds references.
             // Precondition: (name, caster_id) must be unique within top_tier.
-            debug_assert!({
-                let mut pairs: Vec<_> = top_tier.iter()
-                    .map(|e| (&e.config.name, &e.caster_id))
-                    .collect();
-                pairs.sort();
-                pairs.dedup();
-                pairs.len() == top_tier.len()
-            }, "top_tier contains duplicate (name, caster_id) entries");
-            let inner_idx = top_tier.iter().position(|e| {
-                e.config.name == picked.config.name && e.caster_id == picked.caster_id
-            }).unwrap_or(0);
+            debug_assert!(
+                {
+                    let mut pairs: Vec<_> = top_tier
+                        .iter()
+                        .map(|e| (&e.config.name, &e.caster_id))
+                        .collect();
+                    pairs.sort();
+                    pairs.dedup();
+                    pairs.len() == top_tier.len()
+                },
+                "top_tier contains duplicate (name, caster_id) entries"
+            );
+            let inner_idx = top_tier
+                .iter()
+                .position(|e| {
+                    e.config.name == picked.config.name && e.caster_id == picked.caster_id
+                })
+                .unwrap_or(0);
             Some(&candidates[top_indices[inner_idx]])
         }
     }
@@ -157,8 +172,8 @@ impl RoundRobinResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rune::{RuneConfig, make_handler};
     use crate::invoker::LocalInvoker;
+    use crate::rune::{make_handler, RuneConfig};
 
     fn make_entry(name: &str, priority: i32) -> RuneEntry {
         let handler = make_handler(|_ctx, input| async move { Ok(input) });
@@ -206,11 +221,7 @@ mod tests {
         let inner = Arc::new(RoundRobinResolver::new());
         let resolver = PriorityResolver::new(inner);
 
-        let candidates = vec![
-            make_entry("a", 5),
-            make_entry("b", 5),
-            make_entry("c", 5),
-        ];
+        let candidates = vec![make_entry("a", 5), make_entry("b", 5), make_entry("c", 5)];
 
         let picked = resolver.pick("test", &candidates).unwrap();
         assert_eq!(picked.config.name, "a");
@@ -244,15 +255,15 @@ mod tests {
         let inner = Arc::new(RoundRobinResolver::new());
         let resolver = PriorityResolver::new(inner);
 
-        let candidates = vec![
-            make_entry("low", 0),
-            make_entry("high", 10),
-        ];
+        let candidates = vec![make_entry("low", 0), make_entry("high", 10)];
 
         let picked = resolver.pick("test", &candidates).unwrap();
         let picked_ptr = picked as *const RuneEntry;
         let orig_ptr = &candidates[1] as *const RuneEntry;
-        assert_eq!(picked_ptr, orig_ptr, "picked should point to original candidate, not a clone");
+        assert_eq!(
+            picked_ptr, orig_ptr,
+            "picked should point to original candidate, not a clone"
+        );
     }
 
     // NF-7: RoundRobin counter cleanup
@@ -289,7 +300,14 @@ mod tests {
         candidates.push(make_entry("high_c", 10));
 
         let names: Vec<String> = (0..6)
-            .map(|_| resolver.pick("stress", &candidates).unwrap().config.name.clone())
+            .map(|_| {
+                resolver
+                    .pick("stress", &candidates)
+                    .unwrap()
+                    .config
+                    .name
+                    .clone()
+            })
             .collect();
         assert_eq!(names[0], "high_a");
         assert_eq!(names[1], "high_b");
@@ -319,13 +337,17 @@ mod tests {
 
         // 第二次 pick 应该是 high_b（round-robin 在 top_tier 中前进）
         let second = resolver.pick("test_i1", &candidates).unwrap();
-        assert_eq!(second.config.name, "high_b",
-            "second pick should be high_b, not high_a; ptr::eq fallback to index 0 is the bug");
+        assert_eq!(
+            second.config.name, "high_b",
+            "second pick should be high_b, not high_a; ptr::eq fallback to index 0 is the bug"
+        );
 
         // 验证返回的引用指向原始 candidates 切片
         let second_ptr = second as *const RuneEntry;
         let original_ptr = &candidates[2] as *const RuneEntry;
-        assert_eq!(second_ptr, original_ptr,
-            "returned reference must point to original candidate slice, not a clone");
+        assert_eq!(
+            second_ptr, original_ptr,
+            "returned reference must point to original candidate slice, not a clone"
+        );
     }
 }

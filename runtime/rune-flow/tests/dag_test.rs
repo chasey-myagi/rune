@@ -65,11 +65,14 @@ fn flow(name: &str, steps: Vec<StepDefinition>) -> FlowDefinition {
 #[test]
 fn validate_linear_flow() {
     // A→B→C: 线性 DAG 应验证通过
-    let f = flow("linear", vec![
-        step("A", "rune_a"),
-        step_with_deps("B", "rune_b", &["A"]),
-        step_with_deps("C", "rune_c", &["B"]),
-    ]);
+    let f = flow(
+        "linear",
+        vec![
+            step("A", "rune_a"),
+            step_with_deps("B", "rune_b", &["A"]),
+            step_with_deps("C", "rune_c", &["B"]),
+        ],
+    );
     assert!(validate_dag(&f).is_ok());
 }
 
@@ -80,23 +83,29 @@ fn validate_diamond_dag() {
     mapping.insert("from_b".to_string(), "B.output".to_string());
     mapping.insert("from_c".to_string(), "C.output".to_string());
 
-    let f = flow("diamond", vec![
-        step("A", "rune_a"),
-        step_with_deps("B", "rune_b", &["A"]),
-        step_with_deps("C", "rune_c", &["A"]),
-        step_with_deps_and_mapping("D", "rune_d", &["B", "C"], mapping),
-    ]);
+    let f = flow(
+        "diamond",
+        vec![
+            step("A", "rune_a"),
+            step_with_deps("B", "rune_b", &["A"]),
+            step_with_deps("C", "rune_c", &["A"]),
+            step_with_deps_and_mapping("D", "rune_d", &["B", "C"], mapping),
+        ],
+    );
     assert!(validate_dag(&f).is_ok());
 }
 
 #[test]
 fn validate_cycle_detected() {
     // A→B→C→A: 应检测到环
-    let f = flow("cyclic", vec![
-        step_with_deps("A", "rune_a", &["C"]),
-        step_with_deps("B", "rune_b", &["A"]),
-        step_with_deps("C", "rune_c", &["B"]),
-    ]);
+    let f = flow(
+        "cyclic",
+        vec![
+            step_with_deps("A", "rune_a", &["C"]),
+            step_with_deps("B", "rune_b", &["A"]),
+            step_with_deps("C", "rune_c", &["B"]),
+        ],
+    );
     let err = validate_dag(&f).unwrap_err();
     assert!(matches!(err, DagError::CycleDetected(_)));
 }
@@ -104,9 +113,7 @@ fn validate_cycle_detected() {
 #[test]
 fn validate_self_loop_detected() {
     // A depends on A: 自环
-    let f = flow("self_loop", vec![
-        step_with_deps("A", "rune_a", &["A"]),
-    ]);
+    let f = flow("self_loop", vec![step_with_deps("A", "rune_a", &["A"])]);
     let err = validate_dag(&f).unwrap_err();
     assert!(matches!(err, DagError::CycleDetected(_)));
 }
@@ -114,9 +121,7 @@ fn validate_self_loop_detected() {
 #[test]
 fn validate_unknown_dependency() {
     // A depends on X（不存在）
-    let f = flow("unknown_dep", vec![
-        step_with_deps("A", "rune_a", &["X"]),
-    ]);
+    let f = flow("unknown_dep", vec![step_with_deps("A", "rune_a", &["X"])]);
     let err = validate_dag(&f).unwrap_err();
     match err {
         DagError::UnknownDependency { step, dep } => {
@@ -130,10 +135,10 @@ fn validate_unknown_dependency() {
 #[test]
 fn validate_duplicate_step_name() {
     // 两个 step 都叫 "extract"
-    let f = flow("dup", vec![
-        step("extract", "rune_a"),
-        step("extract", "rune_b"),
-    ]);
+    let f = flow(
+        "dup",
+        vec![step("extract", "rune_a"), step("extract", "rune_b")],
+    );
     let err = validate_dag(&f).unwrap_err();
     match err {
         DagError::DuplicateStep(name) => assert_eq!(name, "extract"),
@@ -144,11 +149,14 @@ fn validate_duplicate_step_name() {
 #[test]
 fn validate_multi_upstream_missing_input_mapping() {
     // B+C→D 无 input_mapping
-    let f = flow("no_mapping", vec![
-        step("B", "rune_b"),
-        step("C", "rune_c"),
-        step_with_deps("D", "rune_d", &["B", "C"]),
-    ]);
+    let f = flow(
+        "no_mapping",
+        vec![
+            step("B", "rune_b"),
+            step("C", "rune_c"),
+            step_with_deps("D", "rune_d", &["B", "C"]),
+        ],
+    );
     let err = validate_dag(&f).unwrap_err();
     match err {
         DagError::MissingInputMapping { step } => assert_eq!(step, "D"),
@@ -163,21 +171,24 @@ fn validate_multi_upstream_with_input_mapping() {
     mapping.insert("b_out".to_string(), "B.output".to_string());
     mapping.insert("c_out".to_string(), "C.output".to_string());
 
-    let f = flow("with_mapping", vec![
-        step("B", "rune_b"),
-        step("C", "rune_c"),
-        step_with_deps_and_mapping("D", "rune_d", &["B", "C"], mapping),
-    ]);
+    let f = flow(
+        "with_mapping",
+        vec![
+            step("B", "rune_b"),
+            step("C", "rune_c"),
+            step_with_deps_and_mapping("D", "rune_d", &["B", "C"], mapping),
+        ],
+    );
     assert!(validate_dag(&f).is_ok());
 }
 
 #[test]
 fn validate_single_upstream_no_mapping() {
     // A→B, 单上游不需要 mapping
-    let f = flow("single_upstream", vec![
-        step("A", "rune_a"),
-        step_with_deps("B", "rune_b", &["A"]),
-    ]);
+    let f = flow(
+        "single_upstream",
+        vec![step("A", "rune_a"), step_with_deps("B", "rune_b", &["A"])],
+    );
     assert!(validate_dag(&f).is_ok());
 }
 
@@ -202,11 +213,14 @@ fn validate_single_step_no_deps() {
 #[test]
 fn topo_linear() {
     // A→B→C → 3 层，每层 1 个
-    let f = flow("linear", vec![
-        step("A", "rune_a"),
-        step_with_deps("B", "rune_b", &["A"]),
-        step_with_deps("C", "rune_c", &["B"]),
-    ]);
+    let f = flow(
+        "linear",
+        vec![
+            step("A", "rune_a"),
+            step_with_deps("B", "rune_b", &["A"]),
+            step_with_deps("C", "rune_c", &["B"]),
+        ],
+    );
     let layers = topological_layers(&f).unwrap();
     assert_eq!(layers.len(), 3);
     assert_eq!(layers[0].len(), 1); // [A]
@@ -221,12 +235,15 @@ fn topo_diamond() {
     mapping.insert("from_b".to_string(), "B.output".to_string());
     mapping.insert("from_c".to_string(), "C.output".to_string());
 
-    let f = flow("diamond", vec![
-        step("A", "rune_a"),
-        step_with_deps("B", "rune_b", &["A"]),
-        step_with_deps("C", "rune_c", &["A"]),
-        step_with_deps_and_mapping("D", "rune_d", &["B", "C"], mapping),
-    ]);
+    let f = flow(
+        "diamond",
+        vec![
+            step("A", "rune_a"),
+            step_with_deps("B", "rune_b", &["A"]),
+            step_with_deps("C", "rune_c", &["A"]),
+            step_with_deps_and_mapping("D", "rune_d", &["B", "C"], mapping),
+        ],
+    );
     let layers = topological_layers(&f).unwrap();
     assert_eq!(layers.len(), 3);
     assert_eq!(layers[0].len(), 1); // [A]
@@ -237,11 +254,14 @@ fn topo_diamond() {
 #[test]
 fn topo_all_independent() {
     // A, B, C 无依赖 → 1 层 [[A,B,C]]
-    let f = flow("independent", vec![
-        step("A", "rune_a"),
-        step("B", "rune_b"),
-        step("C", "rune_c"),
-    ]);
+    let f = flow(
+        "independent",
+        vec![
+            step("A", "rune_a"),
+            step("B", "rune_b"),
+            step("C", "rune_c"),
+        ],
+    );
     let layers = topological_layers(&f).unwrap();
     assert_eq!(layers.len(), 1);
     assert_eq!(layers[0].len(), 3);
@@ -259,13 +279,16 @@ fn topo_complex_multi_layer() {
     e_mapping.insert("from_c".to_string(), "C.output".to_string());
     e_mapping.insert("from_d".to_string(), "D.output".to_string());
 
-    let f = flow("complex", vec![
-        step("A", "rune_a"),
-        step("B", "rune_b"),
-        step_with_deps("C", "rune_c", &["A"]),
-        step_with_deps_and_mapping("D", "rune_d", &["A", "B"], cd_mapping),
-        step_with_deps_and_mapping("E", "rune_e", &["C", "D"], e_mapping),
-    ]);
+    let f = flow(
+        "complex",
+        vec![
+            step("A", "rune_a"),
+            step("B", "rune_b"),
+            step_with_deps("C", "rune_c", &["A"]),
+            step_with_deps_and_mapping("D", "rune_d", &["A", "B"], cd_mapping),
+            step_with_deps_and_mapping("E", "rune_e", &["C", "D"], e_mapping),
+        ],
+    );
     let layers = topological_layers(&f).unwrap();
     assert_eq!(layers.len(), 3);
     // Layer 0: [A, B]
@@ -279,11 +302,14 @@ fn topo_complex_multi_layer() {
 #[test]
 fn topo_step_with_condition_still_participates() {
     // 有 condition 的 step 仍然参与拓扑排序
-    let f = flow("conditional_topo", vec![
-        step("A", "rune_a"),
-        step_with_condition("B", "rune_b", &["A"], "input.x > 10"),
-        step_with_deps("C", "rune_c", &["B"]),
-    ]);
+    let f = flow(
+        "conditional_topo",
+        vec![
+            step("A", "rune_a"),
+            step_with_condition("B", "rune_b", &["A"], "input.x > 10"),
+            step_with_deps("C", "rune_c", &["B"]),
+        ],
+    );
     let layers = topological_layers(&f).unwrap();
     assert_eq!(layers.len(), 3);
     assert_eq!(layers[0].len(), 1); // [A]
@@ -336,7 +362,10 @@ fn serde_round_trip() {
 
     assert_eq!(deserialized.steps[1].name, "B");
     assert_eq!(deserialized.steps[1].depends_on, vec!["A".to_string()]);
-    assert_eq!(deserialized.steps[1].condition.as_deref(), Some("input.ready == true"));
+    assert_eq!(
+        deserialized.steps[1].condition.as_deref(),
+        Some("input.ready == true")
+    );
     assert!(deserialized.steps[1].input_mapping.is_some());
 }
 
@@ -394,12 +423,15 @@ fn serde_missing_input_mapping_defaults_none() {
 #[test]
 fn validate_longer_cycle_detected() {
     // A→B→C→D→B: 更长的环
-    let f = flow("long_cycle", vec![
-        step("A", "rune_a"),
-        step_with_deps("B", "rune_b", &["A", "D"]),
-        step_with_deps("C", "rune_c", &["B"]),
-        step_with_deps("D", "rune_d", &["C"]),
-    ]);
+    let f = flow(
+        "long_cycle",
+        vec![
+            step("A", "rune_a"),
+            step_with_deps("B", "rune_b", &["A", "D"]),
+            step_with_deps("C", "rune_c", &["B"]),
+            step_with_deps("D", "rune_d", &["C"]),
+        ],
+    );
     let err = validate_dag(&f).unwrap_err();
     assert!(matches!(err, DagError::CycleDetected(_)));
 }
@@ -407,11 +439,14 @@ fn validate_longer_cycle_detected() {
 #[test]
 fn validate_multiple_roots() {
     // 多个没有依赖的根 step 应验证通过
-    let f = flow("multi_root", vec![
-        step("root1", "rune_a"),
-        step("root2", "rune_b"),
-        step_with_deps("merge", "rune_c", &["root1"]),
-    ]);
+    let f = flow(
+        "multi_root",
+        vec![
+            step("root1", "rune_a"),
+            step("root2", "rune_b"),
+            step_with_deps("merge", "rune_c", &["root1"]),
+        ],
+    );
     assert!(validate_dag(&f).is_ok());
 }
 
@@ -437,13 +472,34 @@ fn validate_complex_diamond_with_conditions_and_mappings() {
     // 复杂场景：多条件、多映射的菱形 DAG
     let mut mapping = HashMap::new();
     mapping.insert("summary".to_string(), "summarize.output.text".to_string());
-    mapping.insert("keywords".to_string(), "extract.output.keywords".to_string());
+    mapping.insert(
+        "keywords".to_string(),
+        "extract.output.keywords".to_string(),
+    );
 
-    let f = flow("complex_diamond", vec![
-        step("parse", "rune_parse"),
-        step_with_condition("summarize", "rune_summarize", &["parse"], "input.length > 100"),
-        step_with_condition("extract", "rune_extract", &["parse"], "input.type == 'article'"),
-        step_with_deps_and_mapping("combine", "rune_combine", &["summarize", "extract"], mapping),
-    ]);
+    let f = flow(
+        "complex_diamond",
+        vec![
+            step("parse", "rune_parse"),
+            step_with_condition(
+                "summarize",
+                "rune_summarize",
+                &["parse"],
+                "input.length > 100",
+            ),
+            step_with_condition(
+                "extract",
+                "rune_extract",
+                &["parse"],
+                "input.type == 'article'",
+            ),
+            step_with_deps_and_mapping(
+                "combine",
+                "rune_combine",
+                &["summarize", "extract"],
+                mapping,
+            ),
+        ],
+    );
     assert!(validate_dag(&f).is_ok());
 }

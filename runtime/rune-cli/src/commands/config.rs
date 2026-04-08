@@ -59,10 +59,7 @@ pub async fn show() -> Result<()> {
     let config_path = config_file_path()?;
 
     if !config_path.exists() {
-        eprintln!(
-            "No configuration file found at {}",
-            config_path.display()
-        );
+        eprintln!("No configuration file found at {}", config_path.display());
         eprintln!("Run `rune config init` to create one.");
         return Ok(());
     }

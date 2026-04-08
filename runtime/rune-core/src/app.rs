@@ -1,13 +1,15 @@
-use std::sync::Arc;
 use crate::auth::KeyVerifier;
-use crate::rune::{RuneConfig, RuneHandler, StreamRuneHandler};
-use crate::relay::Relay;
-use crate::resolver::{Resolver, RoundRobinResolver, RandomResolver, LeastLoadResolver, PriorityResolver};
-use crate::session::SessionManager;
-use crate::invoker::{LocalInvoker, LocalStreamInvoker};
 use crate::config::AppConfig;
 use crate::grpc_service::RuneGrpcService;
+use crate::invoker::{LocalInvoker, LocalStreamInvoker};
+use crate::relay::Relay;
+use crate::resolver::{
+    LeastLoadResolver, PriorityResolver, RandomResolver, Resolver, RoundRobinResolver,
+};
+use crate::rune::{RuneConfig, RuneHandler, StreamRuneHandler};
+use crate::session::SessionManager;
 use rune_proto::rune_service_server::RuneServiceServer;
+use std::sync::Arc;
 
 fn resolver_from_strategy(strategy: &str, session_mgr: &Arc<SessionManager>) -> Arc<dyn Resolver> {
     match strategy {
@@ -56,10 +58,7 @@ impl App {
         }
     }
 
-    pub fn with_config_and_auth(
-        config: AppConfig,
-        key_verifier: Arc<dyn KeyVerifier>,
-    ) -> Self {
+    pub fn with_config_and_auth(config: AppConfig, key_verifier: Arc<dyn KeyVerifier>) -> Self {
         let dev_mode = config.server.dev_mode;
         let session_mgr = Arc::new(SessionManager::with_auth(
             config.heartbeat_interval(),
@@ -77,13 +76,23 @@ impl App {
     }
 
     pub fn rune(&mut self, config: RuneConfig, handler: RuneHandler) -> &mut Self {
-        self.relay.register(config, Arc::new(LocalInvoker::new(handler)), None)
+        self.relay
+            .register(config, Arc::new(LocalInvoker::new(handler)), None)
             .expect("route conflict in local rune registration");
         self
     }
 
-    pub fn stream_rune(&mut self, config: RuneConfig, handler: impl StreamRuneHandler) -> &mut Self {
-        self.relay.register(config, Arc::new(LocalStreamInvoker::new(Arc::new(handler))), None)
+    pub fn stream_rune(
+        &mut self,
+        config: RuneConfig,
+        handler: impl StreamRuneHandler,
+    ) -> &mut Self {
+        self.relay
+            .register(
+                config,
+                Arc::new(LocalStreamInvoker::new(Arc::new(handler))),
+                None,
+            )
             .expect("route conflict in local stream rune registration");
         self
     }
@@ -125,8 +134,11 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rune::{make_handler, GateConfig, RuneConfig, RuneContext, RuneError, StreamRuneHandler, StreamSender};
     use crate::resolver::RoundRobinResolver;
+    use crate::rune::{
+        make_handler, GateConfig, RuneConfig, RuneContext, RuneError, StreamRuneHandler,
+        StreamSender,
+    };
     use bytes::Bytes;
     use std::time::Duration;
 
@@ -208,8 +220,14 @@ mod tests {
         app.rune(echo_config("echo"), echo_handler());
 
         let resolver = RoundRobinResolver::new();
-        let invoker = app.relay.resolve("echo", &resolver).expect("rune should be resolvable");
-        let result = invoker.invoke_once(test_ctx("echo"), Bytes::from("hi")).await.unwrap();
+        let invoker = app
+            .relay
+            .resolve("echo", &resolver)
+            .expect("rune should be resolvable");
+        let result = invoker
+            .invoke_once(test_ctx("echo"), Bytes::from("hi"))
+            .await
+            .unwrap();
         assert_eq!(result, Bytes::from("hi"));
     }
 
@@ -249,7 +267,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StreamRuneHandler for TestStreamHandler {
-        async fn execute(&self, _ctx: RuneContext, _input: Bytes, tx: StreamSender) -> Result<(), RuneError> {
+        async fn execute(
+            &self,
+            _ctx: RuneContext,
+            _input: Bytes,
+            tx: StreamSender,
+        ) -> Result<(), RuneError> {
             tx.emit(Bytes::from("stream-data")).await?;
             tx.end().await?;
             Ok(())
@@ -267,8 +290,14 @@ mod tests {
         app.stream_rune(cfg, TestStreamHandler);
 
         let resolver = RoundRobinResolver::new();
-        let invoker = app.relay.resolve("streamer", &resolver).expect("stream rune resolvable");
-        let mut rx = invoker.invoke_stream(test_ctx("streamer"), Bytes::new()).await.unwrap();
+        let invoker = app
+            .relay
+            .resolve("streamer", &resolver)
+            .expect("stream rune resolvable");
+        let mut rx = invoker
+            .invoke_stream(test_ctx("streamer"), Bytes::new())
+            .await
+            .unwrap();
         let chunk = rx.recv().await.unwrap().unwrap();
         assert_eq!(chunk, Bytes::from("stream-data"));
         assert!(rx.recv().await.is_none());
@@ -282,7 +311,10 @@ mod tests {
     fn app_register_rune_with_gate_path() {
         let mut app = App::new();
         let cfg = RuneConfig {
-            gate: Some(GateConfig { path: "/api/echo".into(), method: "POST".into() }),
+            gate: Some(GateConfig {
+                path: "/api/echo".into(),
+                method: "POST".into(),
+            }),
             ..echo_config("gated")
         };
         app.rune(cfg, echo_handler());
@@ -309,7 +341,10 @@ mod tests {
         // Verify the rune is registered and works
         let resolver = RoundRobinResolver::new();
         let invoker = app.relay.resolve("schema_rune", &resolver).unwrap();
-        let result = invoker.invoke_once(test_ctx("schema_rune"), Bytes::from("test")).await.unwrap();
+        let result = invoker
+            .invoke_once(test_ctx("schema_rune"), Bytes::from("test"))
+            .await
+            .unwrap();
         assert_eq!(result, Bytes::from("test"));
     }
 
@@ -360,14 +395,24 @@ mod tests {
         // Use a custom resolver that always picks the first
         struct FirstResolver;
         impl Resolver for FirstResolver {
-            fn pick<'a>(&self, _rune_name: &str, candidates: &'a [crate::relay::RuneEntry]) -> Option<&'a crate::relay::RuneEntry> {
+            fn pick<'a>(
+                &self,
+                _rune_name: &str,
+                candidates: &'a [crate::relay::RuneEntry],
+            ) -> Option<&'a crate::relay::RuneEntry> {
                 candidates.first()
             }
         }
         app.set_resolver(FirstResolver);
 
-        let invoker = app.relay.resolve("res_rune", app.resolver.as_ref()).unwrap();
-        let result = invoker.invoke_once(test_ctx("res_rune"), Bytes::from("data")).await.unwrap();
+        let invoker = app
+            .relay
+            .resolve("res_rune", app.resolver.as_ref())
+            .unwrap();
+        let result = invoker
+            .invoke_once(test_ctx("res_rune"), Bytes::from("data"))
+            .await
+            .unwrap();
         assert_eq!(result, Bytes::from("data"));
     }
 
@@ -379,7 +424,7 @@ mod tests {
     fn app_builder_chaining() {
         let mut app = App::new();
         app.rune(echo_config("a"), echo_handler())
-           .rune(echo_config("b"), echo_handler());
+            .rune(echo_config("b"), echo_handler());
 
         let list = app.relay.list();
         assert_eq!(list.len(), 2);
@@ -394,11 +439,17 @@ mod tests {
     fn app_register_conflicting_gate_paths_panics() {
         let mut app = App::new();
         let cfg1 = RuneConfig {
-            gate: Some(GateConfig { path: "/api/do".into(), method: "POST".into() }),
+            gate: Some(GateConfig {
+                path: "/api/do".into(),
+                method: "POST".into(),
+            }),
             ..echo_config("rune_x")
         };
         let cfg2 = RuneConfig {
-            gate: Some(GateConfig { path: "/api/do".into(), method: "POST".into() }),
+            gate: Some(GateConfig {
+                path: "/api/do".into(),
+                method: "POST".into(),
+            }),
             ..echo_config("rune_y")
         };
         app.rune(cfg1, echo_handler());

@@ -1,10 +1,10 @@
+use crate::relay::Relay;
+use crate::session::SessionManager;
+use rune_proto::rune_service_server::RuneService;
+use rune_proto::SessionMessage;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
-use rune_proto::rune_service_server::RuneService;
-use rune_proto::SessionMessage;
-use crate::relay::Relay;
-use crate::session::SessionManager;
 
 pub struct RuneGrpcService {
     pub relay: Arc<Relay>,

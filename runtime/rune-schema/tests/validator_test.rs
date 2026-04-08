@@ -1,4 +1,4 @@
-use rune_schema::validator::{validate_input, validate_output, SchemaError, clear_validator_cache};
+use rune_schema::validator::{clear_validator_cache, validate_input, validate_output, SchemaError};
 
 // =============================================================================
 // Helper: common JSON Schema strings
@@ -108,7 +108,10 @@ fn test_nested_object_validation_failure() {
     // "user.email" is required but missing
     let input = br#"{"user": {}}"#;
     let result = validate_input(Some(nested_schema()), input);
-    assert!(result.is_err(), "nested object missing required field should fail");
+    assert!(
+        result.is_err(),
+        "nested object missing required field should fail"
+    );
 
     let err = result.unwrap_err();
     let err_msg = err.to_string();
@@ -139,7 +142,10 @@ fn test_invalid_json_schema_string_graceful() {
     // The schema itself is not valid JSON
     let bad_schema = "this is not json {{{";
     let result = validate_input(Some(bad_schema), br#"{"name": "Alice"}"#);
-    assert!(result.is_err(), "invalid schema string should return error, not panic");
+    assert!(
+        result.is_err(),
+        "invalid schema string should return error, not panic"
+    );
 
     match result.unwrap_err() {
         SchemaError::InvalidSchema(msg) => {
@@ -159,7 +165,11 @@ fn test_empty_object_with_permissive_schema() {
     let schema = r#"{"type": "object"}"#;
     let input = br#"{}"#;
     let result = validate_input(Some(schema), input);
-    assert!(result.is_ok(), "empty object should pass permissive schema: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "empty object should pass permissive schema: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -191,7 +201,11 @@ fn test_large_json_over_100_fields() {
     let input = format!("{{{}}}", fields);
 
     let result = validate_input(Some(&schema), input.as_bytes());
-    assert!(result.is_ok(), "large JSON with 120 fields should validate: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "large JSON with 120 fields should validate: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -206,7 +220,11 @@ fn test_unicode_field_names() {
     }"#;
     let input = r#"{"名前": "太郎", "年齢": 25}"#;
     let result = validate_input(Some(schema), input.as_bytes());
-    assert!(result.is_ok(), "unicode field names should work: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "unicode field names should work: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -216,7 +234,11 @@ fn test_minimal_schema_type_object() {
 
     // Object should pass
     let result = validate_input(Some(schema), br#"{"any": "thing"}"#);
-    assert!(result.is_ok(), "object should pass minimal object schema: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "object should pass minimal object schema: {:?}",
+        result
+    );
 
     // Non-object (array) should fail
     let result = validate_input(Some(schema), br#"[1, 2, 3]"#);
@@ -236,7 +258,11 @@ fn test_schema_allows_null() {
     let schema = r#"{"type": ["object", "null"]}"#;
 
     let result = validate_input(Some(schema), br#"null"#);
-    assert!(result.is_ok(), "null should pass when schema allows null: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "null should pass when schema allows null: {:?}",
+        result
+    );
 
     let result = validate_input(Some(schema), br#"{"key": "value"}"#);
     assert!(result.is_ok(), "object should also pass: {:?}", result);
@@ -254,11 +280,18 @@ fn test_additional_properties_false() {
 
     // Valid: only declared property
     let result = validate_input(Some(schema), br#"{"name": "Alice"}"#);
-    assert!(result.is_ok(), "only declared property should pass: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "only declared property should pass: {:?}",
+        result
+    );
 
     // Invalid: extra property "extra_field"
     let result = validate_input(Some(schema), br#"{"name": "Alice", "extra_field": true}"#);
-    assert!(result.is_err(), "extra property with additionalProperties:false should fail");
+    assert!(
+        result.is_err(),
+        "extra property with additionalProperties:false should fail"
+    );
 }
 
 #[test]
@@ -326,7 +359,10 @@ fn test_output_validation_failure() {
     // Output schema expects integer age, but output has string
     let output = br#"{"name": "Alice", "age": "not-a-number"}"#;
     let result = validate_output(Some(user_schema()), output);
-    assert!(result.is_err(), "output with wrong type should fail validation");
+    assert!(
+        result.is_err(),
+        "output with wrong type should fail validation"
+    );
 }
 
 #[test]
@@ -359,7 +395,10 @@ fn test_null_input_with_object_schema() {
     // null input against an object-only schema should fail
     let schema = r#"{"type": "object"}"#;
     let result = validate_input(Some(schema), br#"null"#);
-    assert!(result.is_err(), "null should fail against type:object schema");
+    assert!(
+        result.is_err(),
+        "null should fail against type:object schema"
+    );
 }
 
 #[test]
@@ -367,7 +406,11 @@ fn test_boolean_schema_true() {
     // JSON Schema: true means everything is valid
     let schema = "true";
     let result = validate_input(Some(schema), br#"{"anything": 42}"#);
-    assert!(result.is_ok(), "boolean schema 'true' should accept anything: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "boolean schema 'true' should accept anything: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -375,7 +418,10 @@ fn test_boolean_schema_false() {
     // JSON Schema: false means nothing is valid
     let schema = "false";
     let result = validate_input(Some(schema), br#"{"anything": 42}"#);
-    assert!(result.is_err(), "boolean schema 'false' should reject everything");
+    assert!(
+        result.is_err(),
+        "boolean schema 'false' should reject everything"
+    );
 }
 
 // =============================================================================
@@ -402,15 +448,20 @@ fn test_cached_validation_returns_same_result() {
 
     // Invalid input should still fail with cached validator
     let r3 = validate_input(Some(schema), br#"{"name": 123}"#);
-    assert!(r3.is_err(), "cached validator should still reject invalid input");
+    assert!(
+        r3.is_err(),
+        "cached validator should still reject invalid input"
+    );
 }
 
 #[test]
 fn test_different_schemas_cached_independently() {
     clear_validator_cache();
 
-    let schema_a = r#"{"type": "object", "required": ["x"], "properties": {"x": {"type": "integer"}}}"#;
-    let schema_b = r#"{"type": "object", "required": ["y"], "properties": {"y": {"type": "string"}}}"#;
+    let schema_a =
+        r#"{"type": "object", "required": ["x"], "properties": {"x": {"type": "integer"}}}"#;
+    let schema_b =
+        r#"{"type": "object", "required": ["y"], "properties": {"y": {"type": "string"}}}"#;
 
     // Validate with schema_a
     let r1 = validate_input(Some(schema_a), br#"{"x": 42}"#);
@@ -472,19 +523,31 @@ fn test_no_hash_collision_between_distinct_schemas() {
 
     // Verify strict schema still rejects string id (not confused with permissive)
     let r3 = validate_input(Some(schema_strict), br#"{"id": "abc"}"#);
-    assert!(r3.is_err(), "strict schema must reject string id — cache must not confuse schemas");
+    assert!(
+        r3.is_err(),
+        "strict schema must reject string id — cache must not confuse schemas"
+    );
 
     // Verify permissive schema still accepts string id
     let r4 = validate_input(Some(schema_permissive), br#"{"id": "abc"}"#);
-    assert!(r4.is_ok(), "permissive schema should still accept string id");
+    assert!(
+        r4.is_ok(),
+        "permissive schema should still accept string id"
+    );
 
     // Verify strict schema rejects extra properties
     let r5 = validate_input(Some(schema_strict), br#"{"id": 1, "extra": true}"#);
-    assert!(r5.is_err(), "strict schema must reject additional properties");
+    assert!(
+        r5.is_err(),
+        "strict schema must reject additional properties"
+    );
 
     // Verify permissive schema allows extra properties
     let r6 = validate_input(Some(schema_permissive), br#"{"id": "x", "extra": true}"#);
-    assert!(r6.is_ok(), "permissive schema should allow extra properties");
+    assert!(
+        r6.is_ok(),
+        "permissive schema should allow extra properties"
+    );
 }
 
 // =============================================================================

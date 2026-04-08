@@ -128,9 +128,7 @@ fn call_stream() {
     let cli = parse(&["call", "echo", "--stream"]);
     match cli.command {
         Commands::Call {
-            stream,
-            async_mode,
-            ..
+            stream, async_mode, ..
         } => {
             assert!(stream);
             assert!(!async_mode);
@@ -144,9 +142,7 @@ fn call_async() {
     let cli = parse(&["call", "echo", "--async"]);
     match cli.command {
         Commands::Call {
-            stream,
-            async_mode,
-            ..
+            stream, async_mode, ..
         } => {
             assert!(!stream);
             assert!(async_mode);
@@ -198,7 +194,10 @@ fn task_get() {
 #[test]
 fn task_list() {
     let cli = parse(&["task", "list"]);
-    assert!(matches!(cli.command, Commands::Task(TaskCommands::List { .. })));
+    assert!(matches!(
+        cli.command,
+        Commands::Task(TaskCommands::List { .. })
+    ));
 }
 
 #[test]
@@ -312,10 +311,7 @@ fn flow_delete() {
 fn logs_default() {
     let cli = parse(&["logs"]);
     match cli.command {
-        Commands::Logs {
-            rune,
-            limit,
-        } => {
+        Commands::Logs { rune, limit } => {
             assert!(rune.is_none());
             assert_eq!(limit, 20);
         }
@@ -327,10 +323,7 @@ fn logs_default() {
 fn logs_with_filter() {
     let cli = parse(&["logs", "--rune", "echo", "--limit", "100"]);
     match cli.command {
-        Commands::Logs {
-            rune,
-            limit,
-        } => {
+        Commands::Logs { rune, limit } => {
             assert_eq!(rune.as_deref(), Some("echo"));
             assert_eq!(limit, 100);
         }

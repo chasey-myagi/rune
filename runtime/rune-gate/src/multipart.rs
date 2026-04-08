@@ -58,16 +58,14 @@ pub fn sanitize_filename(name: &str) -> String {
 
 /// Extract the boundary from a multipart/form-data content-type header.
 fn extract_boundary(content_type: &str) -> Option<String> {
-    content_type
-        .split(';')
-        .find_map(|part| {
-            let part = part.trim();
-            if let Some(val) = part.strip_prefix("boundary=") {
-                Some(val.trim_matches('"').to_string())
-            } else {
-                None
-            }
-        })
+    content_type.split(';').find_map(|part| {
+        let part = part.trim();
+        if let Some(val) = part.strip_prefix("boundary=") {
+            Some(val.trim_matches('"').to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// Result of parsing a multipart body.
@@ -122,7 +120,9 @@ pub async fn parse_multipart(
             }
         };
 
-        if part.filename.is_some() || (part.name != "input" && part.content_type.as_deref() != Some("application/json")) {
+        if part.filename.is_some()
+            || (part.name != "input" && part.content_type.as_deref() != Some("application/json"))
+        {
             // This is a file part
             let raw_filename = part.filename.unwrap_or_default();
             let filename = sanitize_filename(&raw_filename);
@@ -155,7 +155,11 @@ pub async fn parse_multipart(
             };
 
             // Store in broker
-            let file_id = state.rune.file_broker.store(filename.clone(), mime_type.clone(), data, request_id);
+            let file_id =
+                state
+                    .rune
+                    .file_broker
+                    .store(filename.clone(), mime_type.clone(), data, request_id);
             file_ids.push(file_id.clone());
 
             files.push(FileMetadata {
@@ -187,7 +191,10 @@ struct MultipartPart {
 }
 
 /// Parse multipart body without external dependencies (simple synchronous parser).
-fn futures_free_multipart_stream(body: Bytes, boundary: &str) -> Vec<Result<MultipartPart, String>> {
+fn futures_free_multipart_stream(
+    body: Bytes,
+    boundary: &str,
+) -> Vec<Result<MultipartPart, String>> {
     let body = body.to_vec();
     parse_multipart_binary(&body, boundary)
 }
@@ -198,7 +205,9 @@ fn parse_multipart_binary(body: &[u8], boundary: &str) -> Vec<Result<MultipartPa
     let mut results = Vec::new();
 
     // Check for end delimiter presence
-    let has_end_delimiter = body.windows(end_delimiter.len()).any(|w| w == end_delimiter.as_slice());
+    let has_end_delimiter = body
+        .windows(end_delimiter.len())
+        .any(|w| w == end_delimiter.as_slice());
 
     // Find all delimiter positions
     let mut positions = Vec::new();
@@ -216,7 +225,9 @@ fn parse_multipart_binary(body: &[u8], boundary: &str) -> Vec<Result<MultipartPa
     }
 
     if !has_end_delimiter {
-        results.push(Err("truncated multipart body: missing closing boundary".to_string()));
+        results.push(Err(
+            "truncated multipart body: missing closing boundary".to_string()
+        ));
         return results;
     }
 
@@ -378,8 +389,7 @@ pub fn build_multipart_body(
             }
             None => {
                 body.extend_from_slice(
-                    format!("Content-Disposition: form-data; name=\"{}\"\r\n", name)
-                        .as_bytes(),
+                    format!("Content-Disposition: form-data; name=\"{}\"\r\n", name).as_bytes(),
                 );
             }
         }
@@ -401,16 +411,32 @@ mod tests {
     fn test_sanitize_double_dot_bypass() {
         // "..../file" with single replace("..","") becomes "../file" — must be safe
         let result = sanitize_filename("..../file.txt");
-        assert!(!result.contains(".."), "should not contain '..' after sanitize, got: {}", result);
-        assert!(!result.contains('/'), "should not contain '/' after sanitize, got: {}", result);
-        assert!(result.contains("file"), "should preserve 'file' part, got: {}", result);
+        assert!(
+            !result.contains(".."),
+            "should not contain '..' after sanitize, got: {}",
+            result
+        );
+        assert!(
+            !result.contains('/'),
+            "should not contain '/' after sanitize, got: {}",
+            result
+        );
+        assert!(
+            result.contains("file"),
+            "should preserve 'file' part, got: {}",
+            result
+        );
     }
 
     #[test]
     fn test_sanitize_nested_dots_no_slash() {
         // Pure filename with nested dots should be handled safely
         let result = sanitize_filename("....secret");
-        assert!(!result.contains(".."), "should not contain '..' after sanitize, got: {}", result);
+        assert!(
+            !result.contains(".."),
+            "should not contain '..' after sanitize, got: {}",
+            result
+        );
     }
 
     #[test]
@@ -468,7 +494,10 @@ mod tests {
     #[test]
     fn test_sanitize_empty_filename() {
         let result = sanitize_filename("");
-        assert!(!result.is_empty(), "empty filenames should get a generated name");
+        assert!(
+            !result.is_empty(),
+            "empty filenames should get a generated name"
+        );
         assert!(result.starts_with("upload_"));
     }
 

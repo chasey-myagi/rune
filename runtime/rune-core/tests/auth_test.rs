@@ -30,7 +30,11 @@ async fn noop_verifier_accepts_any_key() {
     assert!(verifier.verify_caster_key("").await);
 
     // Special characters, unicode, null bytes
-    assert!(verifier.verify_gate_key("key-with-spëcial-chars!@#$%").await);
+    assert!(
+        verifier
+            .verify_gate_key("key-with-spëcial-chars!@#$%")
+            .await
+    );
     assert!(verifier.verify_caster_key("key\0with\0nulls").await);
     assert!(verifier.verify_gate_key("key-with-emoji-\u{1F600}").await);
 
@@ -101,16 +105,15 @@ async fn start_auth_server(
     let addr = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let grpc_service = RuneGrpcService {
-        relay,
-        session_mgr,
-    };
+    let grpc_service = RuneGrpcService { relay, session_mgr };
 
     tokio::spawn(async move {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
         Server::builder()
             .add_service(RuneServiceServer::new(grpc_service))
-            .serve_with_incoming_shutdown(incoming, async { shutdown_rx.await.ok(); })
+            .serve_with_incoming_shutdown(incoming, async {
+                shutdown_rx.await.ok();
+            })
             .await
             .unwrap();
     });
@@ -181,7 +184,11 @@ async fn test_unauthenticated_caster_rejected_when_auth_enabled() {
 
     let (tx, rx) = mpsc::channel(32);
     let stream = ReceiverStream::new(rx);
-    let mut response_stream = client.session(Request::new(stream)).await.unwrap().into_inner();
+    let mut response_stream = client
+        .session(Request::new(stream))
+        .await
+        .unwrap()
+        .into_inner();
 
     // Send attach with empty key
     tx.send(make_attach_msg_with_key("caster-no-key", ""))
@@ -228,7 +235,11 @@ async fn test_invalid_caster_key_rejected() {
 
     let (tx, rx) = mpsc::channel(32);
     let stream = ReceiverStream::new(rx);
-    let mut response_stream = client.session(Request::new(stream)).await.unwrap().into_inner();
+    let mut response_stream = client
+        .session(Request::new(stream))
+        .await
+        .unwrap()
+        .into_inner();
 
     // Send attach with wrong key
     tx.send(make_attach_msg_with_key("caster-bad-key", "rk_wrong_key"))
@@ -272,7 +283,11 @@ async fn test_valid_caster_key_accepted() {
 
     let (tx, rx) = mpsc::channel(32);
     let stream = ReceiverStream::new(rx);
-    let mut response_stream = client.session(Request::new(stream)).await.unwrap().into_inner();
+    let mut response_stream = client
+        .session(Request::new(stream))
+        .await
+        .unwrap()
+        .into_inner();
 
     // Send attach with correct key
     tx.send(make_attach_msg_with_key("caster-good-key", "rk_secret_123"))
@@ -291,7 +306,9 @@ async fn test_valid_caster_key_accepted() {
 
     // Session should be registered
     assert_eq!(session_mgr.caster_count(), 1);
-    assert!(session_mgr.list_caster_ids().contains(&"caster-good-key".to_string()));
+    assert!(session_mgr
+        .list_caster_ids()
+        .contains(&"caster-good-key".to_string()));
 
     // Rune should be registered
     assert!(relay.list().iter().any(|(name, _)| name == "test_rune"));
@@ -320,7 +337,11 @@ async fn test_dev_mode_skips_auth() {
 
     let (tx, rx) = mpsc::channel(32);
     let stream = ReceiverStream::new(rx);
-    let mut response_stream = client.session(Request::new(stream)).await.unwrap().into_inner();
+    let mut response_stream = client
+        .session(Request::new(stream))
+        .await
+        .unwrap()
+        .into_inner();
 
     // Send attach with NO key — should still succeed in dev mode
     tx.send(make_attach_msg_with_key("caster-dev", ""))

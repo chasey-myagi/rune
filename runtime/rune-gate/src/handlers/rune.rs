@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Sse, sse::Event},
+    response::{sse::Event, IntoResponse, Sse},
+    Json,
 };
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -17,8 +17,8 @@ use rune_schema::validator::{validate_input, validate_output};
 use rune_store::{CallLog, TaskStatus};
 
 use crate::error::{error_response, map_error};
-use crate::multipart::{FileMetadata, is_multipart, parse_multipart};
-use crate::state::{GateState, RunParams, unique_request_id};
+use crate::multipart::{is_multipart, parse_multipart, FileMetadata};
+use crate::state::{unique_request_id, GateState, RunParams};
 
 pub async fn run_rune(
     State(state): State<GateState>,
@@ -35,7 +35,9 @@ pub async fn run_rune(
 
     // Extract X-Rune-Labels header for label-based routing
     let labels = parse_labels_header(
-        req.headers().get("x-rune-labels").and_then(|v| v.to_str().ok()),
+        req.headers()
+            .get("x-rune-labels")
+            .and_then(|v| v.to_str().ok()),
     );
 
     // Read body with appropriate size limit
@@ -76,7 +78,9 @@ pub async fn dynamic_rune_handler(
 
     // Extract X-Rune-Labels header for label-based routing
     let labels = parse_labels_header(
-        req.headers().get("x-rune-labels").and_then(|v| v.to_str().ok()),
+        req.headers()
+            .get("x-rune-labels")
+            .and_then(|v| v.to_str().ok()),
     );
 
     // Read body with appropriate size limit
@@ -117,7 +121,9 @@ pub async fn dynamic_rune_handler(
 
 /// Parse X-Rune-Labels header value into a HashMap.
 /// Format: "key1=value1,key2=value2"
-pub fn parse_labels_header(header_value: Option<&str>) -> std::collections::HashMap<String, String> {
+pub fn parse_labels_header(
+    header_value: Option<&str>,
+) -> std::collections::HashMap<String, String> {
     let mut labels = std::collections::HashMap::new();
     if let Some(val) = header_value {
         for pair in val.split(',') {
@@ -143,7 +149,10 @@ pub async fn execute_rune(
     let invoker = if labels.is_empty() {
         state.rune.relay.resolve(rune_name, &*state.rune.resolver)
     } else {
-        state.rune.relay.resolve_with_labels(rune_name, labels, &*state.rune.resolver)
+        state
+            .rune
+            .relay
+            .resolve_with_labels(rune_name, labels, &*state.rune.resolver)
     };
     let invoker = match invoker {
         Some(inv) => inv,
@@ -165,15 +174,20 @@ pub async fn execute_rune(
     };
 
     // Get RuneConfig for schema validation and stream support (single lookup)
-    let (input_schema, output_schema, supports_stream) = if let Some(entries) = state.rune.relay.find(rune_name) {
-        if let Some(first) = entries.value().first() {
-            (first.config.input_schema.clone(), first.config.output_schema.clone(), first.config.supports_stream)
+    let (input_schema, output_schema, supports_stream) =
+        if let Some(entries) = state.rune.relay.find(rune_name) {
+            if let Some(first) = entries.value().first() {
+                (
+                    first.config.input_schema.clone(),
+                    first.config.output_schema.clone(),
+                    first.config.supports_stream,
+                )
+            } else {
+                (None, None, false)
+            }
         } else {
             (None, None, false)
-        }
-    } else {
-        (None, None, false)
-    };
+        };
 
     // Check supports_stream
     if params.stream.unwrap_or(false) && !supports_stream {
@@ -244,7 +258,16 @@ pub async fn execute_rune(
 
     let has_files = file_metadata.is_some();
     let response = if let Some(files) = file_metadata {
-        sync_execute_multipart(invoker, ctx, rune_input, output_schema, files, &file_ids, state).await
+        sync_execute_multipart(
+            invoker,
+            ctx,
+            rune_input,
+            output_schema,
+            files,
+            &file_ids,
+            state,
+        )
+        .await
     } else {
         sync_execute(invoker, ctx, rune_input, output_schema).await
     };
@@ -252,18 +275,22 @@ pub async fn execute_rune(
     // Record call log (best-effort)
     let latency_ms = start.elapsed().as_millis() as i64;
     let status_code = response.status().as_u16() as i32;
-    let _ = state.admin.store.insert_log(&CallLog {
-        id: 0,
-        request_id: req_id,
-        rune_name: rune_name_owned,
-        mode: mode.into(),
-        caster_id: None,
-        latency_ms,
-        status_code,
-        input_size,
-        output_size: 0, // not easily available after response is built
-        timestamp: rune_store::now_iso8601(),
-    }).await;
+    let _ = state
+        .admin
+        .store
+        .insert_log(&CallLog {
+            id: 0,
+            request_id: req_id,
+            rune_name: rune_name_owned,
+            mode: mode.into(),
+            caster_id: None,
+            latency_ms,
+            status_code,
+            input_size,
+            output_size: 0, // not easily available after response is built
+            timestamp: rune_store::now_iso8601(),
+        })
+        .await;
 
     // Schedule deferred file cleanup: give clients 60s to download, then clean up.
     // TTL (5 min) in FileBroker acts as a safety net if this task is dropped.
@@ -392,7 +419,8 @@ pub async fn stream_execute(
                                 .data(String::from_utf8_lossy(&data).to_string());
                             if tx.send(Ok(event)).await.is_err() {
                                 state_clone
-                                    .rune.session_mgr
+                                    .rune
+                                    .session_mgr
                                     .cancel_by_request_id(&req_id, "SSE client disconnected")
                                     .await;
                                 status_code = 499;
@@ -422,18 +450,22 @@ pub async fn stream_execute(
 
         // Record call log for stream mode (best-effort)
         let latency_ms = start.elapsed().as_millis() as i64;
-        let _ = state_clone.admin.store.insert_log(&CallLog {
-            id: 0,
-            request_id: req_id,
-            rune_name: rune_name_log,
-            mode: "stream".into(),
-            caster_id: None,
-            latency_ms,
-            status_code,
-            input_size,
-            output_size,
-            timestamp: rune_store::now_iso8601(),
-        }).await;
+        let _ = state_clone
+            .admin
+            .store
+            .insert_log(&CallLog {
+                id: 0,
+                request_id: req_id,
+                rune_name: rune_name_log,
+                mode: "stream".into(),
+                caster_id: None,
+                latency_ms,
+                status_code,
+                input_size,
+                output_size,
+                timestamp: rune_store::now_iso8601(),
+            })
+            .await;
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -452,18 +484,23 @@ pub async fn async_execute(
     let input_str = String::from_utf8_lossy(&body).to_string();
 
     // Insert task into store
-    if let Err(e) = state.admin.store.insert_task(&task_id, &rune_name, Some(&input_str)).await {
+    if let Err(e) = state
+        .admin
+        .store
+        .insert_task(&task_id, &rune_name, Some(&input_str))
+        .await
+    {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL",
             &e.to_string(),
         );
     }
-    if let Err(e) =
-        state
-            .admin.store
-            .update_task_status(&task_id, TaskStatus::Running, None, None)
-    .await
+    if let Err(e) = state
+        .admin
+        .store
+        .update_task_status(&task_id, TaskStatus::Running, None, None)
+        .await
     {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -485,12 +522,15 @@ pub async fn async_execute(
             Ok(ref output) => {
                 let output_str = String::from_utf8_lossy(output).to_string();
                 let size = output.len() as i64;
-                let updated = store.complete_task_if_not_cancelled(
-                    &task_id,
-                    TaskStatus::Completed,
-                    Some(&output_str),
-                    None,
-                ).await.unwrap_or(false);
+                let updated = store
+                    .complete_task_if_not_cancelled(
+                        &task_id,
+                        TaskStatus::Completed,
+                        Some(&output_str),
+                        None,
+                    )
+                    .await
+                    .unwrap_or(false);
                 if !updated {
                     // Task was cancelled — skip call log
                     return;
@@ -498,12 +538,15 @@ pub async fn async_execute(
                 (200i32, size)
             }
             Err(ref e) => {
-                let updated = store.complete_task_if_not_cancelled(
-                    &task_id,
-                    TaskStatus::Failed,
-                    None,
-                    Some(&e.to_string()),
-                ).await.unwrap_or(false);
+                let updated = store
+                    .complete_task_if_not_cancelled(
+                        &task_id,
+                        TaskStatus::Failed,
+                        None,
+                        Some(&e.to_string()),
+                    )
+                    .await
+                    .unwrap_or(false);
                 if !updated {
                     return;
                 }
@@ -513,18 +556,20 @@ pub async fn async_execute(
 
         // Record call log
         let latency_ms = start.elapsed().as_millis() as i64;
-        let _ = store.insert_log(&CallLog {
-            id: 0,
-            request_id: task_id,
-            rune_name: rune_name_log,
-            mode: "async".into(),
-            caster_id: None,
-            latency_ms,
-            status_code: status,
-            input_size,
-            output_size,
-            timestamp: rune_store::now_iso8601(),
-        }).await;
+        let _ = store
+            .insert_log(&CallLog {
+                id: 0,
+                request_id: task_id,
+                rune_name: rune_name_log,
+                mode: "async".into(),
+                caster_id: None,
+                latency_ms,
+                status_code: status,
+                input_size,
+                output_size,
+                timestamp: rune_store::now_iso8601(),
+            })
+            .await;
     });
 
     (

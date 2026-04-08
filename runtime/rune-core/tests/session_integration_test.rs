@@ -36,16 +36,15 @@ async fn start_server(
     let addr = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let grpc_service = RuneGrpcService {
-        relay,
-        session_mgr,
-    };
+    let grpc_service = RuneGrpcService { relay, session_mgr };
 
     tokio::spawn(async move {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
         Server::builder()
             .add_service(RuneServiceServer::new(grpc_service))
-            .serve_with_incoming_shutdown(incoming, async { shutdown_rx.await.ok(); })
+            .serve_with_incoming_shutdown(incoming, async {
+                shutdown_rx.await.ok();
+            })
             .await
             .unwrap();
     });
@@ -62,11 +61,20 @@ async fn connect_client(addr: SocketAddr) -> RuneServiceClient<Channel> {
         .unwrap()
 }
 
-fn make_attach_msg(caster_id: &str, runes: Vec<RuneDeclaration>, max_concurrent: u32) -> SessionMessage {
+fn make_attach_msg(
+    caster_id: &str,
+    runes: Vec<RuneDeclaration>,
+    max_concurrent: u32,
+) -> SessionMessage {
     make_attach_msg_with_key(caster_id, runes, max_concurrent, "")
 }
 
-fn make_attach_msg_with_key(caster_id: &str, runes: Vec<RuneDeclaration>, max_concurrent: u32, key: &str) -> SessionMessage {
+fn make_attach_msg_with_key(
+    caster_id: &str,
+    runes: Vec<RuneDeclaration>,
+    max_concurrent: u32,
+    key: &str,
+) -> SessionMessage {
     SessionMessage {
         payload: Some(session_message::Payload::Attach(CasterAttach {
             caster_id: caster_id.into(),
@@ -198,9 +206,13 @@ async fn attach_success_returns_ack_accepted() {
         .into_inner();
 
     // Send attach
-    tx.send(make_attach_msg("caster-1", vec![make_echo_rune_decl("echo")], 5))
-        .await
-        .unwrap();
+    tx.send(make_attach_msg(
+        "caster-1",
+        vec![make_echo_rune_decl("echo")],
+        5,
+    ))
+    .await
+    .unwrap();
 
     // Read AttachAck
     let msg = response_stream.message().await.unwrap().unwrap();
@@ -214,7 +226,9 @@ async fn attach_success_returns_ack_accepted() {
 
     // Session should be registered
     assert_eq!(session_mgr.caster_count(), 1);
-    assert!(session_mgr.list_caster_ids().contains(&"caster-1".to_string()));
+    assert!(session_mgr
+        .list_caster_ids()
+        .contains(&"caster-1".to_string()));
 
     // Rune should be registered in relay
     let list = relay.list();
@@ -247,9 +261,13 @@ async fn attach_then_execute_unary_returns_result() {
         .into_inner();
 
     // Attach with echo rune
-    tx.send(make_attach_msg("caster-exec", vec![make_echo_rune_decl("exec_echo")], 5))
-        .await
-        .unwrap();
+    tx.send(make_attach_msg(
+        "caster-exec",
+        vec![make_echo_rune_decl("exec_echo")],
+        5,
+    ))
+    .await
+    .unwrap();
 
     // Wait for AttachAck
     let ack = response_stream.message().await.unwrap().unwrap();
@@ -356,9 +374,7 @@ async fn attach_then_stream_execute_returns_chunks() {
     tx.send(make_stream_event_msg("req-stream-1", b"chunk-2"))
         .await
         .unwrap();
-    tx.send(make_stream_end_msg("req-stream-1"))
-        .await
-        .unwrap();
+    tx.send(make_stream_end_msg("req-stream-1")).await.unwrap();
 
     // Caller receives stream chunks
     let mut rx = invoke_handle.await.unwrap().unwrap();
@@ -578,7 +594,11 @@ async fn cancel_request_cancels_pending() {
 
     // The invoke should fail with Cancelled
     let result = invoke_handle.await.unwrap();
-    assert!(matches!(result, Err(RuneError::Cancelled)), "expected Cancelled, got {:?}", result);
+    assert!(
+        matches!(result, Err(RuneError::Cancelled)),
+        "expected Cancelled, got {:?}",
+        result
+    );
 
     tx.send(make_detach_msg("done")).await.unwrap();
 }
@@ -688,7 +708,10 @@ async fn disconnect_with_pending_requests_sends_errors() {
         .expect("invoke should complete")
         .unwrap();
 
-    assert!(result.is_err(), "pending request should error on disconnect");
+    assert!(
+        result.is_err(),
+        "pending request should error on disconnect"
+    );
 }
 
 /// Test 10: Multiple rune registration via single attach
