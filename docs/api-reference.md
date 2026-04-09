@@ -32,7 +32,7 @@ Authorization: Bearer rk_xxxxxxxxxxxxxxxx
 
 ## Rune 调用
 
-### `POST /api/v1/runes/:name/run`
+### `POST /api/v1/runes/{name}/run`
 
 通过 debug 端点调用指定 Rune。适用于没有声明 `gate.path` 的 Rune。
 
@@ -113,7 +113,7 @@ data: error message
 
 ### `{gate_path}` -- 动态业务路由
 
-Rune 声明 `gate.path` 后自动注册为真实 HTTP 路由。行为与 `/api/v1/runes/:name/run` 完全一致，支持同样的查询参数和请求头。
+Rune 声明 `gate.path` 后自动注册为真实 HTTP 路由。行为与 `/api/v1/runes/{name}/run` 完全一致，支持同样的查询参数和请求头。
 
 **示例**: Rune 声明 `gate.path = "/translate"` 后：
 ```
@@ -156,7 +156,7 @@ POST /translate?async=true   -- 异步任务
 }
 ```
 
-### `GET /api/v1/tasks/:id`
+### `GET /api/v1/tasks/{id}`
 
 查询异步任务状态。
 
@@ -184,7 +184,7 @@ POST /translate?async=true   -- 异步任务
 
 **status 取值**: `pending` | `running` | `completed` | `failed` | `cancelled`
 
-### `DELETE /api/v1/tasks/:id`
+### `DELETE /api/v1/tasks/{id}`
 
 取消运行中的异步任务。
 
@@ -247,16 +247,69 @@ POST /translate?async=true   -- 异步任务
     {
       "caster_id": "python-caster-1",
       "runes": ["translate", "summarize"],
-      "current_load": 8,
+      "role": "caster",
+      "max_concurrent": 10,
+      "available_permits": 8,
+      "pressure": 0.2,
+      "metrics": {
+        "active_requests": 2,
+        "max_concurrent": 10,
+        "available_permits": 8
+      },
+      "health_status": "HEALTHY",
       "connected_since": 3600
     }
   ]
 }
 ```
 
+`available_permits` 取代旧的 `current_load` 字段名；同时新增 `role`、`max_concurrent`、`pressure`、`metrics`、`health_status`。
+
 ### `GET /api/v1/stats`
 
 查看调用统计。
+
+### `GET /api/v1/stats/casters`
+
+查看按 Caster 聚合的调用统计。
+
+**响应**: `200 OK`
+
+```json
+{
+  "casters": [
+    {
+      "caster_id": "python-caster-1",
+      "count": 128,
+      "avg_latency_ms": 42,
+      "success_rate": 0.992,
+      "p95_latency_ms": 91.0
+    }
+  ]
+}
+```
+
+### `GET /api/v1/scaling/status`
+
+查看 Runtime 自动扩缩容评估状态。
+
+**响应**: `200 OK`
+
+```json
+{
+  "groups": [
+    {
+      "group_id": "gpu",
+      "current_replicas": 2,
+      "desired_replicas": 3,
+      "average_pressure": 0.91,
+      "action": "scale_up",
+      "reason": "pressure 0.910 exceeded threshold 0.800",
+      "pilot_id": "pilot-12345"
+    }
+  ]
+}
+```
 
 **响应**: `200 OK`
 
@@ -365,7 +418,7 @@ POST /translate?async=true   -- 异步任务
 }
 ```
 
-### `DELETE /api/v1/keys/:id`
+### `DELETE /api/v1/keys/{id}`
 
 吊销 API Key。吊销后该 Key 立即失效。**需要 admin key。**
 
@@ -394,7 +447,7 @@ POST /translate?async=true   -- 异步任务
 
 ## 文件下载
 
-### `GET /api/v1/files/:id`
+### `GET /api/v1/files/{id}`
 
 下载通过 multipart 上传的文件。
 
@@ -465,7 +518,7 @@ POST /translate?async=true   -- 异步任务
 ]
 ```
 
-### `GET /api/v1/flows/:name`
+### `GET /api/v1/flows/{name}`
 
 获取 Flow 详情。
 
@@ -473,7 +526,7 @@ POST /translate?async=true   -- 异步任务
 - `200 OK` -- 返回完整 flow 定义
 - `404 FLOW_NOT_FOUND`
 
-### `DELETE /api/v1/flows/:name`
+### `DELETE /api/v1/flows/{name}`
 
 删除 Flow。
 
@@ -481,7 +534,7 @@ POST /translate?async=true   -- 异步任务
 - `204 No Content`
 - `404 FLOW_NOT_FOUND`
 
-### `POST /api/v1/flows/:name/run`
+### `POST /api/v1/flows/{name}/run`
 
 执行 Flow。支持与 Rune 调用相同的三种模式。
 

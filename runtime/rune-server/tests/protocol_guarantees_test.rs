@@ -300,6 +300,7 @@ fn build_guarantee_state() -> (GateState, Arc<Relay>, Arc<RuneStore>) {
             store: store.clone(),
             started_at: Instant::now(),
             dev_mode: true,
+            scaling: None,
         },
         cors_origins: Arc::new(vec![]),
         rate_limiter: None,

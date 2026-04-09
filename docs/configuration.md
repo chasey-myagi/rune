@@ -158,6 +158,15 @@ Runtime 配置控制 `rune-server` 进程的所有运行时行为。
 | `least_load` | 最少负载。选择当前可用信号量最多（最空闲）的 Caster |
 | `priority` | 优先级优先。先筛选最高优先级的 Caster，再在同级中用内部策略（round-robin）选择 |
 
+### `[scaling]` -- 自动扩缩容
+
+| 字段 | 类型 | 默认值 | 环境变量 | 说明 |
+|------|------|--------|----------|------|
+| `enabled` | bool | `false` | `RUNE_SCALING__ENABLED` | 是否启用 Runtime 端扩缩容评估循环 |
+| `eval_interval_secs` | u64 | `30` | `RUNE_SCALING__EVAL_INTERVAL_SECS` | 扩缩容评估周期（秒） |
+
+启用后，Runtime 会周期性评估带 `group` 和 `_scale_*` labels 的 Caster 分组，并通过 `ScaleSignal` / `ShutdownRequest` 与 Pilot 和 Caster 协作完成扩缩容。
+
 ### `[rate_limit]` -- 频率限制
 
 | 字段 | 类型 | 默认值 | 环境变量 | 说明 |
@@ -210,6 +219,8 @@ Runtime 配置控制 `rune-server` 进程的所有运行时行为。
 | `RUNE_SESSION__MAX_REQUEST_TIMEOUT_SECS` | `session.max_request_timeout_secs` | u64 |
 | `RUNE_GATE__MAX_UPLOAD_SIZE_MB` | `gate.max_upload_size_mb` | u64 |
 | `RUNE_RESOLVER__STRATEGY` | `resolver.strategy` | string |
+| `RUNE_SCALING__ENABLED` | `scaling.enabled` | bool |
+| `RUNE_SCALING__EVAL_INTERVAL_SECS` | `scaling.eval_interval_secs` | u64 |
 | `RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE` | `rate_limit.requests_per_minute` | u32 |
 | `RUNE_LOG__LEVEL` | `log.level` | string |
 | `RUNE_LOG__FILE` | `log.file` | string |
@@ -254,6 +265,10 @@ max_upload_size_mb = 10
 [resolver]
 strategy = "round_robin"
 
+[scaling]
+enabled = false
+eval_interval_secs = 30
+
 [rate_limit]
 requests_per_minute = 600
 
@@ -269,3 +284,13 @@ level = "info"
 # cert_path = "/etc/rune/cert.pem"
 # key_path = "/etc/rune/key.pem"
 ```
+
+## 5. Pilot 与 SDK 扩缩容约定
+
+- Pilot 使用固定本地文件：
+  - `~/.rune/pilot.lock`
+  - `~/.rune/pilot.pid`
+  - `~/.rune/pilot.sock`
+- SDK 在声明 `ScalePolicy` 后会自动发现或拉起 `rune pilot daemon --runtime <addr>`。
+- `rune` 二进制查找顺序为：`RUNE_BIN` 环境变量优先，其次是 `PATH` 中的 `rune`。
+- Pilot 通过 `RUNE_KEY` 环境变量使用 Caster Key 连接 Runtime；如果启用了认证，请确保 SDK 或运行环境提供了该值。

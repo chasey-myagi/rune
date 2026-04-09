@@ -214,6 +214,7 @@ async fn test_e05_caster_disconnect_removes_runes() {
                 ..Default::default()
             }],
             max_concurrent: 10,
+            role: "caster".into(),
             ..Default::default()
         })),
     };

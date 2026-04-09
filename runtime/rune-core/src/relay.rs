@@ -5,7 +5,11 @@ use crate::resolver::Resolver;
 use crate::retry::RetryInvoker;
 use crate::rune::RuneConfig;
 use dashmap::DashMap;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+type EntryMap = HashMap<String, RuneEntry>;
 
 /// 一个 Rune 的注册条目
 #[derive(Clone)]
@@ -17,11 +21,15 @@ pub struct RuneEntry {
 
 /// Relay = 注册表
 pub struct Relay {
-    entries: DashMap<String, Vec<RuneEntry>>,
+    entries: DashMap<String, EntryMap>,
     /// Reverse index: gate_path → rune_name for O(1) dynamic route lookup
     gate_path_index: DashMap<String, String>,
+    /// Reverse index: caster_id -> registered rune names
+    caster_index: DashMap<String, Vec<String>>,
     /// Serializes register/remove_caster to prevent race conditions on gate_path_index
     write_lock: Mutex<()>,
+    generation: AtomicU64,
+    local_key_counter: AtomicU64,
     circuit_breaker_registry: Option<Arc<CircuitBreakerRegistry>>,
     retry_config: Option<RetryConfig>,
 }
@@ -37,7 +45,10 @@ impl Relay {
         Self {
             entries: DashMap::new(),
             gate_path_index: DashMap::new(),
+            caster_index: DashMap::new(),
             write_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
+            local_key_counter: AtomicU64::new(0),
             circuit_breaker_registry: None,
             retry_config: None,
         }
@@ -47,7 +58,10 @@ impl Relay {
         Self {
             entries: DashMap::new(),
             gate_path_index: DashMap::new(),
+            caster_index: DashMap::new(),
             write_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
+            local_key_counter: AtomicU64::new(0),
             circuit_breaker_registry: Some(Arc::new(CircuitBreakerRegistry::new(
                 config.circuit_breaker.clone(),
             ))),
@@ -123,11 +137,21 @@ impl Relay {
         };
 
         let name = config.name.clone();
-        self.entries.entry(name).or_default().push(RuneEntry {
-            config,
-            invoker: actual_invoker,
-            caster_id,
-        });
+        let caster_key = caster_id
+            .clone()
+            .unwrap_or_else(|| format!("__local_{}", self.next_local_key()));
+        self.entries.entry(name.clone()).or_default().insert(
+            caster_key,
+            RuneEntry {
+                config,
+                invoker: actual_invoker,
+                caster_id: caster_id.clone(),
+            },
+        );
+        if let Some(caster_id) = caster_id {
+            self.caster_index.entry(caster_id).or_default().push(name);
+        }
+        self.generation.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -135,27 +159,28 @@ impl Relay {
     pub fn remove_caster(&self, caster_id: &str) {
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Collect (index_key, rune_name) pairs for gate paths owned by this caster
+        let rune_names = self
+            .caster_index
+            .remove(caster_id)
+            .map(|(_, names)| names)
+            .unwrap_or_default();
+
         let mut keys_to_check: Vec<(String, String)> = Vec::new();
-        for entry in self.entries.iter() {
-            let rune_name = entry.key().clone();
-            for e in entry.value() {
-                if e.caster_id.as_deref() == Some(caster_id) {
-                    if let Some(ref gate) = e.config.gate {
+        for rune_name in &rune_names {
+            if let Some(mut entries) = self.entries.get_mut(rune_name) {
+                if let Some(entry) = entries.get(caster_id) {
+                    if let Some(ref gate) = entry.config.gate {
                         keys_to_check
                             .push((format!("{}:{}", gate.method, gate.path), rune_name.clone()));
                     }
                 }
+                entries.remove(caster_id);
             }
         }
 
-        for mut entry in self.entries.iter_mut() {
-            entry
-                .value_mut()
-                .retain(|e| e.caster_id.as_deref() != Some(caster_id));
+        for rune_name in &rune_names {
+            self.entries.remove_if(rune_name, |_, v| v.is_empty());
         }
-        // 清理空条目
-        self.entries.retain(|_, v| !v.is_empty());
 
         // Clean up gate_path_index: only check the specific rune_name's remaining
         // entries instead of iterating all entries across all rune names.
@@ -164,7 +189,7 @@ impl Relay {
                 .entries
                 .get(&rune_name)
                 .map(|entries| {
-                    entries.value().iter().any(|e| {
+                    entries.value().values().any(|e| {
                         e.config
                             .gate
                             .as_ref()
@@ -182,13 +207,11 @@ impl Relay {
         if let Some(registry) = &self.circuit_breaker_registry {
             registry.remove(caster_id);
         }
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     /// Find all candidates for a rune name
-    pub fn find(
-        &self,
-        rune_name: &str,
-    ) -> Option<dashmap::mapref::one::Ref<'_, String, Vec<RuneEntry>>> {
+    pub fn find(&self, rune_name: &str) -> Option<dashmap::mapref::one::Ref<'_, String, EntryMap>> {
         let entry = self.entries.get(rune_name)?;
         if entry.value().is_empty() {
             return None;
@@ -197,34 +220,28 @@ impl Relay {
     }
 
     /// Convenience: find + pick using a resolver
-    pub fn resolve(
-        &self,
-        rune_name: &str,
-        resolver: &dyn Resolver,
-    ) -> Option<Arc<dyn RuneInvoker>> {
+    pub fn select_entry(&self, rune_name: &str, resolver: &dyn Resolver) -> Option<RuneEntry> {
         let entries = self.find(rune_name)?;
-        let picked = resolver.pick(rune_name, entries.value())?;
-        Some(Arc::clone(&picked.invoker))
+        let candidates: Vec<RuneEntry> = entries.value().values().cloned().collect();
+        let picked = resolver.pick(rune_name, &candidates)?;
+        Some(picked.clone())
     }
 
-    /// Resolve with label filtering: only consider candidates whose labels
-    /// are a superset of `required_labels`. Returns None if no match.
-    pub fn resolve_with_labels(
+    /// Select a concrete candidate with label filtering applied.
+    pub fn select_entry_with_labels(
         &self,
         rune_name: &str,
         required_labels: &std::collections::HashMap<String, String>,
         resolver: &dyn Resolver,
-    ) -> Option<Arc<dyn RuneInvoker>> {
-        let entries = self.find(rune_name)?;
+    ) -> Option<RuneEntry> {
         if required_labels.is_empty() {
-            // No label filter — fall through to normal resolve
-            let picked = resolver.pick(rune_name, entries.value())?;
-            return Some(Arc::clone(&picked.invoker));
+            return self.select_entry(rune_name, resolver);
         }
-        // Filter candidates by labels
+        let entries = self.find(rune_name)?;
+
         let filtered: Vec<RuneEntry> = entries
             .value()
-            .iter()
+            .values()
             .filter(|e| {
                 required_labels
                     .iter()
@@ -235,8 +252,31 @@ impl Relay {
         if filtered.is_empty() {
             return None;
         }
+
         let picked = resolver.pick(rune_name, &filtered)?;
-        Some(Arc::clone(&picked.invoker))
+        Some(picked.clone())
+    }
+
+    /// Convenience: find + pick using a resolver
+    pub fn resolve(
+        &self,
+        rune_name: &str,
+        resolver: &dyn Resolver,
+    ) -> Option<Arc<dyn RuneInvoker>> {
+        self.select_entry(rune_name, resolver)
+            .map(|picked| Arc::clone(&picked.invoker))
+    }
+
+    /// Resolve with label filtering: only consider candidates whose labels
+    /// are a superset of `required_labels`. Returns None if no match.
+    pub fn resolve_with_labels(
+        &self,
+        rune_name: &str,
+        required_labels: &std::collections::HashMap<String, String>,
+        resolver: &dyn Resolver,
+    ) -> Option<Arc<dyn RuneInvoker>> {
+        self.select_entry_with_labels(rune_name, required_labels, resolver)
+            .map(|picked| Arc::clone(&picked.invoker))
     }
 
     /// O(1) lookup: (method, gate_path) → rune_name via reverse index
@@ -250,7 +290,7 @@ impl Relay {
         let mut result = Vec::new();
         for entry in self.entries.iter() {
             // Take the first entry per rune name (all candidates share the same name)
-            if let Some(e) = entry.value().first() {
+            if let Some(e) = entry.value().values().next() {
                 let gate_path = e.config.gate.as_ref().map(|g| g.path.clone());
                 result.push((e.config.name.clone(), gate_path));
             }
@@ -267,6 +307,10 @@ impl Relay {
             .as_ref()
             .map(|registry| registry.states())
             .unwrap_or_default()
+    }
+
+    fn next_local_key(&self) -> u64 {
+        self.local_key_counter.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -1052,7 +1096,14 @@ mod tests {
         assert!(relay.resolve("interleaved", &resolver).is_some());
         let entries = relay.find("interleaved").unwrap();
         assert_eq!(entries.value().len(), 1);
-        assert_eq!(entries.value()[0].caster_id.as_deref(), Some("C"));
+        assert_eq!(
+            entries
+                .value()
+                .values()
+                .next()
+                .and_then(|entry| entry.caster_id.as_deref()),
+            Some("C")
+        );
     }
 
     // ---- Same rune_name with different gate.path ----

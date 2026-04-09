@@ -133,12 +133,13 @@ impl Resolver for HealthAwareResolver {
         let picked = self.inner.pick(rune_name, &top_tier)?;
 
         // Map the picked reference back to the original candidates slice
-        // via top_indices. Resolver::pick must return a reference into the
-        // provided slice — ptr::eq verifies this contract.
+        // via top_indices. Use value matching (name + caster_id) instead of
+        // ptr::eq — the latter is fragile because top_tier is a cloned Vec
+        // whose elements have different addresses from the original slice.
         let inner_idx = top_tier
             .iter()
-            .position(|e| std::ptr::eq(e, picked))
-            .expect("Resolver::pick must return a reference into the provided candidates slice");
+            .position(|e| e.config.name == picked.config.name && e.caster_id == picked.caster_id)
+            .expect("picked entry must exist in top_tier by (name, caster_id)");
 
         Some(&candidates[top_indices[inner_idx]])
     }
@@ -150,24 +151,60 @@ impl Resolver for LeastLoadResolver {
             return None;
         }
 
-        // Pick the candidate with the most available permits (least load).
-        // If a candidate has no caster_id (in-process), treat as max permits.
-        let mut best: Option<(usize, &'a RuneEntry)> = None;
+        // Prefer lower reported pressure when available.  For casters that
+        // have not (yet) reported pressure, synthesize an estimate from permit
+        // utilisation so they compete fairly instead of being treated as 0.0
+        // (best) or being unconditionally demoted.
+        //
+        // Sanitize pressure: NaN, negative, and infinite values are clamped
+        // so they don't corrupt the sort.  NaN/infinity → 1.0 (worst);
+        // negative → 0.0 (best reasonable).  Then use f64::total_cmp for a
+        // total-order comparison that avoids the old to_bits() inversion bug.
+        let mut best: Option<(f64, usize, &'a RuneEntry)> = None;
         for entry in candidates {
-            let permits = match &entry.caster_id {
-                Some(cid) => self.session_mgr.available_permits(cid),
-                None => usize::MAX, // in-process invokers are always available
+            let (pressure, permits) = match &entry.caster_id {
+                Some(cid) => {
+                    let permits = self.session_mgr.available_permits(cid);
+                    let raw_pressure = match self.session_mgr.reported_pressure(cid) {
+                        Some(p) => p,
+                        None => {
+                            // Synthesize pressure from permit utilisation.
+                            let max = self.session_mgr.max_concurrent(cid);
+                            if max > 0 {
+                                1.0 - (permits as f64 / max as f64)
+                            } else {
+                                0.0
+                            }
+                        }
+                    };
+                    // Sanitize: NaN/infinity → worst; negative → best-possible.
+                    let p = if raw_pressure.is_nan() || raw_pressure.is_infinite() {
+                        1.0
+                    } else if raw_pressure < 0.0 {
+                        0.0
+                    } else {
+                        raw_pressure
+                    };
+                    (p, permits)
+                }
+                None => (0.0, usize::MAX),
             };
-            match &best {
-                None => best = Some((permits, entry)),
-                Some((best_permits, _)) => {
-                    if permits > *best_permits {
-                        best = Some((permits, entry));
+            // Lower pressure is better; for ties, more permits is better.
+            let dominated = match &best {
+                None => false,
+                Some((best_p, best_perm, _)) => {
+                    match pressure.total_cmp(best_p) {
+                        std::cmp::Ordering::Less => false,   // this is better
+                        std::cmp::Ordering::Greater => true, // best is better
+                        std::cmp::Ordering::Equal => permits <= *best_perm, // tie-break on permits
                     }
                 }
+            };
+            if !dominated {
+                best = Some((pressure, permits, entry));
             }
         }
-        best.map(|(_, entry)| entry)
+        best.map(|(_, _, entry)| entry)
     }
 }
 
@@ -228,7 +265,7 @@ impl Resolver for PriorityResolver {
                 .position(|e| {
                     e.config.name == picked.config.name && e.caster_id == picked.caster_id
                 })
-                .unwrap_or(0);
+                .expect("picked entry must exist in top_tier by (name, caster_id)");
             Some(&candidates[top_indices[inner_idx]])
         }
     }
@@ -576,5 +613,276 @@ mod tests {
         let resolver = HealthAwareResolver::new(Arc::new(RoundRobinResolver::new()), session_mgr);
         let candidates = vec![make_entry("echo", 0)];
         assert!(resolver.pick("echo", &candidates).is_some());
+    }
+
+    #[test]
+    fn least_load_resolver_prefers_lower_pressure_before_permits() {
+        let session_mgr = Arc::new(SessionManager::new_dev(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+        ));
+        session_mgr.insert_test_caster("low-pressure", 10);
+        session_mgr.insert_test_caster("high-pressure", 10);
+        session_mgr.set_test_pressure("low-pressure", 0.10);
+        session_mgr.set_test_pressure("high-pressure", 0.85);
+
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let candidates = vec![
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler.clone())),
+                caster_id: Some("high-pressure".into()),
+            },
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler)),
+                caster_id: Some("low-pressure".into()),
+            },
+        ];
+
+        let resolver = LeastLoadResolver::new(session_mgr);
+        let picked = resolver.pick("echo", &candidates).unwrap();
+        assert_eq!(picked.caster_id.as_deref(), Some("low-pressure"));
+    }
+
+    #[test]
+    fn least_load_resolver_treats_zero_pressure_as_reported_idle() {
+        let session_mgr = Arc::new(SessionManager::new_dev(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+        ));
+        session_mgr.insert_test_caster("idle", 10);
+        session_mgr.insert_test_caster("busy", 10);
+        session_mgr.set_test_pressure("idle", 0.0);
+        session_mgr.set_test_pressure("busy", 0.6);
+
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let candidates = vec![
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler.clone())),
+                caster_id: Some("busy".into()),
+            },
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler)),
+                caster_id: Some("idle".into()),
+            },
+        ];
+
+        let resolver = LeastLoadResolver::new(session_mgr);
+        let picked = resolver.pick("echo", &candidates).unwrap();
+        assert_eq!(picked.caster_id.as_deref(), Some("idle"));
+    }
+
+    // ---------------------------------------------------------------
+    // C1 回归测试: HealthAwareResolver 应使用 value matching 而非 ptr::eq
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_fix_health_aware_resolver_uses_value_matching_not_ptr_eq() {
+        // 构造场景：两个 caster 都健康（同 rank），但其中一个不健康使得
+        // 触发 top_tier clone 路径。inner round-robin 在 top_tier 中选第二个时，
+        // ptr::eq 无法匹配回原始 candidates 切片。
+        let session_mgr = Arc::new(SessionManager::new_dev(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+        ));
+        session_mgr.insert_test_caster("healthy_a", 1);
+        session_mgr.insert_test_caster("healthy_b", 1);
+        session_mgr.insert_test_caster("unhealthy_c", 1);
+        // 把 unhealthy_c 标记为 Unhealthy，使得 top_tier 只包含 healthy_a 和 healthy_b
+        if let Some(health) = session_mgr.health.get("unhealthy_c") {
+            let mut info = health.write().unwrap();
+            *info = HealthInfo {
+                status: HealthStatusLevel::Unhealthy,
+                ..HealthInfo::default()
+            };
+        }
+
+        let resolver = HealthAwareResolver::new(Arc::new(RoundRobinResolver::new()), session_mgr);
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let candidates = vec![
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler.clone())),
+                caster_id: Some("healthy_a".into()),
+            },
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler.clone())),
+                caster_id: Some("healthy_b".into()),
+            },
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler)),
+                caster_id: Some("unhealthy_c".into()),
+            },
+        ];
+
+        // 第一次 pick 应选 healthy_a
+        let first = resolver.pick("echo", &candidates).unwrap();
+        assert_eq!(first.caster_id.as_deref(), Some("healthy_a"));
+
+        // 第二次 pick 应选 healthy_b（round-robin 在 top_tier 中前进）
+        // 如果使用 ptr::eq，这里会 panic 或返回错误结果
+        let second = resolver.pick("echo", &candidates).unwrap();
+        assert_eq!(
+            second.caster_id.as_deref(),
+            Some("healthy_b"),
+            "second pick should be healthy_b; ptr::eq fallback bug would break this"
+        );
+
+        // 验证返回的引用指向原始 candidates 切片
+        let second_ptr = second as *const RuneEntry;
+        let original_ptr = &candidates[1] as *const RuneEntry;
+        assert_eq!(
+            second_ptr, original_ptr,
+            "returned reference must point to original candidate slice"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // M2 回归测试: LeastLoadResolver 处理 NaN 和负数 pressure
+    // ---------------------------------------------------------------
+    #[test]
+    fn test_fix_least_load_resolver_handles_nan_pressure() {
+        // 构造场景：一个 candidate 的 pressure 是 NaN
+        // NaN caster 不应被优先选中
+        let session_mgr = Arc::new(SessionManager::new_dev(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+        ));
+        session_mgr.insert_test_caster("nan-caster", 10);
+        session_mgr.insert_test_caster("normal-caster", 10);
+        session_mgr.set_test_pressure("nan-caster", f64::NAN);
+        session_mgr.set_test_pressure("normal-caster", 0.5);
+
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let candidates = vec![
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler.clone())),
+                caster_id: Some("nan-caster".into()),
+            },
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler)),
+                caster_id: Some("normal-caster".into()),
+            },
+        ];
+
+        let resolver = LeastLoadResolver::new(session_mgr);
+        let picked = resolver.pick("echo", &candidates).unwrap();
+        assert_eq!(
+            picked.caster_id.as_deref(),
+            Some("normal-caster"),
+            "NaN pressure caster should NOT be preferred; it should be sorted to last"
+        );
+    }
+
+    #[test]
+    fn test_fix_least_load_resolver_handles_negative_pressure() {
+        // 构造场景：pressure 为负数
+        // 验证排序不崩溃，且负 pressure（比 0 更好）caster 被优先选中
+        let session_mgr = Arc::new(SessionManager::new_dev(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+        ));
+        session_mgr.insert_test_caster("negative", 10);
+        session_mgr.insert_test_caster("positive", 10);
+        session_mgr.set_test_pressure("negative", -0.1);
+        session_mgr.set_test_pressure("positive", 0.5);
+
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let candidates = vec![
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler.clone())),
+                caster_id: Some("positive".into()),
+            },
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler)),
+                caster_id: Some("negative".into()),
+            },
+        ];
+
+        let resolver = LeastLoadResolver::new(session_mgr);
+        let picked = resolver.pick("echo", &candidates).unwrap();
+        // 负 pressure 意味着更低负载，应该被优先选中
+        assert_eq!(
+            picked.caster_id.as_deref(),
+            Some("negative"),
+            "negative pressure caster should be preferred over positive pressure"
+        );
+    }
+
+    #[test]
+    fn least_load_resolver_falls_back_to_available_permits_without_pressure() {
+        let session_mgr = Arc::new(SessionManager::new_dev(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+        ));
+        session_mgr.insert_test_caster("busy", 10);
+        session_mgr.insert_test_caster("idle", 10);
+        let _busy_permit_a = session_mgr.acquire_test_permit("busy");
+        let _busy_permit_b = session_mgr.acquire_test_permit("busy");
+
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let candidates = vec![
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler.clone())),
+                caster_id: Some("busy".into()),
+            },
+            RuneEntry {
+                config: RuneConfig {
+                    name: "echo".into(),
+                    ..Default::default()
+                },
+                invoker: Arc::new(LocalInvoker::new(handler)),
+                caster_id: Some("idle".into()),
+            },
+        ];
+
+        let resolver = LeastLoadResolver::new(session_mgr);
+        let picked = resolver.pick("echo", &candidates).unwrap();
+        assert_eq!(picked.caster_id.as_deref(), Some("idle"));
     }
 }

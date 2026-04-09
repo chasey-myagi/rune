@@ -219,6 +219,22 @@ impl Default for RateLimitConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ScalingConfig {
+    pub enabled: bool,
+    pub eval_interval_secs: u64,
+}
+
+impl Default for ScalingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            eval_interval_secs: 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LogConfig {
     pub level: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -258,6 +274,7 @@ pub struct AppConfig {
     pub resolver: ResolverConfig,
     pub retry: RetryConfig,
     pub rate_limit: RateLimitConfig,
+    pub scaling: ScalingConfig,
     pub log: LogConfig,
     pub telemetry: TelemetryConfig,
     pub tls: TlsConfig,
@@ -330,10 +347,12 @@ impl AppConfig {
     pub fn apply_env_overrides(&mut self) {
         macro_rules! env_override {
             ($var:expr, $field:expr, $ty:ty) => {
-                if let Ok(v) = std::env::var($var) {
-                    match v.parse::<$ty>() {
+                if let Ok(val) = std::env::var($var) {
+                    match val.parse::<$ty>() {
                         Ok(parsed) => $field = parsed,
-                        Err(_) => {}
+                        Err(e) => {
+                            tracing::warn!(env = $var, value = %val, error = %e, "failed to parse env override, using default");
+                        }
                     }
                 }
             };
@@ -464,6 +483,14 @@ impl AppConfig {
             "RUNE_RATE_LIMIT__DEFAULT_CASTER_MAX_CONCURRENT",
             self.rate_limit.default_caster_max_concurrent,
             u32
+        );
+
+        // Scaling
+        env_override!("RUNE_SCALING__ENABLED", self.scaling.enabled, bool);
+        env_override!(
+            "RUNE_SCALING__EVAL_INTERVAL_SECS",
+            self.scaling.eval_interval_secs,
+            u64
         );
 
         // Log
@@ -603,5 +630,32 @@ http_port = 19999
         "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.auth.initial_admin_key.is_none());
+    }
+
+    #[test]
+    fn scaling_config_from_toml() {
+        let toml_str = r#"
+        [scaling]
+        enabled = true
+        eval_interval_secs = 12
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.scaling.enabled);
+        assert_eq!(config.scaling.eval_interval_secs, 12);
+    }
+
+    #[test]
+    fn scaling_config_env_overrides_apply() {
+        std::env::set_var("RUNE_SCALING__ENABLED", "true");
+        std::env::set_var("RUNE_SCALING__EVAL_INTERVAL_SECS", "9");
+
+        let mut config = AppConfig::default();
+        config.apply_env_overrides();
+
+        assert!(config.scaling.enabled);
+        assert_eq!(config.scaling.eval_interval_secs, 9);
+
+        std::env::remove_var("RUNE_SCALING__ENABLED");
+        std::env::remove_var("RUNE_SCALING__EVAL_INTERVAL_SECS");
     }
 }

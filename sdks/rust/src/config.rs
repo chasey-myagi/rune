@@ -105,6 +105,10 @@ pub struct CasterConfig {
     pub reconnect_max_delay_secs: f64,
     /// Caster labels for metadata.
     pub labels: HashMap<String, String>,
+    /// Optional auto-scaling policy for Pilot discovery and scaling metadata.
+    pub scale_policy: Option<ScalePolicy>,
+    /// Optional load report metadata included with health updates.
+    pub load_report: Option<LoadReport>,
 }
 
 impl Default for CasterConfig {
@@ -118,6 +122,53 @@ impl Default for CasterConfig {
             reconnect_base_delay_secs: 1.0,
             reconnect_max_delay_secs: 30.0,
             labels: HashMap::new(),
+            scale_policy: None,
+            load_report: None,
         }
     }
+}
+
+/// Scaling metadata advertised to the Runtime and local Pilot.
+#[derive(Debug, Clone)]
+pub struct ScalePolicy {
+    pub group: String,
+    pub scale_up_threshold: f64,
+    pub scale_down_threshold: f64,
+    pub sustained_secs: u64,
+    pub min_replicas: u32,
+    pub max_replicas: u32,
+    pub spawn_command: String,
+    pub shutdown_signal: String,
+}
+
+impl ScalePolicy {
+    pub fn new(group: impl Into<String>, spawn_command: impl Into<String>) -> Self {
+        Self {
+            group: group.into(),
+            spawn_command: spawn_command.into(),
+            ..Default::default()
+        }
+    }
+}
+
+impl Default for ScalePolicy {
+    fn default() -> Self {
+        Self {
+            group: String::new(),
+            scale_up_threshold: 0.8,
+            scale_down_threshold: 0.2,
+            sustained_secs: 30,
+            min_replicas: 1,
+            max_replicas: 1,
+            spawn_command: String::new(),
+            shutdown_signal: "SIGTERM".into(),
+        }
+    }
+}
+
+/// Additional load telemetry sent with health reports.
+#[derive(Debug, Clone, Default)]
+pub struct LoadReport {
+    pub pressure: f64,
+    pub metrics: HashMap<String, f64>,
 }

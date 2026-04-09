@@ -13,18 +13,14 @@ use rune_proto::rune_service_server::RuneServiceServer;
 use std::sync::Arc;
 
 fn resolver_from_strategy(strategy: &str, session_mgr: &Arc<SessionManager>) -> Arc<dyn Resolver> {
-    match strategy {
+    let inner: Arc<dyn Resolver> = match strategy {
         "random" => Arc::new(RandomResolver),
-        "least_load" => Arc::new(HealthAwareResolver::new(
-            Arc::new(LeastLoadResolver::new(Arc::clone(session_mgr))),
-            Arc::clone(session_mgr),
-        )),
-        "priority" => Arc::new(HealthAwareResolver::new(
-            Arc::new(PriorityResolver::new(Arc::new(RoundRobinResolver::new()))),
-            Arc::clone(session_mgr),
-        )),
+        "least_load" => Arc::new(LeastLoadResolver::new(Arc::clone(session_mgr))),
+        "priority" => Arc::new(PriorityResolver::new(Arc::new(RoundRobinResolver::new()))),
         _ => Arc::new(RoundRobinResolver::new()), // "round_robin" and fallback
-    }
+    };
+
+    Arc::new(HealthAwareResolver::new(inner, Arc::clone(session_mgr)))
 }
 
 fn build_relay(retry: &RetryConfig) -> Arc<Relay> {
@@ -54,14 +50,16 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         let config = AppConfig::default();
+        let session_mgr = Arc::new(SessionManager::new_dev_with_default_max_concurrent(
+            config.heartbeat_interval(),
+            config.heartbeat_timeout(),
+            config.rate_limit.default_caster_max_concurrent as usize,
+        ));
+        let resolver = resolver_from_strategy(&config.resolver.strategy, &session_mgr);
         Self {
             relay: Arc::new(Relay::new()),
-            resolver: Arc::new(RoundRobinResolver::new()),
-            session_mgr: Arc::new(SessionManager::new_dev_with_default_max_concurrent(
-                config.heartbeat_interval(),
-                config.heartbeat_timeout(),
-                config.rate_limit.default_caster_max_concurrent as usize,
-            )),
+            resolver,
+            session_mgr,
             config,
         }
     }
@@ -163,6 +161,7 @@ mod tests {
         make_handler, GateConfig, RuneConfig, RuneContext, RuneError, StreamRuneHandler,
         StreamSender,
     };
+    use crate::session::HealthStatusLevel;
     use bytes::Bytes;
     use std::time::Duration;
 
@@ -216,6 +215,40 @@ mod tests {
     fn app_new_session_manager_has_zero_casters() {
         let app = App::new();
         assert_eq!(app.session_mgr.caster_count(), 0);
+    }
+
+    #[test]
+    fn test_fix_app_new_default_resolver_prefers_healthy_caster() {
+        let app = App::new();
+        app.session_mgr.insert_test_caster("degraded", 1);
+        app.session_mgr.insert_test_caster("healthy", 1);
+        app.session_mgr
+            .set_test_health("degraded", HealthStatusLevel::Degraded);
+
+        app.relay
+            .register(
+                echo_config("echo"),
+                Arc::new(LocalInvoker::new(echo_handler())),
+                Some("degraded".into()),
+            )
+            .unwrap();
+        app.relay
+            .register(
+                echo_config("echo"),
+                Arc::new(LocalInvoker::new(echo_handler())),
+                Some("healthy".into()),
+            )
+            .unwrap();
+
+        let picked = app
+            .relay
+            .select_entry("echo", &*app.resolver)
+            .expect("resolver should pick a candidate");
+        assert_eq!(
+            picked.caster_id.as_deref(),
+            Some("healthy"),
+            "default resolver should filter out degraded candidates when a healthy caster exists"
+        );
     }
 
     // ========================================================================

@@ -242,6 +242,7 @@ pub async fn execute_rune(
         }
     };
     let invoker = Arc::clone(&selected_entry.invoker);
+    let selected_caster_id = selected_entry.caster_id.clone();
 
     // Keep validation/stream capability aligned with the selected candidate.
     let input_schema = selected_entry.config.input_schema.clone();
@@ -300,12 +301,28 @@ pub async fn execute_rune(
 
     // async mode
     if params.async_mode.unwrap_or(false) {
-        return async_execute(state, invoker, ctx, rune_input, request_id).await;
+        return async_execute(
+            state,
+            invoker,
+            ctx,
+            rune_input,
+            request_id,
+            selected_caster_id,
+        )
+        .await;
     }
 
     // stream mode
     if params.stream.unwrap_or(false) {
-        return stream_execute(state, &request_id, invoker, ctx, rune_input).await;
+        return stream_execute(
+            state,
+            &request_id,
+            invoker,
+            ctx,
+            rune_input,
+            selected_caster_id,
+        )
+        .await;
     }
 
     // sync mode (default)
@@ -341,7 +358,7 @@ pub async fn execute_rune(
             request_id: req_id,
             rune_name: rune_name_owned,
             mode: mode.into(),
-            caster_id: None,
+            caster_id: selected_caster_id,
             latency_ms,
             status_code,
             input_size,
@@ -387,9 +404,7 @@ pub async fn sync_execute(
             }
             match serde_json::from_slice::<serde_json::Value>(&output) {
                 Ok(json) => {
-                    let output_size = serde_json::to_vec(&json)
-                        .map(|bytes| bytes.len() as i64)
-                        .unwrap_or(output.len() as i64);
+                    let output_size = output.len() as i64;
                     let mut response = (StatusCode::OK, Json(json)).into_response();
                     apply_trace_response_headers(&mut response, &request_id, &trace_context);
                     (response, output_size)
@@ -485,6 +500,7 @@ pub async fn stream_execute(
     invoker: Arc<dyn RuneInvoker>,
     ctx: RuneContext,
     body: Bytes,
+    caster_id: Option<String>,
 ) -> axum::response::Response {
     let trace_context = ctx.context.clone();
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
@@ -547,7 +563,7 @@ pub async fn stream_execute(
                 request_id: req_id,
                 rune_name: rune_name_log,
                 mode: "stream".into(),
-                caster_id: None,
+                caster_id,
                 latency_ms,
                 status_code,
                 input_size,
@@ -569,11 +585,15 @@ pub async fn async_execute(
     ctx: RuneContext,
     body: Bytes,
     request_id: String,
+    caster_id: Option<String>,
 ) -> axum::response::Response {
     let trace_context = ctx.context.clone();
     let task_id = request_id.clone();
     let rune_name = ctx.rune_name.clone();
-    let input_str = String::from_utf8_lossy(&body).to_string();
+    let input_str = match std::str::from_utf8(&body) {
+        Ok(s) => s.to_string(),
+        Err(_) => format!("hex:{}", hex::encode(&body)),
+    };
 
     // Insert task into store
     if let Err(e) = state
@@ -664,7 +684,7 @@ pub async fn async_execute(
                 request_id: task_id,
                 rune_name: rune_name_log,
                 mode: "async".into(),
-                caster_id: None,
+                caster_id,
                 latency_ms,
                 status_code: status,
                 input_size,

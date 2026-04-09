@@ -36,6 +36,20 @@ export interface FileAttachment {
     data: Buffer;
     mimeType: string;
 }
+export interface ScalePolicy {
+    group: string;
+    scaleUpThreshold?: number;
+    scaleDownThreshold?: number;
+    sustainedSecs?: number;
+    minReplicas?: number;
+    maxReplicas?: number;
+    spawnCommand: string;
+    shutdownSignal?: string;
+}
+export interface LoadReport {
+    pressure: number;
+    metrics?: Record<string, number>;
+}
 /**
  * Context passed to every Rune handler invocation.
  */
@@ -51,6 +65,8 @@ export interface RuneContext {
     /** File attachments from the request (if any) */
     attachments?: FileAttachment[];
 }
+export declare function getTraceId(ctx: RuneContext): string | undefined;
+export declare function getParentRequestId(ctx: RuneContext): string | undefined;
 /**
  * Options for constructing a Caster instance.
  */
@@ -67,6 +83,10 @@ export interface CasterOptions {
     maxConcurrent?: number;
     /** Caster labels for metadata */
     labels?: Record<string, string>;
+    /** Optional auto-scaling policy announced to the Runtime and local Pilot */
+    scalePolicy?: ScalePolicy;
+    /** Optional static load report metadata sent with health updates */
+    loadReport?: LoadReport;
     /** Reconnection options */
     reconnect?: ReconnectOptions;
 }

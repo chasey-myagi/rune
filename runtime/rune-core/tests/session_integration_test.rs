@@ -84,6 +84,7 @@ fn make_attach_msg_with_key(
             labels: Default::default(),
             max_concurrent,
             key: key.into(),
+            role: "caster".into(),
         })),
     }
 }

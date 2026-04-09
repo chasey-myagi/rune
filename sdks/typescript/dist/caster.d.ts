@@ -1,5 +1,13 @@
-import type { CasterOptions, RuneConfig, ReconnectOptions } from './types.js';
+import * as grpc from '@grpc/grpc-js';
+import type { CasterOptions, RuneConfig, ReconnectOptions, ScalePolicy, LoadReport } from './types.js';
 import type { RuneHandler, RuneHandlerWithFiles, StreamRuneHandler, StreamRuneHandlerWithFiles } from './handler.js';
+/**
+ * @internal Exposed for testing — returns the cached proto reference.
+ */
+export declare function _getProtoCache(): {
+    RuneServiceClient: grpc.ServiceClientConstructor;
+    SessionMessage: Record<string, unknown>;
+} | null;
 /**
  * Caster connects to a Rune Runtime and registers Rune handlers.
  *
@@ -21,11 +29,14 @@ export declare class Caster {
     readonly heartbeatIntervalMs: number;
     readonly maxConcurrent: number;
     readonly labels: Record<string, string>;
+    readonly scalePolicy?: ScalePolicy;
+    readonly loadReport?: LoadReport;
     readonly reconnect: Required<ReconnectOptions>;
     private _runes;
     private _stopped;
     private _abortControllers;
     private _activeStream;
+    private _activeRequests;
     constructor(options: CasterOptions);
     /**
      * Register a unary Rune handler.
@@ -65,6 +76,13 @@ export declare class Caster {
      */
     run(): Promise<void>;
     private _connectAndRun;
+    /**
+     * Build the CasterAttach message object.
+     * Extracted for testability — mirrors Rust SDK's build_attach_message().
+     */
+    private _buildAttachMessage;
+    private _attachLabels;
+    private _buildHealthReport;
     private _buildDeclarations;
     private _handleExecute;
     private _executeOnce;

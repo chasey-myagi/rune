@@ -55,6 +55,13 @@ impl CircuitBreaker {
             return Ok(CBPermit::new(Arc::clone(self), false));
         }
 
+        // Safety: we deliberately recover from mutex poisoning here.
+        // CircuitBreaker inner state (counters + state enum) is always
+        // self-consistent — a panic during a previous lock hold cannot
+        // leave it in a partially-updated state because each method
+        // writes all dependent fields atomically within a single
+        // critical section.  Propagating the poison would bring down
+        // the entire runtime for a single caster's transient failure.
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match inner.state {
             CBState::Closed => Ok(CBPermit::new(Arc::clone(self), false)),

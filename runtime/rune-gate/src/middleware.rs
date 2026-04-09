@@ -12,7 +12,8 @@ use crate::state::GateState;
 fn is_exempt(path: &str, exempt_routes: &[String]) -> bool {
     exempt_routes.iter().any(|r| {
         path == r.as_str()
-            || (path.starts_with(r.as_str())
+            || (r.as_str() != "/"
+                && path.starts_with(r.as_str())
                 && (r.ends_with('/') || path.as_bytes().get(r.len()) == Some(&b'/')))
     })
 }
@@ -84,66 +85,35 @@ fn resolve_rune_name_for_rate_limit(state: &GateState, method: &str, path: &str)
         .or_else(|| state.rune.relay.resolve_by_gate_path(method, path))
 }
 
-/// Check whether the candidate that the resolver would actually pick has
-/// exhausted its capacity. This avoids the TOCTOU where a low-priority or
-/// degraded caster with free permits suppresses a 429 even though the
-/// resolver would route to a saturated high-priority/healthy caster.
-fn caster_capacity_exhausted(
+/// Resolve the concrete rune entry once so middleware and handlers can
+/// reuse the same scheduling decision.
+fn select_rune_entry(
     state: &GateState,
     rune_name: &str,
     labels: &std::collections::HashMap<String, String>,
-) -> bool {
-    caster_capacity_exhausted_with_resolver(
-        &state.rune.relay,
-        &state.rune.session_mgr,
-        &state.rune.resolver,
-        rune_name,
-        labels,
-    )
+) -> Option<rune_core::relay::RuneEntry> {
+    select_rune_entry_with_resolver(&state.rune.relay, &state.rune.resolver, rune_name, labels)
 }
 
-fn caster_capacity_exhausted_with_resolver(
+fn select_rune_entry_with_resolver(
     relay: &rune_core::relay::Relay,
-    session_mgr: &rune_core::session::SessionManager,
     resolver: &Arc<dyn rune_core::resolver::Resolver>,
     rune_name: &str,
     labels: &std::collections::HashMap<String, String>,
+) -> Option<rune_core::relay::RuneEntry> {
+    if labels.is_empty() {
+        relay.select_entry(rune_name, resolver.as_ref())
+    } else {
+        relay.select_entry_with_labels(rune_name, labels, resolver.as_ref())
+    }
+}
+
+fn caster_capacity_exhausted(
+    session_mgr: &rune_core::session::SessionManager,
+    selected_entry: &rune_core::relay::RuneEntry,
 ) -> bool {
-    let Some(entries) = relay.find(rune_name) else {
-        return false;
-    };
-
-    // Apply label filter to get effective candidates.
-    let candidates: Vec<&rune_core::relay::RuneEntry> = entries
-        .value()
-        .iter()
-        .filter(|entry| {
-            labels.is_empty()
-                || labels
-                    .iter()
-                    .all(|(k, v)| entry.config.labels.get(k) == Some(v))
-        })
-        .collect();
-
-    if candidates.is_empty() {
-        return false;
-    }
-
-    // If any candidate is local (in-process), never backpressure.
-    if candidates.iter().any(|e| e.caster_id.is_none()) {
-        return false;
-    }
-
-    // Use the resolver to determine which candidate would be picked.
-    // Build a temporary slice for the resolver.
-    let candidate_vec: Vec<rune_core::relay::RuneEntry> =
-        candidates.iter().map(|e| (*e).clone()).collect();
-    match resolver.pick(rune_name, &candidate_vec) {
-        Some(picked) => match picked.caster_id.as_deref() {
-            Some(caster_id) => session_mgr.available_permits(caster_id) == 0,
-            None => false,
-        },
-        // No candidate picked — let the request through to get a proper 404/503
+    match selected_entry.caster_id.as_deref() {
+        Some(caster_id) => session_mgr.available_permits(caster_id) == 0,
         None => false,
     }
 }
@@ -202,7 +172,7 @@ pub async fn shutdown_middleware(
 
 pub async fn rate_limit_middleware(
     State(state): State<GateState>,
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
     // Skip rate limiting in dev mode or if not configured
@@ -251,8 +221,16 @@ pub async fn rate_limit_middleware(
             return rate_limited_response(retry_after, "per-rune");
         }
 
-        if caster_capacity_exhausted(&state, &rune_name, &labels) {
-            return rate_limited_response(1, "caster");
+        // Pre-select a caster via the resolver and stash in request extensions.
+        // The handler MUST reuse this entry instead of calling the resolver
+        // again — otherwise round-robin (or other stateful resolvers) would
+        // advance twice per request, and the capacity check below would apply
+        // to a different caster than the one the handler ultimately invokes.
+        if let Some(selected_entry) = select_rune_entry(&state, &rune_name, &labels) {
+            if caster_capacity_exhausted(&state.rune.session_mgr, &selected_entry) {
+                return rate_limited_response(1, "caster");
+            }
+            req.extensions_mut().insert(selected_entry);
         }
     }
 
@@ -289,7 +267,24 @@ mod tests {
     fn test_is_exempt_root_path() {
         let routes = vec!["/".to_string()];
         assert!(is_exempt("/", &routes));
-        assert!(is_exempt("/anything", &routes));
+        // After fix: "/" should NOT match everything via prefix
+        assert!(!is_exempt("/anything", &routes));
+    }
+
+    /// Regression m1: is_exempt("/") must NOT match all routes.
+    #[test]
+    fn test_fix_is_exempt_root_does_not_match_all() {
+        let routes = vec!["/".to_string(), "/health".to_string()];
+        // "/" exact match
+        assert!(is_exempt("/", &routes));
+        // "/health" exact match via second entry
+        assert!(is_exempt("/health", &routes));
+        // "/foo" must NOT match — "/" should be exact only
+        assert!(
+            !is_exempt("/foo", &routes),
+            "is_exempt with '/' in exempt list must not match arbitrary paths"
+        );
+        assert!(!is_exempt("/anything/else", &routes));
     }
 
     #[test]
@@ -389,17 +384,18 @@ mod tests {
             session_mgr.clone(),
         ));
 
-        let exhausted = caster_capacity_exhausted_with_resolver(
+        let selected = select_rune_entry_with_resolver(
             &relay,
-            &session_mgr,
             &resolver,
             "echo",
             &std::collections::HashMap::new(),
-        );
+        )
+        .expect("resolver should select a candidate");
         assert!(
-            exhausted,
+            caster_capacity_exhausted(&session_mgr, &selected),
             "should report exhausted because the resolver would pick the saturated healthy caster"
         );
+        assert_eq!(selected.caster_id.as_deref(), Some("caster_a"));
     }
 
     #[test]

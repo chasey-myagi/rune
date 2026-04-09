@@ -1,4 +1,4 @@
-use crate::models::CallLog;
+use crate::models::{CallLog, CasterCallStats};
 use crate::store::{RuneStore, StoreResult};
 
 impl RuneStore {
@@ -202,6 +202,82 @@ impl RuneStore {
         })
         .await?
     }
+
+    pub async fn call_stats_by_caster(&self) -> StoreResult<Vec<CasterCallStats>> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.reader();
+            let mut agg_stmt = conn.prepare(
+                "SELECT \
+                     caster_id, \
+                     COUNT(*) as total, \
+                     CAST(COALESCE(AVG(latency_ms), 0) AS INTEGER) as avg_latency, \
+                     SUM(CASE WHEN status_code >= 200 AND status_code < 300 \
+                         THEN 1 ELSE 0 END) as success_count \
+                 FROM call_logs \
+                 WHERE caster_id IS NOT NULL \
+                 GROUP BY caster_id \
+                 ORDER BY caster_id",
+            )?;
+
+            struct AggRow {
+                caster_id: String,
+                count: i64,
+                avg_latency_ms: i64,
+                success_rate: f64,
+            }
+
+            let aggs: Vec<AggRow> = agg_stmt
+                .query_map([], |row| {
+                    let count: i64 = row.get(1)?;
+                    let success_count: i64 = row.get(3)?;
+                    Ok(AggRow {
+                        caster_id: row.get(0)?,
+                        count,
+                        avg_latency_ms: row.get(2)?,
+                        success_rate: if count > 0 {
+                            success_count as f64 / count as f64
+                        } else {
+                            0.0
+                        },
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let mut p95_stmt = conn.prepare(
+                "WITH ranked AS (
+                    SELECT caster_id, latency_ms,
+                           ROW_NUMBER() OVER (PARTITION BY caster_id ORDER BY latency_ms ASC) as rn,
+                           COUNT(*) OVER (PARTITION BY caster_id) as cnt
+                    FROM call_logs
+                    WHERE caster_id IS NOT NULL
+                )
+                SELECT caster_id, latency_ms
+                FROM ranked
+                WHERE rn = CAST((cnt * 95 + 99) / 100 AS INTEGER)
+                ORDER BY caster_id",
+            )?;
+            let p95_map: std::collections::HashMap<String, f64> = p95_stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as f64))
+                })?
+                .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+
+            let results = aggs
+                .into_iter()
+                .map(|agg| CasterCallStats {
+                    p95_latency_ms: p95_map.get(&agg.caster_id).copied().unwrap_or(0.0),
+                    caster_id: agg.caster_id,
+                    count: agg.count,
+                    avg_latency_ms: agg.avg_latency_ms,
+                    success_rate: agg.success_rate,
+                })
+                .collect();
+
+            Ok(results)
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -388,5 +464,53 @@ mod tests {
             "zeta P95 should be ~300, got {}",
             zeta.4
         );
+    }
+
+    #[tokio::test]
+    async fn test_call_stats_by_caster() {
+        use crate::models::CallLog;
+
+        let store = RuneStore::open_in_memory().unwrap();
+        for (request_id, caster_id, latency_ms, status_code) in [
+            ("r1", Some("caster-a"), 100, 200),
+            ("r2", Some("caster-a"), 200, 500),
+            ("r3", Some("caster-b"), 300, 200),
+            ("r4", None, 400, 200),
+        ] {
+            store
+                .insert_log(&CallLog {
+                    id: 0,
+                    request_id: request_id.into(),
+                    rune_name: "echo".into(),
+                    mode: "sync".into(),
+                    caster_id: caster_id.map(ToString::to_string),
+                    latency_ms,
+                    status_code,
+                    input_size: 10,
+                    output_size: 20,
+                    timestamp: "2025-01-01T00:00:00Z".into(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let stats = store.call_stats_by_caster().await.unwrap();
+        assert_eq!(stats.len(), 2);
+
+        let caster_a = stats
+            .iter()
+            .find(|row| row.caster_id == "caster-a")
+            .expect("caster-a stats should exist");
+        assert_eq!(caster_a.count, 2);
+        assert_eq!(caster_a.avg_latency_ms, 150);
+        assert!((caster_a.success_rate - 0.5).abs() < 0.001);
+
+        let caster_b = stats
+            .iter()
+            .find(|row| row.caster_id == "caster-b")
+            .expect("caster-b stats should exist");
+        assert_eq!(caster_b.count, 1);
+        assert_eq!(caster_b.avg_latency_ms, 300);
+        assert!((caster_b.success_rate - 1.0).abs() < 0.001);
     }
 }

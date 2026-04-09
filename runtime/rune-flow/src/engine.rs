@@ -109,6 +109,21 @@ impl FlowEngine {
         self.flows.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Check if any existing flow (other than `exclude_name`) uses the given gate_path.
+    /// Returns the name of the conflicting flow, if any.
+    pub fn find_by_gate_path(&self, gate_path: &str, exclude_name: &str) -> Option<&str> {
+        self.flows.values().find_map(|f| {
+            if f.name != exclude_name {
+                if let Some(ref gp) = f.gate_path {
+                    if gp == gate_path {
+                        return Some(f.name.as_str());
+                    }
+                }
+            }
+            None
+        })
+    }
+
     pub fn remove(&mut self, name: &str) -> bool {
         self.flows.remove(name).is_some()
     }

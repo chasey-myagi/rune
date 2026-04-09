@@ -1,5 +1,7 @@
 use clap::Parser;
-use rune_cli::{Cli, Commands, ConfigCommands, FlowCommands, KeyCommands, TaskCommands};
+use rune_cli::{
+    Cli, Commands, ConfigCommands, FlowCommands, KeyCommands, PilotCommands, TaskCommands,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -76,6 +78,13 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Casters => rune_cli::commands::casters::run(&client, json_mode).await,
+        Commands::Pilot(cmd) => match cmd {
+            PilotCommands::Daemon { runtime } => {
+                rune_cli::commands::pilot::run_daemon(&runtime, json_mode).await
+            }
+            PilotCommands::Status => rune_cli::commands::pilot::status(json_mode).await,
+            PilotCommands::Stop => rune_cli::commands::pilot::stop(json_mode).await,
+        },
         Commands::Key(cmd) => match cmd {
             KeyCommands::Create { key_type, label } => {
                 rune_cli::commands::key::create(&client, &key_type, &label, json_mode).await

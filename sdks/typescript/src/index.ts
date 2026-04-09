@@ -5,6 +5,8 @@ export type {
   RuneContext,
   FileAttachment,
   CasterOptions,
+  ScalePolicy,
+  LoadReport,
   ReconnectOptions,
 } from './types.js';
 export { getTraceId, getParentRequestId } from './types.js';
@@ -19,4 +21,5 @@ export type {
 
 // Classes
 export { Caster } from './caster.js';
+export { PilotClient } from './pilot-client.js';
 export { StreamSender } from './stream.js';

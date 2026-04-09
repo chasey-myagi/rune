@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from rune import Caster, RuneConfig, RuneContext, FileAttachment, StreamSender
+from rune import Caster, FileAttachment, LoadReport, RuneConfig, RuneContext, ScalePolicy, StreamSender
 
 
 # ============================================================
@@ -769,6 +769,26 @@ def test_c02b_attach_message_labels_defaults_empty():
 
     msg = c._build_attach_message()
     assert dict(msg.attach.labels) == {}
+
+
+def test_c03_attach_message_contains_role_and_scaling_labels():
+    """C-03: CasterAttach message includes caster role and auto-scaling labels."""
+    c = Caster(
+        "localhost:50070",
+        caster_id="test",
+        scale_policy=ScalePolicy(group="gpu", spawn_command="python worker.py", max_replicas=4),
+        load_report=LoadReport(pressure=0.5, metrics={"queue_depth": 4}),
+    )
+
+    @c.rune("echo")
+    async def echo(ctx, input):
+        return input
+
+    msg = c._build_attach_message("pilot-1")
+    assert msg.attach.role == "caster"
+    assert dict(msg.attach.labels)["group"] == "gpu"
+    assert dict(msg.attach.labels)["_pilot_id"] == "pilot-1"
+    assert dict(msg.attach.labels)["_spawn_command"] == "python worker.py"
 
 
 # ============================================================

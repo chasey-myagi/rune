@@ -5,6 +5,7 @@ pub mod flow;
 pub mod key;
 pub mod list;
 pub mod logs;
+pub mod pilot;
 pub mod start;
 pub mod status;
 pub mod stop;

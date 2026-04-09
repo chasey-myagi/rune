@@ -24,7 +24,15 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
         .route("/api/v1/status", get(handlers::mgmt::mgmt_status))
         .route("/api/v1/casters", get(handlers::mgmt::mgmt_casters))
         .route("/api/v1/stats", get(handlers::mgmt::mgmt_stats))
+        .route(
+            "/api/v1/stats/casters",
+            get(handlers::mgmt::mgmt_caster_stats),
+        )
         .route("/api/v1/logs", get(handlers::mgmt::mgmt_logs))
+        .route(
+            "/api/v1/scaling/status",
+            get(handlers::mgmt::mgmt_scaling_status),
+        )
         .route(
             "/api/v1/keys",
             get(handlers::mgmt::mgmt_list_keys).post(handlers::mgmt::mgmt_create_key),

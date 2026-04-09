@@ -121,6 +121,10 @@ pub enum Commands {
     /// View connected Casters
     Casters,
 
+    /// Manage the local Pilot daemon
+    #[command(subcommand)]
+    Pilot(PilotCommands),
+
     /// API Key management
     #[command(subcommand)]
     Key(KeyCommands),
@@ -257,6 +261,22 @@ pub enum FlowCommands {
         /// Flow name
         name: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PilotCommands {
+    /// Run the Pilot daemon in the foreground
+    Daemon {
+        /// Runtime gRPC address, e.g. localhost:50070
+        #[arg(long)]
+        runtime: String,
+    },
+
+    /// Show local Pilot status
+    Status,
+
+    /// Stop the local Pilot daemon
+    Stop,
 }
 
 #[derive(Subcommand, Debug)]

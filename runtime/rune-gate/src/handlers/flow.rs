@@ -84,6 +84,20 @@ pub async fn create_flow(
         );
     }
 
+    // Check gate_path conflict with existing flows
+    if let Some(ref gate_path) = flow.gate_path {
+        if let Some(existing) = engine.find_by_gate_path(gate_path, &flow.name) {
+            return error_response(
+                StatusCode::CONFLICT,
+                "CONFLICT",
+                &format!(
+                    "gate_path '{}' is already used by flow '{}'",
+                    gate_path, existing
+                ),
+            );
+        }
+    }
+
     if let Err(e) = engine.register(flow.clone()) {
         return error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string());
     }
@@ -372,8 +386,9 @@ pub async fn run_flow_async(
                     "output": val,
                     "steps_executed": result.steps_executed,
                 });
+                // CAS: only complete if not already cancelled
                 let _ = store
-                    .update_task_status(
+                    .complete_task_if_not_cancelled(
                         &tid,
                         TaskStatus::Completed,
                         Some(&combined.to_string()),
@@ -382,8 +397,14 @@ pub async fn run_flow_async(
                     .await;
             }
             Err(e) => {
+                // CAS: only mark failed if not already cancelled
                 let _ = store
-                    .update_task_status(&tid, TaskStatus::Failed, None, Some(&e.to_string()))
+                    .complete_task_if_not_cancelled(
+                        &tid,
+                        TaskStatus::Failed,
+                        None,
+                        Some(&e.to_string()),
+                    )
                     .await;
             }
         }

@@ -104,6 +104,15 @@ pub struct CallLog {
     pub timestamp: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CasterCallStats {
+    pub caster_id: String,
+    pub count: i64,
+    pub avg_latency_ms: i64,
+    pub success_rate: f64,
+    pub p95_latency_ms: f64,
+}
+
 /// Rune snapshot — latest known state of a registered rune.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuneSnapshot {

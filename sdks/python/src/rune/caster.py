@@ -11,7 +11,8 @@ from typing import Callable, Awaitable
 
 import grpc
 
-from .types import RuneConfig, RuneContext, FileAttachment
+from .pilot_client import PilotClient
+from .types import FileAttachment, LoadReport, RuneConfig, RuneContext, ScalePolicy
 from .stream import StreamSender
 from .handler import RegisteredRune, OnceHandler
 
@@ -35,6 +36,8 @@ class Caster:
         heartbeat_interval: float = 10.0,
         labels: dict[str, str] | None = None,
         api_key: str | None = None,
+        scale_policy: ScalePolicy | None = None,
+        load_report: LoadReport | None = None,
     ) -> None:
         self._addr = addr
         self._caster_id = caster_id
@@ -46,7 +49,10 @@ class Caster:
         self._heartbeat_interval = heartbeat_interval
         self._labels = labels or {}
         self._api_key = api_key
+        self._scale_policy = scale_policy
+        self._load_report = load_report
         self._shutdown = threading.Event()
+        self._active_requests = 0
 
     # ------------------------------------------------------------------
     # Decorator API
@@ -120,6 +126,15 @@ class Caster:
 
         return decorator
 
+    def scaler(self, *, policy: ScalePolicy) -> Callable:
+        """Decorator to attach a scaling policy to the caster."""
+
+        def decorator(fn: Callable) -> Callable:
+            self._scale_policy = policy
+            return fn
+
+        return decorator
+
     # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------
@@ -139,32 +154,46 @@ class Caster:
     async def _run_with_reconnect(self) -> None:
         """Reconnect loop with exponential backoff."""
         delay = self._reconnect_base_delay
-        while not self._shutdown.is_set():
-            try:
-                await self._session()
-                # Session ended normally (detach) -- don't reconnect
-                logger.info("session ended normally")
-                break
-            except grpc.aio.AioRpcError as e:
-                if self._shutdown.is_set():
-                    break
-                logger.warning("gRPC error: %s, reconnecting in %.1fs", e.code(), delay)
-            except Exception as e:
-                if self._shutdown.is_set():
-                    break
-                logger.warning("session error: %s, reconnecting in %.1fs", e, delay)
+        pilot = None
+        pilot_id = None
+        if self._scale_policy is not None:
+            pilot = await PilotClient.ensure(self._addr, self._api_key)
+            await pilot.register(self._caster_id, self._scale_policy)
+            pilot_id = pilot.pilot_id
 
-            # Wait for delay or shutdown, whichever comes first
-            if self._shutdown.wait(timeout=delay):
-                break  # shutdown requested
-            delay = min(delay * 2, self._reconnect_max_delay)
-            logger.info("reconnecting to %s ...", self._addr)
+        try:
+            while not self._shutdown.is_set():
+                try:
+                    await self._session(pilot_id)
+                    # Session ended normally (detach) -- don't reconnect
+                    logger.info("session ended normally")
+                    break
+                except grpc.aio.AioRpcError as e:
+                    if self._shutdown.is_set():
+                        break
+                    logger.warning("gRPC error: %s, reconnecting in %.1fs", e.code(), delay)
+                except Exception as e:
+                    if self._shutdown.is_set():
+                        break
+                    logger.warning("session error: %s, reconnecting in %.1fs", e, delay)
+
+                # Wait for delay or shutdown, whichever comes first
+                if self._shutdown.wait(timeout=delay):
+                    break  # shutdown requested
+                delay = min(delay * 2, self._reconnect_max_delay)
+                logger.info("reconnecting to %s ...", self._addr)
+        finally:
+            if pilot is not None:
+                try:
+                    await pilot.deregister(self._caster_id)
+                except Exception:
+                    logger.debug("pilot deregister failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Attach message builder
     # ------------------------------------------------------------------
 
-    def _build_attach_message(self) -> rune_pb2.SessionMessage:
+    def _build_attach_message(self, pilot_id: str | None = None) -> rune_pb2.SessionMessage:
         """Build the CasterAttach session message."""
         declarations = []
         for registered in self._runes.values():
@@ -190,9 +219,54 @@ class Caster:
             attach=rune_pb2.CasterAttach(
                 caster_id=self._caster_id,
                 runes=declarations,
-                labels=self._labels,
+                labels=self._attach_labels(pilot_id),
                 max_concurrent=self._max_concurrent,
                 key=self._api_key or "",
+                role="caster",
+            )
+        )
+
+    def _attach_labels(self, pilot_id: str | None = None) -> dict[str, str]:
+        labels = dict(self._labels)
+        if self._scale_policy is not None:
+            labels["group"] = self._scale_policy.group
+            labels["_scale_up"] = str(self._scale_policy.scale_up_threshold)
+            labels["_scale_down"] = str(self._scale_policy.scale_down_threshold)
+            labels["_sustained"] = str(self._scale_policy.sustained_secs)
+            labels["_min"] = str(self._scale_policy.min_replicas)
+            labels["_max"] = str(self._scale_policy.max_replicas)
+            labels["_spawn_command"] = self._scale_policy.spawn_command
+            labels["_shutdown_signal"] = self._scale_policy.shutdown_signal
+            if pilot_id:
+                labels["_pilot_id"] = pilot_id
+        return labels
+
+    def _build_health_report_message(self) -> rune_pb2.SessionMessage:
+        metrics = dict(self._load_report.metrics) if self._load_report is not None else {}
+        metrics.setdefault("active_requests", float(self._active_requests))
+        metrics.setdefault("max_concurrent", float(self._max_concurrent))
+        metrics.setdefault(
+            "available_permits",
+            float(max(0, self._max_concurrent - self._active_requests)),
+        )
+        computed_pressure = (
+            0.0 if self._max_concurrent == 0 else self._active_requests / self._max_concurrent
+        )
+        pressure = (
+            self._load_report.pressure
+            if self._load_report is not None and self._load_report.pressure > 0.0
+            else computed_pressure
+        )
+        return rune_pb2.SessionMessage(
+            health_report=rune_pb2.HealthReport(
+                status=rune_pb2.HEALTH_STATUS_HEALTHY,
+                active_requests=self._active_requests,
+                error_rate=0.0,
+                custom_info="",
+                timestamp_ms=int(time.time() * 1000),
+                error_rate_window_secs=0,
+                pressure=pressure,
+                metrics=metrics,
             )
         )
 
@@ -200,7 +274,7 @@ class Caster:
     # Session
     # ------------------------------------------------------------------
 
-    async def _session(self) -> None:
+    async def _session(self, pilot_id: str | None = None) -> None:
         """Run one gRPC session."""
         async with grpc.aio.insecure_channel(self._addr) as channel:
             stub = rune_pb2_grpc.RuneServiceStub(channel)
@@ -218,7 +292,7 @@ class Caster:
             call = stub.Session(outbound_iter())
 
             # Build and send attach message
-            attach_msg = self._build_attach_message()
+            attach_msg = self._build_attach_message(pilot_id)
             await outbound_queue.put(attach_msg)
 
             # Start heartbeat task
@@ -246,6 +320,8 @@ class Caster:
                                 self._addr,
                                 self._caster_id,
                             )
+                            if self._scale_policy is not None:
+                                await outbound_queue.put(self._build_health_report_message())
                         else:
                             logger.error("attach rejected: %s", msg.attach_ack.reason)
                             break
@@ -260,6 +336,11 @@ class Caster:
 
                     elif payload == "heartbeat":
                         pass  # server heartbeat received
+
+                    elif payload == "shutdown":
+                        logger.info("shutdown requested: %s", msg.shutdown.reason)
+                        self.stop()
+                        break
 
             finally:
                 shutdown_task.cancel()
@@ -281,6 +362,8 @@ class Caster:
                     )
                 )
                 await queue.put(msg)
+                if self._scale_policy is not None:
+                    await queue.put(self._build_health_report_message())
         except asyncio.CancelledError:
             pass
 
@@ -315,6 +398,7 @@ class Caster:
             request_id=req.request_id,
             context=dict(req.context),
         )
+        self._active_requests += 1
 
         try:
             if registered.is_stream:
@@ -338,6 +422,7 @@ class Caster:
         finally:
             # NF-8: Always clean up the cancelled set to prevent unbounded growth
             self._cancelled.discard(req.request_id)
+            self._active_requests = max(0, self._active_requests - 1)
 
     async def _execute_once(
         self,

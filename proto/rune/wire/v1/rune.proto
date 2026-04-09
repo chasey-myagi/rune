@@ -21,6 +21,8 @@ message SessionMessage {
         AttachAck attach_ack = 20;
         ExecuteRequest execute = 21;
         CancelRequest cancel = 22;
+        ScaleSignal scale_signal = 23;
+        ShutdownRequest shutdown = 24;
 
         // 双向
         Heartbeat heartbeat = 30;
@@ -35,6 +37,7 @@ message CasterAttach {
     map<string, string> labels = 3;
     uint32 max_concurrent = 4;
     string key = 5;              // Caster 认证密钥（dev 模式下可省略）
+    string role = 6;             // "caster" (default) | "pilot"
 }
 
 message AttachAck {
@@ -90,6 +93,19 @@ message CancelRequest {
     string reason = 2;
 }
 
+message ScaleSignal {
+    ScaleAction action = 1;
+    string group_id = 2;
+    uint32 desired_replicas = 3;
+    double current_pressure = 4;
+    string reason = 5;
+}
+
+message ShutdownRequest {
+    string reason = 1;
+    uint32 grace_period_ms = 2;
+}
+
 message ExecuteResult {
     string request_id = 1;
     Status status = 2;
@@ -125,6 +141,8 @@ message HealthReport {
     string custom_info = 4;
     uint64 timestamp_ms = 5;
     uint32 error_rate_window_secs = 6;
+    double pressure = 7;
+    map<string, double> metrics = 8;
 }
 
 // ── 公共类型 ──
@@ -141,6 +159,12 @@ enum HealthStatus {
     HEALTH_STATUS_HEALTHY = 1;
     HEALTH_STATUS_DEGRADED = 2;
     HEALTH_STATUS_UNHEALTHY = 3;
+}
+
+enum ScaleAction {
+    SCALE_ACTION_UNSPECIFIED = 0;
+    SCALE_ACTION_UP = 1;
+    SCALE_ACTION_DOWN = 2;
 }
 
 message ErrorDetail {

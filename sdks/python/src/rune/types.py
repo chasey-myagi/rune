@@ -28,6 +28,26 @@ class FileAttachment:
 
 
 @dataclass
+class ScalePolicy:
+    """Auto-scaling metadata announced to Pilot and Runtime."""
+    group: str
+    spawn_command: str
+    scale_up_threshold: float = 0.8
+    scale_down_threshold: float = 0.2
+    sustained_secs: int = 30
+    min_replicas: int = 1
+    max_replicas: int = 1
+    shutdown_signal: str = "SIGTERM"
+
+
+@dataclass
+class LoadReport:
+    """Static load telemetry sent with health updates."""
+    pressure: float = 0.0
+    metrics: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
 class RuneContext:
     """Execution context passed to handler."""
     rune_name: str

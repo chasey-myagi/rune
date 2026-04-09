@@ -122,7 +122,10 @@ impl RateLimitState {
         let mut entry = counters.entry(key.to_string()).or_insert((0, now));
         let (count, window_start) = entry.value_mut();
 
-        // Check if window has expired
+        // Fixed-window rate limiter: at the boundary between two consecutive
+        // windows a client can issue up to 2× the configured limit (tail of old
+        // window + head of new window).  Acceptable for most use-cases; switch
+        // to sliding-window or token-bucket if stricter burst control is needed.
         let elapsed = now.duration_since(*window_start).as_secs();
         if elapsed >= window_secs {
             // Reset window

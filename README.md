@@ -12,6 +12,7 @@
 - **API Key 认证** -- Gate Key (HTTP) + Caster Key (gRPC)，两层隔离
 - **Rate Limiting** -- 基于滑动窗口的请求频率限制
 - **高级调度** -- round-robin / random / least-load / priority / label-based 五种策略
+- **自动扩缩容** -- Pilot 守护进程 + pressure-aware 调度 + 多语言 SDK scaling policy
 - **CLI 工具** -- 单二进制管理 Runtime、调用 Rune、管理 Key 和 Flow
 - **SQLite 持久化** -- 异步任务、调用日志、API Key 全部持久化
 
@@ -229,6 +230,9 @@ rune-framework = { path = "sdks/rust" }
 rune start [--dev] [--binary <path>]    # 启动 Runtime（Docker-first，或 --binary 本地二进制）
 rune stop [--force] [--timeout 10]      # 停止 Runtime（graceful → SIGKILL）
 rune status                             # 查看 Runtime 状态
+rune pilot daemon --runtime <addr>      # 启动本地 Pilot 守护进程
+rune pilot status                       # 查看本地 Pilot 状态
+rune pilot stop                         # 停止本地 Pilot
 
 # Rune 调用
 rune list                               # 列出在线 Rune
@@ -271,24 +275,26 @@ rune config path                        # 输出配置文件路径
 |------|------|------|
 | GET | `/health` | 健康检查 |
 | GET | `/api/v1/runes` | 列出在线 Rune |
-| POST | `/api/v1/runes/:name/run` | 调用 Rune（debug 端点） |
+| POST | `/api/v1/runes/{name}/run` | 调用 Rune（debug 端点） |
 | GET | `/api/v1/tasks` | 列出异步任务 |
-| GET | `/api/v1/tasks/:id` | 查询异步任务 |
-| DELETE | `/api/v1/tasks/:id` | 取消异步任务 |
+| GET | `/api/v1/tasks/{id}` | 查询异步任务 |
+| DELETE | `/api/v1/tasks/{id}` | 取消异步任务 |
 | GET | `/api/v1/status` | Runtime 状态 |
 | GET | `/api/v1/casters` | 在线 Caster 列表 |
 | GET | `/api/v1/stats` | 调用统计 |
+| GET | `/api/v1/stats/casters` | 按 Caster 聚合的调用统计 |
+| GET | `/api/v1/scaling/status` | 自动扩缩容状态 |
 | GET | `/api/v1/logs` | 调用日志 |
 | POST | `/api/v1/keys` | 创建 API Key |
 | GET | `/api/v1/keys` | 列出 API Key |
-| DELETE | `/api/v1/keys/:id` | 吊销 API Key |
+| DELETE | `/api/v1/keys/{id}` | 吊销 API Key |
 | GET | `/api/v1/openapi.json` | OpenAPI 3.0 文档 |
-| GET | `/api/v1/files/:id` | 下载文件 |
+| GET | `/api/v1/files/{id}` | 下载文件 |
 | POST | `/api/v1/flows` | 创建 Flow |
 | GET | `/api/v1/flows` | 列出 Flow |
-| GET | `/api/v1/flows/:name` | 获取 Flow 详情 |
-| DELETE | `/api/v1/flows/:name` | 删除 Flow |
-| POST | `/api/v1/flows/:name/run` | 执行 Flow |
+| GET | `/api/v1/flows/{name}` | 获取 Flow 详情 |
+| DELETE | `/api/v1/flows/{name}` | 删除 Flow |
+| POST | `/api/v1/flows/{name}/run` | 执行 Flow |
 | * | `/{gate_path}` | 动态业务路由（由 Rune 的 gate.path 声明） |
 
 完整 API 参考见 [docs/api-reference.md](docs/api-reference.md)。
@@ -324,6 +330,10 @@ max_upload_size_mb = 10
 [resolver]
 strategy = "round_robin"  # round_robin | random | least_load | priority
 
+[scaling]
+enabled = false
+eval_interval_secs = 30
+
 [rate_limit]
 requests_per_minute = 600
 
@@ -332,6 +342,13 @@ level = "info"
 ```
 
 完整配置参考见 [docs/configuration.md](docs/configuration.md)。
+
+### Auto Scaling
+
+- Runtime 通过 `[scaling]` 打开自动扩缩容评估循环。
+- `rune pilot daemon --runtime localhost:50070` 运行单一 Pilot 进程，供 Python / TypeScript / Rust SDK 共用。
+- `GET /api/v1/casters` 现在返回 `role`、`max_concurrent`、`available_permits`、`pressure`、`metrics`、`health_status`。
+- `GET /api/v1/stats/casters` 和 `GET /api/v1/scaling/status` 提供 Caster 聚合统计与分组扩缩容状态。
 
 ## Protocol Guarantees
 

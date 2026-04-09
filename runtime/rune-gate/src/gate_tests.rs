@@ -4,13 +4,12 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Instant;
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::response::IntoResponse;
     use axum::Router;
     use bytes::Bytes;
     use rune_core::auth::{KeyVerifier, NoopVerifier};
@@ -18,8 +17,10 @@ mod tests {
     use rune_core::relay::Relay;
     use rune_core::resolver::{Resolver, RoundRobinResolver};
     use rune_core::rune::{make_handler, GateConfig, RuneConfig, RuneError};
+    use rune_core::scaling::ScaleEvaluator;
+    use rune_core::session::{CasterRole, HealthStatusLevel};
     use rune_flow::engine::FlowEngine;
-    use rune_store::{RuneStore, TaskStatus};
+    use rune_store::{CallLog, RuneStore, TaskStatus};
     use tower::ServiceExt;
 
     use crate::file_broker::FileBroker;
@@ -105,6 +106,7 @@ mod tests {
                 store,
                 started_at: Instant::now(),
                 dev_mode: true,
+                scaling: None,
             },
             cors_origins: Arc::new(vec![]),
             rate_limiter: None,
@@ -155,6 +157,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_fix_x_request_id_propagates_for_rune_run() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .header("x-request-id", "client-rq-123")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"msg":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("client-rq-123"),
+            "gate rune handler should preserve inbound x-request-id"
+        );
     }
 
     #[tokio::test]
@@ -1035,6 +1064,7 @@ mod tests {
                 store,
                 started_at: Instant::now(),
                 dev_mode: true,
+                scaling: None,
             },
             cors_origins: Arc::new(vec![]),
             rate_limiter: None,
@@ -1419,6 +1449,7 @@ mod tests {
                 store,
                 started_at: Instant::now(),
                 dev_mode: true,
+                scaling: None,
             },
             cors_origins: Arc::new(vec![]),
             rate_limiter: None,
@@ -1983,6 +2014,7 @@ mod tests {
                 store,
                 started_at: Instant::now(),
                 dev_mode: true,
+                scaling: None,
             },
             cors_origins: Arc::new(vec![]),
             rate_limiter: None,
@@ -2083,6 +2115,7 @@ mod tests {
                 store,
                 started_at: Instant::now(),
                 dev_mode: true,
+                scaling: None,
             },
             cors_origins: Arc::new(vec![]),
             rate_limiter: None,
@@ -2174,6 +2207,7 @@ mod tests {
                 store,
                 started_at: Instant::now(),
                 dev_mode: true,
+                scaling: None,
             },
             cors_origins: Arc::new(vec![]),
             rate_limiter: None,
@@ -4088,6 +4122,7 @@ mod tests {
                 store,
                 started_at: Instant::now(),
                 dev_mode: true,
+                scaling: None,
             },
             cors_origins: Arc::new(vec![]),
             rate_limiter: None,
@@ -4461,6 +4496,34 @@ mod tests {
         assert_eq!(json["name"], "doc-pipeline");
         assert!(json["steps"].is_array());
         assert_eq!(json["steps"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_fix_x_request_id_propagates_for_flow_run() {
+        let state = test_state();
+        let app = create_flow_helper(state).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/doc-pipeline/run")
+                    .header("x-request-id", "client-flow-rq-456")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("client-flow-rq-456"),
+            "flow handler should preserve inbound x-request-id"
+        );
     }
 
     #[tokio::test]
@@ -6015,6 +6078,7 @@ mod tests {
                 store,
                 started_at: Instant::now(),
                 dev_mode,
+                scaling: None,
             },
             cors_origins: Arc::new(vec![]),
             rate_limiter: if dev_mode {
@@ -6026,6 +6090,101 @@ mod tests {
         };
 
         (state, raw_key)
+    }
+
+    fn round_robin_remote_rate_limit_state() -> (GateState, tokio::sync::OwnedSemaphorePermit) {
+        let relay = Arc::new(Relay::new());
+        let resolver = Arc::new(RoundRobinResolver::new());
+        let store = Arc::new(RuneStore::open_in_memory().unwrap());
+        let session_mgr = Arc::new(rune_core::session::SessionManager::new_dev(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(35),
+        ));
+
+        session_mgr.insert_test_caster("caster_a", 1);
+        session_mgr.insert_test_caster("caster_b", 1);
+        let permit = session_mgr.acquire_test_permit("caster_a");
+
+        relay
+            .register(
+                RuneConfig {
+                    name: "echo".into(),
+                    version: "1.0.0".into(),
+                    description: "remote a".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/echo".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(LocalInvoker::new(make_handler(|_ctx, _input| async move {
+                    Ok(Bytes::from_static(b"caster_a"))
+                }))),
+                Some("caster_a".into()),
+            )
+            .unwrap();
+        relay
+            .register(
+                RuneConfig {
+                    name: "echo".into(),
+                    version: "1.0.0".into(),
+                    description: "remote b".into(),
+                    supports_stream: false,
+                    gate: Some(GateConfig {
+                        path: "/echo".into(),
+                        method: "POST".into(),
+                    }),
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(LocalInvoker::new(make_handler(|_ctx, _input| async move {
+                    Ok(Bytes::from_static(b"caster_b"))
+                }))),
+                Some("caster_b".into()),
+            )
+            .unwrap();
+
+        let flow_engine = Arc::new(tokio::sync::RwLock::new(
+            rune_flow::engine::FlowEngine::new(
+                Arc::clone(&relay),
+                Arc::clone(&resolver) as Arc<dyn rune_core::resolver::Resolver>,
+            ),
+        ));
+
+        (
+            GateState {
+                auth: AuthState {
+                    key_verifier: Arc::new(NoopVerifier),
+                    auth_enabled: false,
+                    exempt_routes: Arc::new(vec!["/health".to_string()]),
+                },
+                rune: RuneState {
+                    relay,
+                    resolver,
+                    session_mgr,
+                    file_broker: Arc::new(FileBroker::new()),
+                    max_upload_size_mb: 10,
+                    request_timeout: DEFAULT_REQUEST_TIMEOUT,
+                },
+                flow: FlowState { flow_engine },
+                admin: AdminState {
+                    store,
+                    started_at: Instant::now(),
+                    dev_mode: false,
+                    scaling: None,
+                },
+                cors_origins: Arc::new(vec![]),
+                rate_limiter: Some(RateLimitState::new(100, 60)),
+                shutdown: ShutdownCoordinator::new(),
+            },
+            permit,
+        )
     }
 
     #[tokio::test]
@@ -6054,6 +6213,58 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_fix_rate_limit_preselection_does_not_advance_round_robin_choice() {
+        // Bug: middleware pre-selected a caster, then the handler selected again
+        // via resolver, advancing round-robin twice per request.
+        //
+        // Fix: middleware inserts the selected RuneEntry into request extensions;
+        // the handler reuses it instead of calling resolver again.
+        //
+        // Verification: send two requests through round-robin with 2 casters.
+        // If preselection is reused, we get caster_a then caster_b (each
+        // advances round-robin exactly once). If handler double-selects, the
+        // sequence would skip entries.
+        //
+        // Note: HashMap iteration order is non-deterministic, so we don't
+        // assume which caster is picked first — we just verify both casters
+        // are reached in 2 consecutive requests (round-robin cycles correctly).
+        let (state, _permit) = round_robin_remote_rate_limit_state();
+
+        // Drop the permit so both casters have capacity — we're testing
+        // round-robin advancement, not saturation.
+        drop(_permit);
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let resp = build_router(state.clone(), None)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+            seen.push(String::from_utf8(body.to_vec()).unwrap());
+        }
+
+        // Both casters must be reached — proves round-robin advanced exactly
+        // once per request (not zero, not twice).
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec!["caster_a", "caster_b"],
+            "round-robin should visit each caster exactly once in 2 requests; \
+             if handler double-advances, one caster would be skipped. Got: {:?}",
+            seen
+        );
     }
 
     #[tokio::test]
@@ -6477,6 +6688,7 @@ mod tests {
                 store,
                 started_at: Instant::now(),
                 dev_mode: true,
+                scaling: None,
             },
             cors_origins: Arc::new(vec![]),
             rate_limiter: None,
@@ -6577,6 +6789,7 @@ mod tests {
                 store,
                 started_at: Instant::now(),
                 dev_mode: true,
+                scaling: None,
             },
             cors_origins: Arc::new(vec![]),
             rate_limiter: None,
@@ -6833,13 +7046,221 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         // Verify response structure supports detailed caster info
-        // Each caster entry should have: caster_id, runes, current_load, connected_since
+        // Each caster entry should have the new scaling-aware management fields.
         for caster in json["casters"].as_array().unwrap_or(&vec![]) {
             assert!(caster.get("caster_id").is_some());
             assert!(caster.get("runes").is_some());
-            assert!(caster.get("current_load").is_some());
+            assert!(caster.get("role").is_some());
+            assert!(caster.get("max_concurrent").is_some());
+            assert!(caster.get("available_permits").is_some());
+            assert!(caster.get("pressure").is_some());
+            assert!(caster.get("metrics").is_some());
+            assert!(caster.get("health_status").is_some());
             assert!(caster.get("connected_since").is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn test_casters_api_exposes_scaling_fields_for_connected_caster() {
+        let state = test_state();
+        state
+            .rune
+            .session_mgr
+            .insert_test_caster("caster-scale-1", 8);
+        state
+            .rune
+            .session_mgr
+            .set_test_pressure("caster-scale-1", 0.375);
+        state
+            .rune
+            .session_mgr
+            .set_test_health("caster-scale-1", HealthStatusLevel::Degraded);
+        state.rune.session_mgr.set_test_labels(
+            "caster-scale-1",
+            HashMap::from([("group".to_string(), "gpu".to_string())]),
+        );
+
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(Request::get("/api/v1/casters").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let casters = json["casters"].as_array().expect("casters array");
+        let caster = casters
+            .iter()
+            .find(|caster| caster["caster_id"] == "caster-scale-1")
+            .expect("connected caster should be listed");
+        assert_eq!(caster["role"], "caster");
+        assert_eq!(caster["max_concurrent"], 8);
+        assert_eq!(caster["available_permits"], 8);
+        assert_eq!(caster["pressure"], 0.375);
+        assert_eq!(caster["health_status"], "DEGRADED");
+        assert!(caster["metrics"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_caster_stats_endpoint_returns_grouped_stats() {
+        let state = test_state();
+        state
+            .admin
+            .store
+            .insert_log(&CallLog {
+                id: 0,
+                request_id: "req-caster-stats".into(),
+                rune_name: "echo".into(),
+                mode: "sync".into(),
+                caster_id: Some("caster-a".into()),
+                latency_ms: 42,
+                status_code: 200,
+                input_size: 10,
+                output_size: 12,
+                timestamp: "2026-04-09T00:00:00Z".into(),
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/stats/casters")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let casters = json["casters"].as_array().expect("casters array");
+        assert_eq!(casters.len(), 1);
+        assert_eq!(casters[0]["caster_id"], "caster-a");
+        assert_eq!(casters[0]["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_fix_caster_stats_endpoint_uses_real_remote_request_logs() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+        let handler = make_handler(|_ctx, input| async move { Ok(input) });
+        let selected_entry = rune_core::relay::RuneEntry {
+            config: RuneConfig {
+                name: "echo".into(),
+                version: "1.0.0".into(),
+                description: "remote echo".into(),
+                supports_stream: false,
+                gate: Some(GateConfig {
+                    path: "/echo".into(),
+                    method: "POST".into(),
+                }),
+                input_schema: None,
+                output_schema: None,
+                priority: 0,
+                labels: Default::default(),
+            },
+            invoker: Arc::new(LocalInvoker::new(handler)),
+            caster_id: Some("remote-caster-1".into()),
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/echo/run")
+                    .header("content-type", "application/json")
+                    .extension(selected_entry)
+                    .body(Body::from(r#"{"msg":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let stats_response = build_router(state, None)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/stats/casters")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(stats_response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let casters = json["casters"].as_array().expect("casters array");
+        let caster = casters
+            .iter()
+            .find(|caster| caster["caster_id"] == "remote-caster-1")
+            .expect("remote request should be attributed to its caster");
+        assert_eq!(caster["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_scaling_status_endpoint_returns_evaluator_snapshot() {
+        let mut state = test_state();
+        state.rune.session_mgr.insert_test_caster("pilot-1", 1);
+        state
+            .rune
+            .session_mgr
+            .set_test_role("pilot-1", CasterRole::Pilot);
+        state.rune.session_mgr.insert_test_caster("caster-gpu-a", 4);
+        state
+            .rune
+            .session_mgr
+            .set_test_pressure("caster-gpu-a", 0.92);
+        state.rune.session_mgr.set_test_labels(
+            "caster-gpu-a",
+            HashMap::from([
+                ("group".to_string(), "gpu".to_string()),
+                ("_pilot_id".to_string(), "pilot-1".to_string()),
+                ("_scale_up".to_string(), "0.8".to_string()),
+                ("_scale_down".to_string(), "0.2".to_string()),
+                ("_sustained".to_string(), "0".to_string()),
+                ("_min".to_string(), "1".to_string()),
+                ("_max".to_string(), "4".to_string()),
+            ]),
+        );
+
+        let evaluator = Arc::new(ScaleEvaluator::new(
+            Arc::clone(&state.rune.session_mgr),
+            std::time::Duration::from_secs(30),
+        ));
+        evaluator.evaluate_once().await;
+        state.admin.scaling = Some(evaluator);
+
+        let app = build_router(state, None);
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/scaling/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let groups = json["groups"].as_array().expect("groups array");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["group_id"], "gpu");
+        assert_eq!(groups[0]["pilot_id"], "pilot-1");
+        assert_eq!(groups[0]["action"], "scale_up");
     }
 
     // ====================================================================
@@ -7117,6 +7538,7 @@ mod tests {
                 store,
                 started_at: Instant::now(),
                 dev_mode: true,
+                scaling: None,
             },
             cors_origins: Arc::new(vec![]),
             rate_limiter: None,
@@ -8357,5 +8779,263 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(body.as_ref(), b"file content here");
+    }
+
+    // =========================================================================
+    // M3: run_flow_async should use complete_task_if_not_cancelled (CAS)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_m3_flow_async_respects_cancelled_status() {
+        // Setup: create a flow with a slow echo step, run async, cancel the
+        // task in the store before it completes, then verify the completion
+        // callback does NOT overwrite the cancelled status.
+        use rune_flow::dag::{FlowDefinition, StepDefinition};
+        use std::time::Duration;
+        use tokio::time::sleep;
+
+        let state = test_state();
+
+        // Register a slow rune (sleeps 200ms)
+        let slow_handler = make_handler(|_ctx, input| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(input)
+        });
+        state
+            .rune
+            .relay
+            .register(
+                RuneConfig {
+                    name: "slow_echo".into(),
+                    version: "1.0.0".into(),
+                    description: "slow echo for test".into(),
+                    supports_stream: false,
+                    gate: None,
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(LocalInvoker::new(slow_handler)),
+                None,
+            )
+            .unwrap();
+
+        // Register a flow that uses the slow rune
+        let flow_def = FlowDefinition {
+            name: "slow_flow".into(),
+            steps: vec![StepDefinition {
+                name: "step1".into(),
+                rune: "slow_echo".into(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+            }],
+            gate_path: None,
+        };
+        {
+            let mut engine = state.flow.flow_engine.write().await;
+            engine.register(flow_def).unwrap();
+        }
+
+        // Run flow async
+        let app = build_router(state.clone(), None);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows/slow_flow/run?async=true")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"x":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let task_id = json["task_id"].as_str().unwrap().to_string();
+
+        // Cancel the task while the slow rune is still running
+        state
+            .admin
+            .store
+            .update_task_status(&task_id, TaskStatus::Cancelled, None, None)
+            .await
+            .unwrap();
+
+        // Wait for the slow rune to finish
+        sleep(Duration::from_millis(400)).await;
+
+        // Verify the task is still cancelled (not overwritten to completed)
+        let task = state.admin.store.get_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(
+            task.status,
+            TaskStatus::Cancelled,
+            "flow async completion should NOT overwrite cancelled status"
+        );
+    }
+
+    // =========================================================================
+    // m3: from_utf8_lossy corrupts binary input in async_execute
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_m3_binary_input_not_corrupted_in_async_task() {
+        // When body contains invalid UTF-8, the stored input should not
+        // silently replace bytes with U+FFFD.
+        use std::time::Duration;
+        use tokio::time::sleep;
+
+        let state = test_state();
+
+        // Register a simple rune that returns the input
+        let echo_handler2 = make_handler(|_ctx, input| async move { Ok(input) });
+        state
+            .rune
+            .relay
+            .register(
+                RuneConfig {
+                    name: "bin_echo".into(),
+                    version: "1.0.0".into(),
+                    description: "test".into(),
+                    supports_stream: false,
+                    gate: None,
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                },
+                Arc::new(LocalInvoker::new(echo_handler2)),
+                None,
+            )
+            .unwrap();
+
+        // Build a request with invalid UTF-8 bytes
+        let binary_body: Vec<u8> = vec![0x80, 0x81, 0xFF, 0xFE];
+        let app = build_router(state.clone(), None);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runes/bin_echo/run?async=true")
+                    .body(Body::from(binary_body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        let task_id = json["task_id"].as_str().unwrap().to_string();
+
+        sleep(Duration::from_millis(100)).await;
+
+        let task = state.admin.store.get_task(&task_id).await.unwrap().unwrap();
+
+        // The stored input must NOT contain the U+FFFD replacement character
+        let input_str = task.input.unwrap();
+        assert!(
+            !input_str.contains('\u{FFFD}'),
+            "stored input should not contain U+FFFD replacement chars, got: {}",
+            input_str,
+        );
+    }
+
+    // =========================================================================
+    // m6: output_size should use output.len() directly, not re-serialize
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_m6_output_size_equals_output_len() {
+        // sync_execute should return output_size == the raw output bytes length.
+        // The handler returns JSON with extra whitespace (16 bytes), but
+        // serde re-serialization produces compact JSON (15 bytes). The bug is
+        // that the old code re-serializes and measures 15 instead of 16.
+        use rune_core::rune::RuneContext;
+
+        // Note the space after the colon — 16 bytes raw
+        let raw_output = r#"{"result": "ok"}"#;
+        assert_eq!(raw_output.len(), 16);
+
+        let handler =
+            make_handler(|_ctx, _input| async move { Ok(Bytes::from(r#"{"result": "ok"}"#)) });
+        let invoker: Arc<dyn rune_core::invoker::RuneInvoker> =
+            Arc::new(LocalInvoker::new(handler));
+
+        let ctx = RuneContext {
+            rune_name: "test".into(),
+            request_id: "req-m6".into(),
+            context: HashMap::new(),
+            timeout: std::time::Duration::from_secs(5),
+        };
+
+        let (_response, output_size) =
+            crate::handlers::rune::sync_execute(invoker, ctx, Bytes::from("{}"), None).await;
+
+        // Raw output is 16 bytes. Before the fix, serde re-serializes to
+        // compact JSON (15 bytes). After the fix, output.len() == 16.
+        assert_eq!(
+            output_size, 16,
+            "output_size should be the raw output byte length (16), got {}",
+            output_size,
+        );
+    }
+
+    // =========================================================================
+    // m7: create_flow should reject duplicate gate_path
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_m7_create_flow_rejects_duplicate_gate_path() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+
+        // Create first flow with gate_path="/custom"
+        let flow1 = serde_json::json!({
+            "name": "flow_a",
+            "steps": [{"name": "s1", "rune": "echo"}],
+            "gate_path": "/custom"
+        });
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&flow1).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Create second flow with the same gate_path="/custom" but different name
+        let flow2 = serde_json::json!({
+            "name": "flow_b",
+            "steps": [{"name": "s1", "rune": "echo"}],
+            "gate_path": "/custom"
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/flows")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&flow2).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "creating a flow with duplicate gate_path should return 409 Conflict"
+        );
     }
 }

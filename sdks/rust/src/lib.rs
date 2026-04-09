@@ -25,12 +25,14 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod handler;
+mod pilot_client;
 pub mod stream;
 
 // Re-exports for convenience
 pub use caster::Caster;
-pub use config::{CasterConfig, FileAttachment, GateConfig, RuneConfig};
+pub use config::{CasterConfig, FileAttachment, GateConfig, LoadReport, RuneConfig, ScalePolicy};
 pub use context::RuneContext;
 pub use error::{SdkError, SdkResult};
 pub use handler::{HandlerKind, RegisteredRune};
+pub use pilot_client::PilotClient;
 pub use stream::StreamSender;

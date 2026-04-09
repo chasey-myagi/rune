@@ -1,6 +1,7 @@
 //! Caster — connects to Rune runtime and executes registered handlers.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -13,14 +14,15 @@ use tonic::transport::Channel;
 use rune_proto::rune_service_client::RuneServiceClient;
 use rune_proto::{
     session_message::Payload, CasterAttach, ErrorDetail, ExecuteResult,
-    GateConfig as ProtoGateConfig, Heartbeat, RuneDeclaration, SessionMessage, StreamEnd,
-    StreamEvent,
+    GateConfig as ProtoGateConfig, HealthReport, HealthStatus, Heartbeat, RuneDeclaration,
+    SessionMessage, StreamEnd, StreamEvent,
 };
 
 use crate::config::{CasterConfig, FileAttachment, RuneConfig};
 use crate::context::RuneContext;
 use crate::error::{SdkError, SdkResult};
 use crate::handler::{BoxFuture, HandlerKind, RegisteredRune};
+use crate::pilot_client::PilotClient;
 use crate::stream::StreamSender;
 
 /// Caster connects to a Rune Runtime and registers Rune handlers.
@@ -29,6 +31,7 @@ pub struct Caster {
     caster_id: String,
     runes: Arc<RwLock<HashMap<String, RegisteredRune>>>,
     shutdown_token: CancellationToken,
+    active_requests: Arc<AtomicU32>,
 }
 
 impl Caster {
@@ -43,6 +46,7 @@ impl Caster {
             caster_id,
             runes: Arc::new(RwLock::new(HashMap::new())),
             shutdown_token: CancellationToken::new(),
+            active_requests: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -190,31 +194,62 @@ impl Caster {
     pub async fn run(&self) -> SdkResult<()> {
         let mut delay = Duration::from_secs_f64(self.config.reconnect_base_delay_secs);
         let max_delay = Duration::from_secs_f64(self.config.reconnect_max_delay_secs);
+        let mut last_pilot: Option<PilotClient> = None;
 
-        loop {
+        let result = loop {
             if self.shutdown_token.is_cancelled() {
-                return Ok(());
+                break Ok(());
             }
-            match self.connect_and_run().await {
-                Ok(()) => return Ok(()),
+
+            // (Re-)establish pilot registration on every connect attempt so
+            // that a pilot daemon restart is picked up automatically.
+            let pilot_id = if let Some(policy) = self.config.scale_policy.as_ref() {
+                match PilotClient::ensure(&self.config.runtime, self.config.key.as_deref()).await {
+                    Ok(client) => {
+                        if let Err(e) = client.register(&self.caster_id, policy).await {
+                            tracing::warn!("pilot registration failed: {e}");
+                        }
+                        let id = client.pilot_id().to_string();
+                        last_pilot = Some(client);
+                        Some(id)
+                    }
+                    Err(e) => {
+                        tracing::warn!("pilot ensure failed: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            match self.connect_and_run(pilot_id.as_deref()).await {
+                Ok(()) => break Ok(()),
                 Err(e) => {
                     if self.shutdown_token.is_cancelled() {
-                        return Ok(());
+                        break Ok(());
                     }
                     tracing::warn!("connection error: {}, reconnecting in {:?}", e, delay);
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
                         _ = self.shutdown_token.cancelled() => {
-                            return Ok(());
+                            break Ok(());
                         }
                     }
                     delay = (delay * 2).min(max_delay);
                 }
             }
+        };
+
+        // Best-effort deregister on shutdown — reuse the cached client to
+        // avoid accidentally spawning a new pilot daemon.
+        if let Some(client) = last_pilot {
+            let _ = client.deregister(&self.caster_id).await;
         }
+
+        result
     }
 
-    async fn connect_and_run(&self) -> SdkResult<()> {
+    async fn connect_and_run(&self, pilot_id: Option<&str>) -> SdkResult<()> {
         let endpoint = format!("http://{}", self.config.runtime);
         let channel = Channel::from_shared(endpoint)
             .map_err(|e| SdkError::InvalidUri(e.to_string()))?
@@ -229,7 +264,7 @@ impl Caster {
         let mut inbound = response.into_inner();
 
         // Send CasterAttach
-        let attach_msg = self.build_attach_message();
+        let attach_msg = self.build_attach_message(pilot_id);
         tx.send(attach_msg)
             .await
             .map_err(|e| SdkError::ChannelSend(e.to_string()))?;
@@ -237,6 +272,9 @@ impl Caster {
         // Start heartbeat
         let hb_tx = tx.clone();
         let hb_interval = Duration::from_secs_f64(self.config.heartbeat_interval_secs);
+        let scaling_enabled = self.config.scale_policy.is_some();
+        let config = self.config.clone();
+        let active_requests = Arc::clone(&self.active_requests);
         let hb_handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(hb_interval).await;
@@ -250,6 +288,16 @@ impl Caster {
                 };
                 if hb_tx.send(msg).await.is_err() {
                     break;
+                }
+                if scaling_enabled {
+                    let active = active_requests.load(Ordering::Relaxed);
+                    if hb_tx
+                        .send(build_health_report_message(&config, active))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
         });
@@ -279,6 +327,14 @@ impl Caster {
                             self.config.runtime,
                             self.caster_id
                         );
+                        if self.config.scale_policy.is_some() {
+                            tx.send(build_health_report_message(
+                                &self.config,
+                                self.active_requests.load(Ordering::Relaxed),
+                            ))
+                            .await
+                            .map_err(|e| SdkError::ChannelSend(e.to_string()))?;
+                        }
                     } else {
                         tracing::error!("attach rejected: {}", ack.reason);
                         return Err(SdkError::Other(format!("attach rejected: {}", ack.reason)));
@@ -286,6 +342,7 @@ impl Caster {
                 }
                 Some(Payload::Execute(req)) => {
                     let registered = self.runes.read().unwrap().get(&req.rune_name).cloned();
+                    self.active_requests.fetch_add(1, Ordering::Relaxed);
 
                     let token = CancellationToken::new();
                     cancel_tokens
@@ -295,10 +352,12 @@ impl Caster {
 
                     let tx_clone = tx.clone();
                     let cancel_tokens_clone = cancel_tokens.clone();
+                    let active_requests = Arc::clone(&self.active_requests);
                     let request_id = req.request_id.clone();
                     tokio::spawn(async move {
                         execute_handler(registered, req, tx_clone, token).await;
                         cancel_tokens_clone.write().await.remove(&request_id);
+                        active_requests.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
                 Some(Payload::Cancel(cancel)) => {
@@ -310,6 +369,11 @@ impl Caster {
                 Some(Payload::Heartbeat(_)) => {
                     // Server heartbeat — acknowledged silently
                 }
+                Some(Payload::Shutdown(shutdown)) => {
+                    tracing::info!("shutdown requested: {}", shutdown.reason);
+                    self.stop();
+                    break;
+                }
                 _ => {}
             }
         }
@@ -318,7 +382,7 @@ impl Caster {
         Ok(())
     }
 
-    fn build_attach_message(&self) -> SessionMessage {
+    fn build_attach_message(&self, pilot_id: Option<&str>) -> SessionMessage {
         let runes = self.runes.read().unwrap();
         let mut declarations = Vec::new();
 
@@ -355,11 +419,79 @@ impl Caster {
             payload: Some(Payload::Attach(CasterAttach {
                 caster_id: self.caster_id.clone(),
                 runes: declarations,
-                labels: self.config.labels.clone(),
+                labels: self.attach_labels(pilot_id),
                 max_concurrent: self.config.max_concurrent,
                 key: self.config.key.clone().unwrap_or_default(),
+                role: "caster".into(),
             })),
         }
+    }
+
+    fn attach_labels(&self, pilot_id: Option<&str>) -> HashMap<String, String> {
+        let mut labels = self.config.labels.clone();
+        if let Some(policy) = self.config.scale_policy.as_ref() {
+            labels.insert("group".into(), policy.group.clone());
+            labels.insert("_scale_up".into(), policy.scale_up_threshold.to_string());
+            labels.insert(
+                "_scale_down".into(),
+                policy.scale_down_threshold.to_string(),
+            );
+            labels.insert("_sustained".into(), policy.sustained_secs.to_string());
+            labels.insert("_min".into(), policy.min_replicas.to_string());
+            labels.insert("_max".into(), policy.max_replicas.to_string());
+            labels.insert("_spawn_command".into(), policy.spawn_command.clone());
+            labels.insert("_shutdown_signal".into(), policy.shutdown_signal.clone());
+            if let Some(pilot_id) = pilot_id {
+                labels.insert("_pilot_id".into(), pilot_id.to_string());
+            }
+        }
+        labels
+    }
+}
+
+fn build_health_report_message(config: &CasterConfig, active_requests: u32) -> SessionMessage {
+    let mut metrics = config
+        .load_report
+        .as_ref()
+        .map(|report| report.metrics.clone())
+        .unwrap_or_default();
+    metrics
+        .entry("active_requests".into())
+        .or_insert(active_requests as f64);
+    metrics
+        .entry("max_concurrent".into())
+        .or_insert(config.max_concurrent as f64);
+    metrics
+        .entry("available_permits".into())
+        .or_insert(config.max_concurrent.saturating_sub(active_requests) as f64);
+
+    let pressure = config
+        .load_report
+        .as_ref()
+        .map(|report| report.pressure)
+        .filter(|pressure| *pressure > 0.0)
+        .unwrap_or_else(|| {
+            if config.max_concurrent == 0 {
+                0.0
+            } else {
+                active_requests as f64 / config.max_concurrent as f64
+            }
+        });
+
+    SessionMessage {
+        payload: Some(Payload::HealthReport(HealthReport {
+            status: HealthStatus::Healthy.into(),
+            active_requests,
+            error_rate: 0.0,
+            custom_info: String::new(),
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            error_rate_window_secs: 0,
+            pressure,
+            metrics,
+        })),
     }
 }
 

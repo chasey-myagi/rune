@@ -189,6 +189,7 @@ fn build_test_state(auth_enabled: bool) -> (GateState, Arc<RuneStore>) {
             store: store.clone(),
             started_at: Instant::now(),
             dev_mode: !auth_enabled,
+            scaling: None,
         },
         cors_origins: Arc::new(vec![]),
         rate_limiter: None,

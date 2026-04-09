@@ -1,0 +1,527 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use fs2::FileExt;
+use rune_proto::rune_service_client::RuneServiceClient;
+use rune_proto::{
+    session_message, CasterAttach, Heartbeat, ScaleAction, ScaleSignal, SessionMessage,
+};
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::process::Command;
+use tokio::sync::{mpsc, watch, Mutex};
+use tokio_stream::wrappers::ReceiverStream;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PilotRegistration {
+    caster_id: String,
+    pid: u32,
+    group: String,
+    spawn_command: String,
+    shutdown_signal: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+enum PilotRequest {
+    Register {
+        caster_id: String,
+        pid: u32,
+        group: String,
+        spawn_command: String,
+        shutdown_signal: String,
+    },
+    Deregister {
+        caster_id: String,
+    },
+    Status,
+    Stop,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PilotResponse {
+    ok: bool,
+    pilot_id: String,
+    runtime: String,
+    casters: Vec<PilotRegistration>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum PilotRuntimeState {
+    Connecting,
+    Ready,
+    Failed(String),
+}
+
+impl PilotRuntimeState {
+    fn into_status_fields(self) -> (bool, Option<String>) {
+        match self {
+            Self::Ready => (true, None),
+            Self::Connecting => (false, Some("runtime session not attached".into())),
+            Self::Failed(error) => (false, Some(error)),
+        }
+    }
+}
+
+pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
+    let paths = pilot_paths()?;
+    std::fs::create_dir_all(&paths.base_dir)?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path()?)?;
+    if let Err(err) = lock_file.try_lock_exclusive() {
+        if pid_alive(&paths.pid) {
+            if !json_mode {
+                println!("pilot already running");
+            }
+            return Ok(());
+        }
+        return Err(err).context("failed to acquire pilot lock");
+    }
+    if paths.socket.exists() {
+        let _ = std::fs::remove_file(&paths.socket);
+    }
+
+    let listener = UnixListener::bind(&paths.socket)
+        .with_context(|| format!("failed to bind pilot socket at {}", paths.socket.display()))?;
+    std::fs::write(&paths.pid, std::process::id().to_string())?;
+
+    let runtime = normalize_runtime(runtime);
+    let pilot_id = format!("pilot-{}", std::process::id());
+    let registry = Arc::new(Mutex::new(HashMap::<String, PilotRegistration>::new()));
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let (runtime_state_tx, runtime_state_rx) = watch::channel(PilotRuntimeState::Connecting);
+    let session_runtime = runtime.clone();
+    let session_pilot_id = pilot_id.clone();
+    let session_registry = Arc::clone(&registry);
+    let session_shutdown_rx = shutdown_rx.clone();
+
+    let session_task = tokio::spawn({
+        let runtime_state_tx = runtime_state_tx.clone();
+        async move {
+            let result = run_pilot_session(
+                session_runtime,
+                session_pilot_id,
+                session_registry,
+                session_shutdown_rx,
+                runtime_state_tx.clone(),
+            )
+            .await;
+            if let Err(err) = result {
+                let _ = runtime_state_tx.send(PilotRuntimeState::Failed(err.to_string()));
+            } else {
+                let _ = runtime_state_tx
+                    .send(PilotRuntimeState::Failed("runtime session ended".into()));
+            }
+        }
+    });
+
+    let reaper_registry = Arc::clone(&registry);
+    let reaper_shutdown = shutdown_tx.clone();
+    let reaper_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let mut registrations = reaper_registry.lock().await;
+            registrations.retain(|_, registration| process_alive(registration.pid));
+            if registrations.is_empty() {
+                let _ = reaper_shutdown.send(true);
+                break;
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            accept = listener.accept() => {
+                let (mut stream, _) = accept?;
+                let response = handle_client(
+                    &mut stream,
+                    &pilot_id,
+                    &runtime,
+                    Arc::clone(&registry),
+                    shutdown_tx.clone(),
+                    runtime_state_rx.clone(),
+                ).await;
+                let payload = serde_json::to_vec(&response?)?;
+                stream.write_all(&payload).await?;
+            }
+        }
+    }
+
+    session_task.abort();
+    reaper_task.abort();
+    cleanup_paths(&paths);
+    let _ = lock_file.unlock();
+
+    if !json_mode {
+        println!("pilot stopped");
+    }
+    Ok(())
+}
+
+pub async fn status(json_mode: bool) -> Result<()> {
+    let response = send_request(PilotRequest::Status).await?;
+    if json_mode {
+        crate::output::print_json(&serde_json::to_value(&response)?);
+    } else {
+        crate::output::print_json(&serde_json::to_value(&response)?);
+    }
+    Ok(())
+}
+
+pub async fn stop(json_mode: bool) -> Result<()> {
+    let response = send_request(PilotRequest::Stop).await?;
+    if json_mode {
+        crate::output::print_json(&serde_json::to_value(&response)?);
+    } else {
+        crate::output::print_json(&serde_json::to_value(&response)?);
+    }
+    Ok(())
+}
+
+async fn handle_client(
+    stream: &mut UnixStream,
+    pilot_id: &str,
+    runtime: &str,
+    registry: Arc<Mutex<HashMap<String, PilotRegistration>>>,
+    shutdown_tx: watch::Sender<bool>,
+    runtime_state: watch::Receiver<PilotRuntimeState>,
+) -> Result<PilotResponse> {
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let request: PilotRequest = serde_json::from_slice(&buf)?;
+
+    let mut registrations = registry.lock().await;
+    match request {
+        PilotRequest::Register {
+            caster_id,
+            pid,
+            group,
+            spawn_command,
+            shutdown_signal,
+        } => {
+            registrations.insert(
+                caster_id.clone(),
+                PilotRegistration {
+                    caster_id,
+                    pid,
+                    group,
+                    spawn_command,
+                    shutdown_signal,
+                },
+            );
+        }
+        PilotRequest::Deregister { caster_id } => {
+            registrations.remove(&caster_id);
+            if registrations.is_empty() {
+                let _ = shutdown_tx.send(true);
+            }
+        }
+        PilotRequest::Status => {}
+        PilotRequest::Stop => {
+            let _ = shutdown_tx.send(true);
+        }
+    }
+
+    let (ok, error) = runtime_state.borrow().clone().into_status_fields();
+
+    Ok(PilotResponse {
+        ok,
+        pilot_id: pilot_id.to_string(),
+        runtime: runtime.to_string(),
+        casters: registrations.values().cloned().collect(),
+        error,
+    })
+}
+
+async fn run_pilot_session(
+    runtime: String,
+    pilot_id: String,
+    registry: Arc<Mutex<HashMap<String, PilotRegistration>>>,
+    mut shutdown_rx: watch::Receiver<bool>,
+    runtime_state_tx: watch::Sender<PilotRuntimeState>,
+) -> Result<()> {
+    let endpoint = if runtime.starts_with("http://") || runtime.starts_with("https://") {
+        runtime.clone()
+    } else {
+        format!("http://{}", runtime)
+    };
+
+    let channel = tonic::transport::Channel::from_shared(endpoint)?
+        .connect()
+        .await?;
+    let mut client = RuneServiceClient::new(channel);
+    let (tx, rx) = mpsc::channel::<SessionMessage>(32);
+    let outbound = ReceiverStream::new(rx);
+    let response = client.session(outbound).await?;
+    let mut inbound = response.into_inner();
+
+    tx.send(SessionMessage {
+        payload: Some(session_message::Payload::Attach(CasterAttach {
+            caster_id: pilot_id.clone(),
+            runes: Vec::new(),
+            labels: HashMap::new(),
+            max_concurrent: 1,
+            key: std::env::var("RUNE_KEY").unwrap_or_default(),
+            role: "pilot".into(),
+        })),
+    })
+    .await?;
+
+    let heartbeat_tx = tx.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            if heartbeat_tx
+                .send(SessionMessage {
+                    payload: Some(session_message::Payload::Heartbeat(Heartbeat {
+                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    })),
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            message = inbound.message() => {
+                let Some(message) = message? else {
+                    break;
+                };
+                match message.payload {
+                    Some(session_message::Payload::AttachAck(ack)) => {
+                        if !ack.accepted {
+                            let error = format!("pilot attach rejected: {}", ack.reason);
+                            let _ = runtime_state_tx.send(PilotRuntimeState::Failed(error.clone()));
+                            return Err(anyhow!(error));
+                        }
+                        let _ = runtime_state_tx.send(PilotRuntimeState::Ready);
+                    }
+                    Some(session_message::Payload::ScaleSignal(signal)) => {
+                        handle_scale_signal(signal, Arc::clone(&registry)).await?;
+                    }
+                    Some(session_message::Payload::Heartbeat(_)) => {}
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_scale_signal(
+    signal: ScaleSignal,
+    registry: Arc<Mutex<HashMap<String, PilotRegistration>>>,
+) -> Result<()> {
+    match signal.action() {
+        ScaleAction::Up => {
+            let registrations = registry.lock().await;
+            let current = registrations
+                .values()
+                .filter(|registration| registration.group == signal.group_id)
+                .count();
+            let needed = signal.desired_replicas.saturating_sub(current as u32);
+            if needed == 0 {
+                return Ok(());
+            }
+
+            if let Some(template) = registrations
+                .values()
+                .find(|registration| registration.group == signal.group_id)
+            {
+                for _ in 0..needed {
+                    let mut child = Command::new("sh");
+                    child
+                        .arg("-lc")
+                        .arg(&template.spawn_command)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .with_context(|| format!("failed to spawn '{}'", template.spawn_command))?;
+                }
+            }
+        }
+        ScaleAction::Down => {
+            if let Some(caster_id) = signal.reason.strip_prefix("force_kill:") {
+                let registrations = registry.lock().await;
+                if let Some(registration) = registrations.get(caster_id) {
+                    unsafe {
+                        libc::kill(registration.pid as i32, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        ScaleAction::Unspecified => {}
+    }
+
+    Ok(())
+}
+
+async fn send_request(request: PilotRequest) -> Result<PilotResponse> {
+    let paths = pilot_paths()?;
+    let mut stream = UnixStream::connect(&paths.socket)
+        .await
+        .with_context(|| format!("pilot is not running at {}", paths.socket.display()))?;
+    let payload = serde_json::to_vec(&request)?;
+    stream.write_all(&payload).await?;
+    AsyncWriteExt::shutdown(&mut stream).await?;
+    let mut response_buf = Vec::new();
+    stream.read_to_end(&mut response_buf).await?;
+    Ok(serde_json::from_slice(&response_buf)?)
+}
+
+fn normalize_runtime(runtime: &str) -> String {
+    runtime.trim().trim_end_matches('/').to_string()
+}
+
+fn process_alive(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    if rc == 0 {
+        true
+    } else {
+        let errno = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or_default();
+        errno == libc::EPERM
+    }
+}
+
+fn cleanup_paths(paths: &PilotPaths) {
+    let _ = std::fs::remove_file(&paths.socket);
+    let _ = std::fs::remove_file(&paths.pid);
+}
+
+struct PilotPaths {
+    base_dir: PathBuf,
+    pid: PathBuf,
+    socket: PathBuf,
+}
+
+fn pilot_paths() -> Result<PilotPaths> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to locate home directory"))?;
+    let base_dir = home.join(".rune");
+    Ok(PilotPaths {
+        pid: base_dir.join("pilot.pid"),
+        socket: base_dir.join("pilot.sock"),
+        base_dir,
+    })
+}
+
+pub fn lock_path() -> Result<PathBuf> {
+    Ok(pilot_paths()?.base_dir.join("pilot.lock"))
+}
+
+pub fn pid_path() -> Result<PathBuf> {
+    Ok(pilot_paths()?.pid)
+}
+
+pub fn socket_path() -> Result<PathBuf> {
+    Ok(pilot_paths()?.socket)
+}
+
+pub fn find_rune_binary() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("RUNE_BIN") {
+        return Ok(PathBuf::from(path));
+    }
+
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join("rune");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "failed to locate rune binary; set RUNE_BIN or add rune to PATH"
+    ))
+}
+
+pub fn pid_alive(pid_path: &Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(pid_path) else {
+        return false;
+    };
+    let Ok(pid) = contents.trim().parse::<u32>() else {
+        return false;
+    };
+    process_alive(pid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct HomeGuard(Option<std::ffi::OsString>);
+
+    impl HomeGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                std::env::set_var("HOME", previous);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    async fn wait_for_socket() {
+        for _ in 0..50 {
+            if socket_path().is_ok_and(|path| path.exists()) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("pilot socket did not appear in time");
+    }
+
+    #[tokio::test]
+    async fn test_fix_pilot_status_not_ready_before_attach() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(temp.path());
+
+        let daemon = tokio::spawn(async { run_daemon("127.0.0.1:9", true).await });
+        wait_for_socket().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let status = send_request(PilotRequest::Status).await.unwrap();
+        assert!(
+            !status.ok,
+            "pilot should not report ready before runtime attach"
+        );
+        assert!(status.error.is_some());
+
+        let _ = send_request(PilotRequest::Stop).await;
+        let _ = daemon.await;
+    }
+}

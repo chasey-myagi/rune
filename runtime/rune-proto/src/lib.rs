@@ -61,6 +61,7 @@ mod tests {
                     .collect(),
                 max_concurrent: 10,
                 key: "rk_test_key".into(),
+                role: "caster".into(),
             })),
         };
 

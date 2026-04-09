@@ -6,6 +6,7 @@ import type {
   GateConfig,
   CasterOptions,
   FileAttachment,
+  ScalePolicy,
 } from '../src/index';
 import type {
   RuneHandler,
@@ -621,6 +622,31 @@ describe('2.0 CasterAttach Message', () => {
 
     const msg = (caster as any)._buildAttachMessage();
     expect(msg.attach.labels).toEqual({});
+  });
+
+  it('C-03: attach message includes caster role and scaling labels', () => {
+    const scalePolicy: ScalePolicy = {
+      group: 'gpu',
+      spawnCommand: 'python worker.py',
+      scaleUpThreshold: 0.9,
+      scaleDownThreshold: 0.3,
+      sustainedSecs: 15,
+      minReplicas: 1,
+      maxReplicas: 4,
+      shutdownSignal: 'SIGTERM',
+    };
+    const caster = new Caster({
+      key: 'rk_test',
+      scalePolicy,
+      loadReport: { pressure: 0.42, metrics: { queue_depth: 7 } },
+    });
+    caster.rune({ name: 'echo' }, async (_ctx, input) => input);
+
+    const msg = (caster as any)._buildAttachMessage('pilot-123');
+    expect(msg.attach.role).toBe('caster');
+    expect(msg.attach.labels.group).toBe('gpu');
+    expect(msg.attach.labels._pilot_id).toBe('pilot-123');
+    expect(msg.attach.labels._spawn_command).toBe('python worker.py');
   });
 });
 

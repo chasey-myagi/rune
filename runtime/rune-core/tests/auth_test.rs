@@ -149,6 +149,7 @@ fn make_attach_msg_with_key(caster_id: &str, key: &str) -> SessionMessage {
             labels: Default::default(),
             max_concurrent: 5,
             key: key.into(),
+            role: "caster".into(),
         })),
     }
 }

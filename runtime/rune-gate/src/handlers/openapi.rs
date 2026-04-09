@@ -11,7 +11,7 @@ pub async fn openapi_handler(State(state): State<GateState>) -> impl IntoRespons
         .into_iter()
         .filter_map(|(name, _gate_path)| {
             let entries = state.rune.relay.find(&name)?;
-            let first = entries.value().first()?;
+            let first = entries.value().values().next()?;
             let config = &first.config;
             Some(RuneInfo {
                 name: config.name.clone(),

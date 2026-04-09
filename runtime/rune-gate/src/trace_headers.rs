@@ -12,6 +12,15 @@ pub(crate) fn context_from_headers(headers: &HeaderMap) -> HashMap<String, Strin
     context
 }
 
+pub(crate) fn request_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 pub(crate) fn apply_trace_response_headers(
     response: &mut axum::response::Response,
     request_id: &str,

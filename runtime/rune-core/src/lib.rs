@@ -8,6 +8,7 @@ pub mod relay;
 pub mod resolver;
 pub mod retry;
 pub mod rune;
+pub mod scaling;
 pub mod session;
 pub mod telemetry;
 pub mod time_utils;

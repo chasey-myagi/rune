@@ -1,5 +1,6 @@
 use crate::models::{ApiKey, KeyType};
 use dashmap::DashMap;
+use rand::Rng;
 use std::time::{Duration, Instant};
 
 struct CacheEntry {
@@ -82,8 +83,65 @@ impl KeyCache {
 
     fn evict_if_full(&self) {
         let total = self.entries.len() + self.negatives.len();
+        if total < self.max_entries {
+            return;
+        }
+
+        // Phase 1: evict all expired entries
+        let ttl = self.ttl;
+        let negative_ttl = self.negative_ttl;
+        self.entries
+            .retain(|_, entry| entry.inserted_at.elapsed() <= ttl);
+        self.negatives
+            .retain(|_, inserted_at| inserted_at.elapsed() <= negative_ttl);
+
+        // Phase 2: if still over limit, randomly drop ~25% of entries
+        let total = self.entries.len() + self.negatives.len();
         if total >= self.max_entries {
-            self.invalidate_all();
+            let mut rng = rand::rng();
+            // Keep ~75% — retain returns true to keep, false to drop
+            self.negatives.retain(|_, _| rng.random_ratio(3, 4));
+            // Only trim entries if negatives purge wasn't enough
+            if self.entries.len() + self.negatives.len() >= self.max_entries {
+                self.entries.retain(|_, _| rng.random_ratio(3, 4));
+            }
+
+            // Phase 3: hard cap — if probabilistic eviction left us over limit,
+            // remove excess items one-by-one (negatives first, then entries).
+            // We target max_entries - 1 to reserve one slot for the insert
+            // that triggered this eviction.
+            let mut over = (self.entries.len() + self.negatives.len())
+                .saturating_sub(self.max_entries.saturating_sub(1));
+            if over > 0 {
+                let neg_keys: Vec<String> = self
+                    .negatives
+                    .iter()
+                    .take(over)
+                    .map(|r| r.key().clone())
+                    .collect();
+                for k in neg_keys {
+                    self.negatives.remove(&k);
+                    over -= 1;
+                    if over == 0 {
+                        break;
+                    }
+                }
+            }
+            if over > 0 {
+                let ent_keys: Vec<String> = self
+                    .entries
+                    .iter()
+                    .take(over)
+                    .map(|r| r.key().clone())
+                    .collect();
+                for k in ent_keys {
+                    self.entries.remove(&k);
+                    over -= 1;
+                    if over == 0 {
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -177,6 +235,116 @@ mod tests {
         assert!(
             total <= 3,
             "cache should not exceed max_entries, got {total}"
+        );
+    }
+
+    #[test]
+    fn test_fix_cache_eviction_preserves_valid_entries() {
+        // max_entries = 10, insert 10 entries (5 expired + 5 valid), then trigger eviction
+        // with the nuclear invalidate_all, ALL entries are wiped — valid ones too.
+        // After fix: valid entries should mostly survive.
+        let cache =
+            KeyCache::with_max_entries(Duration::from_secs(60), Duration::from_secs(60), 10);
+
+        // Insert 5 entries that we'll make "expired" by using a short-TTL cache trick:
+        // We can't easily backdate Instant, so we use a two-phase approach:
+        // Phase 1: create a short-ttl cache, insert expired entries, then copy them.
+        // Actually, since CacheEntry uses Instant::now(), we need to sleep.
+        // Simpler: insert 5 negatives with the cache, sleep to expire them, then insert 5 more valid ones + 1 to trigger eviction.
+
+        // Insert 5 negatives (these will expire)
+        for i in 0..5 {
+            cache.insert_negative(format!("old-{i}"), KeyType::Gate);
+        }
+
+        // Temporarily override TTLs won't work, so let's use a different approach:
+        // Build cache with very short TTL so old entries expire quickly.
+        let cache =
+            KeyCache::with_max_entries(Duration::from_millis(10), Duration::from_millis(10), 10);
+
+        // Insert 5 entries that will expire
+        for i in 0..5 {
+            cache.insert_negative(format!("old-{i}"), KeyType::Gate);
+        }
+        std::thread::sleep(Duration::from_millis(20)); // let them expire
+
+        // Insert 5 valid entries (these are fresh)
+        for i in 0..5 {
+            let mut key = make_key(KeyType::Gate);
+            key.id = i as i64;
+            cache.insert(format!("new-{i}"), key);
+        }
+
+        // Now total = 5 expired negatives + 5 valid entries = 10 = max_entries
+        // Inserting one more triggers eviction
+        let mut key = make_key(KeyType::Gate);
+        key.id = 99;
+        cache.insert("trigger".into(), key);
+
+        // After eviction, valid entries should mostly survive (not all wiped)
+        let mut valid_remaining = 0;
+        for i in 0..5 {
+            if cache.entries.contains_key(&format!("gate:new-{i}")) {
+                valid_remaining += 1;
+            }
+        }
+        // The trigger entry should also be there
+        assert!(
+            cache.entries.contains_key("gate:trigger"),
+            "the just-inserted entry must survive"
+        );
+        assert!(
+            valid_remaining >= 3,
+            "at least 3 of 5 valid entries should survive eviction, got {valid_remaining}"
+        );
+    }
+
+    #[test]
+    fn test_fix_cache_eviction_removes_expired_first() {
+        // Insert some expired and some fresh entries, trigger eviction.
+        // Expired ones should be removed, fresh ones should remain.
+        let cache =
+            KeyCache::with_max_entries(Duration::from_millis(10), Duration::from_millis(10), 8);
+
+        // Insert 4 entries that will expire
+        for i in 0..4 {
+            cache.insert_negative(format!("expired-{i}"), KeyType::Gate);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Insert 4 fresh entries
+        for i in 0..4 {
+            let mut key = make_key(KeyType::Gate);
+            key.id = i as i64;
+            cache.insert(format!("fresh-{i}"), key);
+        }
+
+        // total = 4 expired negatives + 4 fresh entries = 8 = max_entries
+        // Trigger eviction by inserting one more
+        let mut key = make_key(KeyType::Gate);
+        key.id = 100;
+        cache.insert("final".into(), key);
+
+        // All expired negatives should be gone
+        for i in 0..4 {
+            assert!(
+                !cache.negatives.contains_key(&format!("gate:expired-{i}")),
+                "expired negative {i} should have been evicted"
+            );
+        }
+
+        // All fresh entries should still be present (since removing expired freed enough space)
+        for i in 0..4 {
+            assert!(
+                cache.entries.contains_key(&format!("gate:fresh-{i}")),
+                "fresh entry {i} should survive eviction"
+            );
+        }
+
+        // The final entry should be present
+        assert!(
+            cache.entries.contains_key("gate:final"),
+            "the just-inserted entry must survive"
         );
     }
 

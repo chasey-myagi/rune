@@ -86,7 +86,7 @@ pub async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
         std::collections::HashMap::new();
     for (name, _) in state.rune.relay.list() {
         if let Some(entries) = state.rune.relay.find(&name) {
-            for e in entries.value() {
+            for e in entries.value().values() {
                 if let Some(ref cid) = e.caster_id {
                     caster_runes
                         .entry(cid.clone())
@@ -101,11 +101,23 @@ pub async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
         .iter()
         .map(|cid| {
             let runes = caster_runes.remove(cid.as_str()).unwrap_or_default();
-            let current_load = state.rune.session_mgr.available_permits(cid);
+            let available_permits = state.rune.session_mgr.available_permits(cid);
+            let max_concurrent = state.rune.session_mgr.max_concurrent(cid);
+            let health = state.rune.session_mgr.health_info(cid).unwrap_or_default();
+            let role = state
+                .rune
+                .session_mgr
+                .caster_role(cid)
+                .unwrap_or(rune_core::session::CasterRole::Caster);
             serde_json::json!({
                 "caster_id": cid,
                 "runes": runes,
-                "current_load": current_load,
+                "role": role.as_str(),
+                "max_concurrent": max_concurrent,
+                "available_permits": available_permits,
+                "pressure": health.pressure,
+                "metrics": health.metrics,
+                "health_status": format!("{:?}", health.status).to_uppercase(),
                 "connected_since": state.rune.session_mgr.connected_at(cid)
                     .map(|t| t.elapsed().as_secs())
                     .unwrap_or(0),
@@ -142,6 +154,27 @@ pub async fn mgmt_stats(State(state): State<GateState>) -> impl IntoResponse {
             &e.to_string(),
         ),
     }
+}
+
+pub async fn mgmt_caster_stats(State(state): State<GateState>) -> impl IntoResponse {
+    match state.admin.store.call_stats_by_caster().await {
+        Ok(stats) => Json(serde_json::json!({ "casters": stats })).into_response(),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
+    }
+}
+
+pub async fn mgmt_scaling_status(State(state): State<GateState>) -> impl IntoResponse {
+    let groups = state
+        .admin
+        .scaling
+        .as_ref()
+        .map(|scaling| scaling.snapshot_status())
+        .unwrap_or_default();
+    Json(serde_json::json!({ "groups": groups })).into_response()
 }
 
 pub async fn mgmt_logs(

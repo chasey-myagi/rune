@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use rune_core::auth::KeyVerifier;
 use rune_core::relay::Relay;
 use rune_core::resolver::Resolver;
+use rune_core::scaling::ScaleEvaluator;
 use rune_flow::engine::FlowEngine;
 use rune_store::RuneStore;
 
@@ -46,6 +47,7 @@ pub struct AdminState {
     pub store: Arc<RuneStore>,
     pub started_at: Instant,
     pub dev_mode: bool,
+    pub scaling: Option<Arc<ScaleEvaluator>>,
 }
 
 /// Gate shared state — composed of semantic sub-states.

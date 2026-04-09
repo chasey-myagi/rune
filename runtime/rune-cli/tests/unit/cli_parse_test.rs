@@ -1,5 +1,7 @@
 use clap::Parser;
-use rune_cli::{Cli, Commands, ConfigCommands, FlowCommands, KeyCommands, TaskCommands};
+use rune_cli::{
+    Cli, Commands, ConfigCommands, FlowCommands, KeyCommands, PilotCommands, TaskCommands,
+};
 
 fn parse(args: &[&str]) -> Cli {
     let mut full = vec!["rune"];
@@ -227,6 +229,34 @@ fn task_delete() {
 fn casters() {
     let cli = parse(&["casters"]);
     assert!(matches!(cli.command, Commands::Casters));
+}
+
+// ── Pilot ──────────────────────────────────────────────────────
+
+#[test]
+fn pilot_daemon_with_runtime() {
+    let cli = parse(&["pilot", "daemon", "--runtime", "localhost:50070"]);
+    match cli.command {
+        Commands::Pilot(PilotCommands::Daemon { runtime }) => {
+            assert_eq!(runtime, "localhost:50070");
+        }
+        _ => panic!("expected Pilot Daemon"),
+    }
+}
+
+#[test]
+fn pilot_status() {
+    let cli = parse(&["pilot", "status"]);
+    assert!(matches!(
+        cli.command,
+        Commands::Pilot(PilotCommands::Status)
+    ));
+}
+
+#[test]
+fn pilot_stop() {
+    let cli = parse(&["pilot", "stop"]);
+    assert!(matches!(cli.command, Commands::Pilot(PilotCommands::Stop)));
 }
 
 // ── Key ────────────────────────────────────────────────────────

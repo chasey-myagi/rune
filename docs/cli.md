@@ -98,6 +98,34 @@ rune stop --timeout 30
 rune status
 ```
 
+### `rune pilot daemon`
+
+启动本地 Pilot 守护进程。Pilot 是唯一的扩缩容执行进程，Python / TypeScript / Rust SDK 只负责发现、注册和注销。
+
+```
+rune pilot daemon --runtime <addr>
+```
+
+| 参数/选项 | 类型 | 默认值 | 说明 |
+|-----------|------|--------|------|
+| `--runtime <addr>` | string | — | Runtime gRPC 地址，例如 `localhost:50070` |
+
+### `rune pilot status`
+
+查看本地 Pilot 状态，包括 Pilot ID、目标 Runtime 和当前已注册的 Caster 列表。
+
+```
+rune pilot status
+```
+
+### `rune pilot stop`
+
+优雅停止本地 Pilot 守护进程。
+
+```
+rune pilot stop
+```
+
 ---
 
 ## Rune 调用

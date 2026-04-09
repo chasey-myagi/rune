@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use clap::Parser;
@@ -8,6 +8,7 @@ use rune_core::auth::{KeyVerifier, NoopVerifier};
 use rune_core::config::AppConfig;
 use rune_core::grpc_service::RuneGrpcService;
 use rune_core::rune::{make_handler, GateConfig, RuneConfig, RuneError};
+use rune_core::scaling::ScaleEvaluator;
 use rune_core::telemetry::TelemetryConfig;
 use rune_flow::dag::{FlowDefinition, StepDefinition};
 use rune_flow::engine::FlowEngine;
@@ -306,6 +307,16 @@ async fn main() -> anyhow::Result<()> {
     let flow_engine = Arc::new(tokio::sync::RwLock::new(flow_engine));
     let shutdown = gate::ShutdownCoordinator::new();
     let drain_timeout_secs = config.server.drain_timeout_secs;
+    let scaling = if config.scaling.enabled {
+        let evaluator = Arc::new(ScaleEvaluator::new(
+            Arc::clone(&running.session_mgr),
+            Duration::from_secs(config.scaling.eval_interval_secs),
+        ));
+        Arc::clone(&evaluator).start();
+        Some(evaluator)
+    } else {
+        None
+    };
 
     let gate_state = gate::GateState {
         auth: gate::AuthState {
@@ -328,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
             store: store.clone(),
             started_at: Instant::now(),
             dev_mode: config.server.dev_mode,
+            scaling,
         },
         cors_origins: Arc::new(config.gate.cors_origins.clone()),
         rate_limiter: if config.server.dev_mode {
