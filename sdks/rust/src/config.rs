@@ -169,6 +169,8 @@ impl Default for ScalePolicy {
 /// Additional load telemetry sent with health reports.
 #[derive(Debug, Clone, Default)]
 pub struct LoadReport {
-    pub pressure: f64,
+    /// Explicit pressure override. When `None`, computed automatically
+    /// from `active_requests / max_concurrent`.
+    pub pressure: Option<f64>,
     pub metrics: HashMap<String, f64>,
 }

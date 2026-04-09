@@ -102,24 +102,58 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
     let session_runtime = runtime.clone();
     let session_pilot_id = pilot_id.clone();
     let session_registry = Arc::clone(&registry);
-    let session_shutdown_rx = shutdown_rx.clone();
 
     let session_task = tokio::spawn({
         let runtime_state_tx = runtime_state_tx.clone();
+        let mut shutdown_watch = shutdown_rx.clone();
         async move {
-            let result = run_pilot_session(
-                session_runtime,
-                session_pilot_id,
-                session_registry,
-                session_shutdown_rx,
-                runtime_state_tx.clone(),
-            )
-            .await;
-            if let Err(err) = result {
-                let _ = runtime_state_tx.send(PilotRuntimeState::Failed(err.to_string()));
-            } else {
-                let _ = runtime_state_tx
-                    .send(PilotRuntimeState::Failed("runtime session ended".into()));
+            let base_delay = Duration::from_millis(500);
+            let max_delay = Duration::from_secs(30);
+            let mut attempts: u32 = 0;
+
+            loop {
+                let _ = runtime_state_tx.send(PilotRuntimeState::Connecting);
+                let result = run_pilot_session(
+                    session_runtime.clone(),
+                    session_pilot_id.clone(),
+                    Arc::clone(&session_registry),
+                    shutdown_watch.clone(),
+                    runtime_state_tx.clone(),
+                )
+                .await;
+
+                // If shutdown was requested, exit the loop.
+                if *shutdown_watch.borrow() {
+                    break;
+                }
+
+                // Terminal errors (e.g. attach rejected) should not be retried.
+                if let Err(err) = &result {
+                    let msg = err.to_string();
+                    if msg.contains("attach rejected") {
+                        let _ = runtime_state_tx.send(PilotRuntimeState::Failed(msg));
+                        break;
+                    }
+                }
+
+                // Transient failure — we will retry, so advertise Connecting
+                // (not Failed) so SDK clients classify this as retryable.
+                let _ = runtime_state_tx.send(PilotRuntimeState::Connecting);
+
+                attempts = attempts.saturating_add(1);
+                let delay = std::cmp::min(
+                    base_delay.saturating_mul(1u32.wrapping_shl(attempts.min(6))),
+                    max_delay,
+                );
+
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    changed = shutdown_watch.changed() => {
+                        if changed.is_ok() && *shutdown_watch.borrow() {
+                            break;
+                        }
+                    }
+                }
             }
         }
     });
@@ -127,14 +161,19 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
     let reaper_registry = Arc::clone(&registry);
     let reaper_shutdown = shutdown_tx.clone();
     let reaper_task = tokio::spawn(async move {
+        // Grace period: give the first caster time to discover the pilot
+        // and call register() before we start checking for emptiness.
+        tokio::time::sleep(Duration::from_secs(15)).await;
+
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
             let mut registrations = reaper_registry.lock().await;
             registrations.retain(|_, registration| process_alive(registration.pid));
             if registrations.is_empty() {
                 let _ = reaper_shutdown.send(true);
                 break;
             }
+            drop(registrations);
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
 
@@ -205,7 +244,7 @@ async fn handle_client(
     let request: PilotRequest = serde_json::from_slice(&buf)?;
 
     let mut registrations = registry.lock().await;
-    match request {
+    let (ok, error) = match request {
         PilotRequest::Register {
             caster_id,
             pid,
@@ -223,20 +262,21 @@ async fn handle_client(
                     shutdown_signal,
                 },
             );
+            (true, None)
         }
         PilotRequest::Deregister { caster_id } => {
             registrations.remove(&caster_id);
             if registrations.is_empty() {
                 let _ = shutdown_tx.send(true);
             }
+            (true, None)
         }
-        PilotRequest::Status => {}
+        PilotRequest::Status => runtime_state.borrow().clone().into_status_fields(),
         PilotRequest::Stop => {
             let _ = shutdown_tx.send(true);
+            (true, None)
         }
-    }
-
-    let (ok, error) = runtime_state.borrow().clone().into_status_fields();
+    };
 
     Ok(PilotResponse {
         ok,

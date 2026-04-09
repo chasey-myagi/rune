@@ -144,6 +144,48 @@ fn relay_benchmarks(c: &mut Criterion) {
         });
     });
 
+    // --- relay_remove_caster with varying total caster counts ---
+    // Verifies that remove_caster for a single-rune caster is ~constant
+    // regardless of how many other casters are registered (O(R_this_caster)
+    // rather than O(R_total * C_max)).
+    for count in [100, 1000, 10000] {
+        group.bench_with_input(
+            BenchmarkId::new("remove_caster", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        let relay = Relay::new();
+                        for i in 0..count {
+                            let handler = make_handler(|_ctx, input| async move { Ok(input) });
+                            let config = RuneConfig {
+                                name: "bench_rune".into(),
+                                version: "1.0.0".into(),
+                                description: format!("handler {}", i),
+                                supports_stream: false,
+                                gate: None,
+                                input_schema: None,
+                                output_schema: None,
+                                priority: 0,
+                                labels: Default::default(),
+                            };
+                            relay
+                                .register(
+                                    config,
+                                    Arc::new(LocalInvoker::new(handler)),
+                                    Some(format!("caster-{}", i)),
+                                )
+                                .unwrap();
+                        }
+                        relay
+                    },
+                    |relay| relay.remove_caster("caster-0"),
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
     group.finish();
 }
 

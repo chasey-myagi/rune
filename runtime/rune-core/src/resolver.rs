@@ -132,14 +132,14 @@ impl Resolver for HealthAwareResolver {
         let top_tier: Vec<RuneEntry> = top_indices.iter().map(|&i| candidates[i].clone()).collect();
         let picked = self.inner.pick(rune_name, &top_tier)?;
 
-        // Map the picked reference back to the original candidates slice
-        // via top_indices. Use value matching (name + caster_id) instead of
-        // ptr::eq — the latter is fragile because top_tier is a cloned Vec
-        // whose elements have different addresses from the original slice.
+        // Map the picked reference back to the original candidates slice.
+        // `picked` points into `top_tier`, so ptr::eq reliably identifies
+        // the exact element — unlike value matching which fails when multiple
+        // local entries share the same (name, caster_id=None).
         let inner_idx = top_tier
             .iter()
-            .position(|e| e.config.name == picked.config.name && e.caster_id == picked.caster_id)
-            .expect("picked entry must exist in top_tier by (name, caster_id)");
+            .position(|e| std::ptr::eq(e, picked))
+            .expect("picked entry must exist in top_tier");
 
         Some(&candidates[top_indices[inner_idx]])
     }

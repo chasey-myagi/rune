@@ -50,27 +50,46 @@ impl PilotClient {
         if let Ok(response) = send_request(&PilotRequest::Status).await {
             match Self::classify_status(response, &normalized) {
                 EnsureStatus::Ready(client) => return Ok(client),
-                EnsureStatus::Retry => return Self::wait_until_ready(&normalized, deadline).await,
+                EnsureStatus::Retry => {
+                    return Self::wait_until_ready(&normalized, deadline, None, None).await;
+                }
                 EnsureStatus::Mismatch => {
                     // Existing pilot is bound to a different runtime — stop it first.
                     let _ = send_request(&PilotRequest::Stop).await;
-                    tokio::time::sleep(Duration::from_millis(200)).await;
                 }
                 EnsureStatus::Failed(error) => return Err(SdkError::Other(error)),
             }
         }
 
         start_pilot(runtime, key).await?;
-        Self::wait_until_ready(&normalized, deadline).await
+        Self::wait_until_ready(&normalized, deadline, Some(runtime), key).await
     }
 
-    async fn wait_until_ready(normalized: &str, deadline: tokio::time::Instant) -> SdkResult<Self> {
+    /// Poll until the pilot reports ready. When `start_runtime`/`start_key`
+    /// are provided, re-attempt `start_pilot` on connection failure so that
+    /// a slow predecessor release doesn't doom the single initial spawn.
+    async fn wait_until_ready(
+        normalized: &str,
+        deadline: tokio::time::Instant,
+        start_runtime: Option<&str>,
+        start_key: Option<&str>,
+    ) -> SdkResult<Self> {
+        let mut last_start = tokio::time::Instant::now();
         loop {
-            if let Ok(response) = send_request(&PilotRequest::Status).await {
-                match Self::classify_status(response, normalized) {
+            match send_request(&PilotRequest::Status).await {
+                Ok(response) => match Self::classify_status(response, normalized) {
                     EnsureStatus::Ready(client) => return Ok(client),
                     EnsureStatus::Retry | EnsureStatus::Mismatch => {}
                     EnsureStatus::Failed(error) => return Err(SdkError::Other(error)),
+                },
+                Err(_) => {
+                    // Connection failed — re-attempt start if enough time has passed.
+                    if let Some(rt) = start_runtime {
+                        if last_start.elapsed() >= Duration::from_secs(1) {
+                            let _ = start_pilot(rt, start_key).await;
+                            last_start = tokio::time::Instant::now();
+                        }
+                    }
                 }
             }
             if tokio::time::Instant::now() >= deadline {

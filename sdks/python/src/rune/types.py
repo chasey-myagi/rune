@@ -42,8 +42,13 @@ class ScalePolicy:
 
 @dataclass
 class LoadReport:
-    """Static load telemetry sent with health updates."""
-    pressure: float = 0.0
+    """Static load telemetry sent with health updates.
+
+    When *pressure* is ``None`` the SDK computes it automatically from
+    ``active_requests / max_concurrent``.  Set an explicit value only
+    when you need to override the computed pressure.
+    """
+    pressure: float | None = None
     metrics: dict[str, float] = field(default_factory=dict)
 
 

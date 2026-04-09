@@ -120,6 +120,7 @@ Runtime 配置控制 `rune-server` 进程的所有运行时行为。
 | `enabled` | bool | `true` | `RUNE_AUTH__ENABLED` | 是否启用 API Key 认证 |
 | `exempt_routes` | string[] | `["/health"]` | -- | 免认证路由列表 |
 | `hmac_secret` | string? | `null` | `RUNE_AUTH__HMAC_SECRET` | HMAC 密钥，用于 API Key 哈希。设置后使用 HMAC-SHA256 替代 SHA-256，已有 SHA-256 key 自动兼容。未设置且非 dev 模式时生成临时随机密钥（重启后失效） |
+| `initial_admin_key` | string? | `null` | `RUNE_AUTH__INITIAL_ADMIN_KEY` | 首次启动时导入的管理员 API Key。幂等，仅通过环境变量设置（不出现在 TOML 配置文件中） |
 
 ### `[store]` -- 持久化
 
@@ -127,6 +128,9 @@ Runtime 配置控制 `rune-server` 进程的所有运行时行为。
 |------|------|--------|----------|------|
 | `db_path` | string | `"rune.db"` | `RUNE_STORE__DB_PATH` | SQLite 数据库文件路径 |
 | `log_retention_days` | u32 | `30` | `RUNE_STORE__LOG_RETENTION_DAYS` | 调用日志保留天数 |
+| `reader_pool_size` | usize | `4` | `RUNE_STORE__READER_POOL_SIZE` | 读连接池大小（读写分离，提升并发读取性能） |
+| `key_cache_ttl_secs` | u64 | `60` | `RUNE_STORE__KEY_CACHE_TTL_SECS` | API Key 正查缓存 TTL（秒） |
+| `key_cache_negative_ttl_secs` | u64 | `30` | `RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS` | API Key 负查缓存 TTL（秒），无效 Key 在此时间内不重复查库 |
 
 ### `[session]` -- 会话管理
 
@@ -158,6 +162,31 @@ Runtime 配置控制 `rune-server` 进程的所有运行时行为。
 | `least_load` | 最少负载。选择当前可用信号量最多（最空闲）的 Caster |
 | `priority` | 优先级优先。先筛选最高优先级的 Caster，再在同级中用内部策略（round-robin）选择 |
 
+### `[retry]` -- 重试
+
+| 字段 | 类型 | 默认值 | 环境变量 | 说明 |
+|------|------|--------|----------|------|
+| `enabled` | bool | `true` | `RUNE_RETRY__ENABLED` | 是否启用远程调用自动重试 |
+| `max_retries` | u32 | `3` | `RUNE_RETRY__MAX_RETRIES` | 最大重试次数 |
+| `base_delay_ms` | u64 | `100` | `RUNE_RETRY__BASE_DELAY_MS` | 首次重试基础延迟（ms） |
+| `max_delay_ms` | u64 | `5000` | `RUNE_RETRY__MAX_DELAY_MS` | 最大延迟上限（ms） |
+| `backoff_multiplier` | f64 | `2.0` | `RUNE_RETRY__BACKOFF_MULTIPLIER` | 指数退避乘数 |
+| `retryable_errors` | string[] | `["unavailable", "internal"]` | -- | 触发重试的错误类型。不含 `timeout`（Runtime 不会在超时时取消远端执行，重试会导致并发双跑） |
+
+重试仅作用于远程 Caster 调用（有 `caster_id` 的 invoker）。本地注册的 Rune 不经过重试链路。
+
+#### `[retry.circuit_breaker]` -- 断路器
+
+| 字段 | 类型 | 默认值 | 环境变量 | 说明 |
+|------|------|--------|----------|------|
+| `enabled` | bool | `true` | `RUNE_RETRY__CIRCUIT_BREAKER__ENABLED` | 是否启用 per-Caster 断路器 |
+| `failure_threshold` | u32 | `5` | `RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD` | 连续失败次数达到此值后断路器进入 Open 状态 |
+| `success_threshold` | u32 | `2` | `RUNE_RETRY__CIRCUIT_BREAKER__SUCCESS_THRESHOLD` | Half-Open 状态下连续成功此次数后恢复 Closed |
+| `reset_timeout_ms` | u64 | `30000` | `RUNE_RETRY__CIRCUIT_BREAKER__RESET_TIMEOUT_MS` | Open → Half-Open 等待时间（ms） |
+| `half_open_max_permits` | u32 | `1` | `RUNE_RETRY__CIRCUIT_BREAKER__HALF_OPEN_MAX_PERMITS` | Half-Open 状态允许的并发探测请求数 |
+
+断路器按 Caster 粒度隔离。当某个 Caster 断路器处于 Open 状态时，对该 Caster 的调用直接返回 `CIRCUIT_OPEN` 错误（503），不会实际发起请求。
+
 ### `[scaling]` -- 自动扩缩容
 
 | 字段 | 类型 | 默认值 | 环境变量 | 说明 |
@@ -172,6 +201,21 @@ Runtime 配置控制 `rune-server` 进程的所有运行时行为。
 | 字段 | 类型 | 默认值 | 环境变量 | 说明 |
 |------|------|--------|----------|------|
 | `requests_per_minute` | u32 | `600` | `RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE` | 每分钟最大请求数（全局）。dev 模式下不生效 |
+| `default_caster_max_concurrent` | u32 | `1024` | `RUNE_RATE_LIMIT__DEFAULT_CASTER_MAX_CONCURRENT` | 单 Caster 默认最大并发请求数（信号量上限） |
+| `per_rune` | table | `{}` | -- | Per-Rune 限流配置。key 为 Rune 名称，value 含 `requests_per_minute`（默认 60） |
+
+Per-Rune 限流示例：
+
+```toml
+[rate_limit]
+requests_per_minute = 600
+
+[rate_limit.per_rune.translate]
+requests_per_minute = 100
+
+[rate_limit.per_rune.generate]
+requests_per_minute = 30
+```
 
 ### `[log]` -- 日志
 
@@ -212,16 +256,31 @@ Runtime 配置控制 `rune-server` 进程的所有运行时行为。
 | `RUNE_SERVER__DRAIN_TIMEOUT_SECS` | `server.drain_timeout_secs` | u64 |
 | `RUNE_AUTH__ENABLED` | `auth.enabled` | bool |
 | `RUNE_AUTH__HMAC_SECRET` | `auth.hmac_secret` | string |
+| `RUNE_AUTH__INITIAL_ADMIN_KEY` | `auth.initial_admin_key` | string |
 | `RUNE_STORE__DB_PATH` | `store.db_path` | string |
 | `RUNE_STORE__LOG_RETENTION_DAYS` | `store.log_retention_days` | u32 |
+| `RUNE_STORE__READER_POOL_SIZE` | `store.reader_pool_size` | usize |
+| `RUNE_STORE__KEY_CACHE_TTL_SECS` | `store.key_cache_ttl_secs` | u64 |
+| `RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS` | `store.key_cache_negative_ttl_secs` | u64 |
 | `RUNE_SESSION__HEARTBEAT_INTERVAL_SECS` | `session.heartbeat_interval_secs` | u64 |
 | `RUNE_SESSION__HEARTBEAT_TIMEOUT_SECS` | `session.heartbeat_timeout_secs` | u64 |
 | `RUNE_SESSION__MAX_REQUEST_TIMEOUT_SECS` | `session.max_request_timeout_secs` | u64 |
 | `RUNE_GATE__MAX_UPLOAD_SIZE_MB` | `gate.max_upload_size_mb` | u64 |
 | `RUNE_RESOLVER__STRATEGY` | `resolver.strategy` | string |
+| `RUNE_RETRY__ENABLED` | `retry.enabled` | bool |
+| `RUNE_RETRY__MAX_RETRIES` | `retry.max_retries` | u32 |
+| `RUNE_RETRY__BASE_DELAY_MS` | `retry.base_delay_ms` | u64 |
+| `RUNE_RETRY__MAX_DELAY_MS` | `retry.max_delay_ms` | u64 |
+| `RUNE_RETRY__BACKOFF_MULTIPLIER` | `retry.backoff_multiplier` | f64 |
+| `RUNE_RETRY__CIRCUIT_BREAKER__ENABLED` | `retry.circuit_breaker.enabled` | bool |
+| `RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD` | `retry.circuit_breaker.failure_threshold` | u32 |
+| `RUNE_RETRY__CIRCUIT_BREAKER__SUCCESS_THRESHOLD` | `retry.circuit_breaker.success_threshold` | u32 |
+| `RUNE_RETRY__CIRCUIT_BREAKER__RESET_TIMEOUT_MS` | `retry.circuit_breaker.reset_timeout_ms` | u64 |
+| `RUNE_RETRY__CIRCUIT_BREAKER__HALF_OPEN_MAX_PERMITS` | `retry.circuit_breaker.half_open_max_permits` | u32 |
 | `RUNE_SCALING__ENABLED` | `scaling.enabled` | bool |
 | `RUNE_SCALING__EVAL_INTERVAL_SECS` | `scaling.eval_interval_secs` | u64 |
 | `RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE` | `rate_limit.requests_per_minute` | u32 |
+| `RUNE_RATE_LIMIT__DEFAULT_CASTER_MAX_CONCURRENT` | `rate_limit.default_caster_max_concurrent` | u32 |
 | `RUNE_LOG__LEVEL` | `log.level` | string |
 | `RUNE_LOG__FILE` | `log.file` | string |
 | `RUNE_TELEMETRY__OTLP_ENDPOINT` | `telemetry.otlp_endpoint` | string |
@@ -248,10 +307,14 @@ drain_timeout_secs = 15
 enabled = true
 exempt_routes = ["/health"]
 # hmac_secret = "your-secret-here"
+# initial_admin_key 仅通过环境变量 RUNE_AUTH__INITIAL_ADMIN_KEY 设置
 
 [store]
 db_path = "rune.db"
 log_retention_days = 30
+reader_pool_size = 4
+key_cache_ttl_secs = 60
+key_cache_negative_ttl_secs = 30
 
 [session]
 heartbeat_interval_secs = 10
@@ -265,12 +328,28 @@ max_upload_size_mb = 10
 [resolver]
 strategy = "round_robin"
 
+[retry]
+enabled = true
+max_retries = 3
+base_delay_ms = 100
+max_delay_ms = 5000
+backoff_multiplier = 2.0
+retryable_errors = ["unavailable", "internal"]
+
+[retry.circuit_breaker]
+enabled = true
+failure_threshold = 5
+success_threshold = 2
+reset_timeout_ms = 30000
+half_open_max_permits = 1
+
 [scaling]
 enabled = false
 eval_interval_secs = 30
 
 [rate_limit]
 requests_per_minute = 600
+default_caster_max_concurrent = 1024
 
 [log]
 level = "info"

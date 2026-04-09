@@ -47,7 +47,11 @@ export interface ScalePolicy {
     shutdownSignal?: string;
 }
 export interface LoadReport {
-    pressure: number;
+    /**
+     * Explicit pressure override. When omitted, computed automatically
+     * from `activeRequests / maxConcurrent`.
+     */
+    pressure?: number;
     metrics?: Record<string, number>;
 }
 /**

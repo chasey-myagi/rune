@@ -20,11 +20,15 @@ type PilotRequest =
     }
   | {
       command: 'status';
+    }
+  | {
+      command: 'stop';
     };
 
 interface PilotResponse {
   ok: boolean;
   pilot_id: string;
+  runtime: string;
   error?: string | null;
 }
 
@@ -32,23 +36,60 @@ export class PilotClient {
   constructor(readonly pilotId: string) {}
 
   static async ensure(runtime: string, key?: string): Promise<PilotClient> {
+    const normalized = normalizeRuntime(runtime);
+    let response: PilotResponse | null = null;
     try {
-      const response = await sendRequest({ command: 'status' });
-      return PilotClient.fromResponse(response);
+      response = await sendRequest({ command: 'status' });
     } catch {
-      startPilot(runtime, key);
+      // No running pilot — will start one below.
     }
 
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline) {
-      try {
-        const response = await sendRequest({ command: 'status' });
-        return PilotClient.fromResponse(response);
-      } catch {
-        await sleep(100);
+    if (response) {
+      const status = classifyStatus(response, normalized);
+      if (status.kind === 'ready') return new PilotClient(status.pilotId);
+      if (status.kind === 'failed') throw new Error(status.error);
+      if (status.kind === 'mismatch') {
+        try { await sendRequest({ command: 'stop' }); } catch { /* ignore */ }
+      }
+      if (status.kind === 'retry') {
+        return PilotClient.waitUntilReady(normalized);
       }
     }
 
+    startPilot(runtime, key);
+    return PilotClient.waitUntilReady(normalized, runtime, key);
+  }
+
+  /**
+   * Poll until pilot reports ready. When `retryRuntime` is provided,
+   * re-attempt start on connection failure so a slow predecessor release
+   * doesn't doom the single initial spawn.
+   */
+  private static async waitUntilReady(
+    normalized: string,
+    retryRuntime?: string,
+    retryKey?: string,
+  ): Promise<PilotClient> {
+    const deadline = Date.now() + 5000;
+    let lastStart = Date.now();
+    while (Date.now() < deadline) {
+      let response: PilotResponse;
+      try {
+        response = await sendRequest({ command: 'status' });
+      } catch {
+        // Connection failed — re-attempt start if enough time has passed.
+        if (retryRuntime && Date.now() - lastStart >= 1000) {
+          startPilot(retryRuntime, retryKey);
+          lastStart = Date.now();
+        }
+        await sleep(100);
+        continue;
+      }
+      const status = classifyStatus(response, normalized);
+      if (status.kind === 'ready') return new PilotClient(status.pilotId);
+      if (status.kind === 'failed') throw new Error(status.error);
+      await sleep(100);
+    }
     throw new Error('pilot did not become ready');
   }
 
@@ -72,16 +113,33 @@ export class PilotClient {
     ensureOk(response);
   }
 
-  private static fromResponse(response: PilotResponse): PilotClient {
-    ensureOk(response);
-    return new PilotClient(response.pilot_id);
-  }
 }
 
 function ensureOk(response: PilotResponse): void {
   if (!response.ok) {
     throw new Error(response.error ?? 'pilot request failed');
   }
+}
+
+type EnsureStatus =
+  | { kind: 'ready'; pilotId: string }
+  | { kind: 'retry' }
+  | { kind: 'mismatch' }
+  | { kind: 'failed'; error: string };
+
+const PILOT_CONNECTING_ERROR = 'runtime session not attached';
+
+function classifyStatus(response: PilotResponse, normalized: string): EnsureStatus {
+  if (response.runtime !== normalized) {
+    return { kind: 'mismatch' };
+  }
+  if (response.ok) {
+    return { kind: 'ready', pilotId: response.pilot_id };
+  }
+  if (response.error === PILOT_CONNECTING_ERROR || !response.error) {
+    return { kind: 'retry' };
+  }
+  return { kind: 'failed', error: response.error };
 }
 
 function startPilot(runtime: string, key?: string): void {

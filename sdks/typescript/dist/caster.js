@@ -176,15 +176,25 @@ export class Caster {
     async run() {
         this._stopped = false;
         let delay = this.reconnect.initialDelayMs;
-        const pilotClient = this.scalePolicy
-            ? await PilotClient.ensure(this.runtime, this.key)
-            : null;
-        if (pilotClient && this.scalePolicy) {
-            await pilotClient.register(this.casterId, this.scalePolicy);
-        }
-        const pilotId = pilotClient?.pilotId;
+        let lastPilot = null;
         try {
             while (!this._stopped) {
+                // (Re-)establish pilot registration on every connect attempt so
+                // that a pilot daemon restart is picked up automatically.
+                let pilotId;
+                if (this.scalePolicy) {
+                    try {
+                        const pilot = await PilotClient.ensure(this.runtime, this.key);
+                        await pilot.register(this.casterId, this.scalePolicy);
+                        pilotId = pilot.pilotId;
+                        lastPilot = pilot;
+                    }
+                    catch (err) {
+                        // Pilot failure is non-fatal — caster can still serve traffic.
+                        // eslint-disable-next-line no-console
+                        console.warn(`pilot registration failed: ${err}`);
+                    }
+                }
                 try {
                     await this._connectAndRun(pilotId);
                     // Session ended normally — don't reconnect
@@ -201,8 +211,8 @@ export class Caster {
             }
         }
         finally {
-            if (pilotClient) {
-                await pilotClient.deregister(this.casterId).catch(() => { });
+            if (lastPilot) {
+                await lastPilot.deregister(this.casterId).catch(() => { });
             }
         }
     }
@@ -314,7 +324,7 @@ export class Caster {
             available_permits: Math.max(0, this.maxConcurrent - this._activeRequests),
         };
         const computedPressure = this.maxConcurrent === 0 ? 0 : this._activeRequests / this.maxConcurrent;
-        const pressure = this.loadReport && this.loadReport.pressure > 0
+        const pressure = this.loadReport?.pressure != null
             ? this.loadReport.pressure
             : computedPressure;
         return {

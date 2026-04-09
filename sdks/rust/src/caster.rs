@@ -352,12 +352,21 @@ impl Caster {
 
                     let tx_clone = tx.clone();
                     let cancel_tokens_clone = cancel_tokens.clone();
-                    let active_requests = Arc::clone(&self.active_requests);
                     let request_id = req.request_id.clone();
+                    let active_requests = Arc::clone(&self.active_requests);
                     tokio::spawn(async move {
+                        // Decrement active_requests on exit regardless of
+                        // whether the handler completes normally or panics.
+                        struct Guard(Arc<std::sync::atomic::AtomicU32>);
+                        impl Drop for Guard {
+                            fn drop(&mut self) {
+                                self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                        let _guard = Guard(active_requests);
+
                         execute_handler(registered, req, tx_clone, token).await;
                         cancel_tokens_clone.write().await.remove(&request_id);
-                        active_requests.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
                 Some(Payload::Cancel(cancel)) => {
@@ -465,18 +474,16 @@ fn build_health_report_message(config: &CasterConfig, active_requests: u32) -> S
         .entry("available_permits".into())
         .or_insert(config.max_concurrent.saturating_sub(active_requests) as f64);
 
+    let computed_pressure = if config.max_concurrent == 0 {
+        0.0
+    } else {
+        active_requests as f64 / config.max_concurrent as f64
+    };
     let pressure = config
         .load_report
         .as_ref()
-        .map(|report| report.pressure)
-        .filter(|pressure| *pressure > 0.0)
-        .unwrap_or_else(|| {
-            if config.max_concurrent == 0 {
-                0.0
-            } else {
-                active_requests as f64 / config.max_concurrent as f64
-            }
-        });
+        .and_then(|lr| lr.pressure)
+        .unwrap_or(computed_pressure);
 
     SessionMessage {
         payload: Some(Payload::HealthReport(HealthReport {

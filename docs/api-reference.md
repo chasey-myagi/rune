@@ -588,25 +588,49 @@ data: [DONE]
 {
   "error": {
     "code": "NOT_FOUND",
-    "message": "rune 'xyz' not found"
+    "message": "rune 'xyz' not found",
+    "request_id": "req-abc123"
   }
 }
 ```
 
-常见错误码：
+`request_id` 在可用时返回（来自请求头 `X-Request-Id` 或自动生成），便于全链路问题追踪。
+
+### Rune 调用错误码
 
 | 状态码 | 错误码 | 说明 |
 |--------|--------|------|
 | 400 | BAD_REQUEST | 请求体读取失败或参数错误 |
+| 400 | INVALID_INPUT | 无效输入格式 |
 | 400 | STREAM_NOT_SUPPORTED | Rune 不支持流式调用 |
-| 401 | UNAUTHORIZED | 认证失败 |
+| 401 | UNAUTHORIZED | 认证失败（Key 无效或缺失） |
+| 403 | FORBIDDEN | 权限不足（Key 类型不匹配等） |
 | 404 | NOT_FOUND | Rune/Task/File 不存在 |
-| 404 | FLOW_NOT_FOUND | Flow 不存在 |
-| 409 | CONFLICT | 资源冲突（Flow 名重复、任务已完成） |
+| 409 | CONFLICT | 资源冲突（任务已完成等） |
 | 422 | VALIDATION_FAILED | 输入 schema 校验失败 |
-| 422 | INVALID_INPUT | 无效输入格式 |
 | 429 | RATE_LIMITED | 请求频率超限 |
+| 499 | CANCELLED | 请求被取消（客户端断连） |
 | 500 | INTERNAL | 内部错误 |
+| 500 | EXECUTION_FAILED | Caster 执行失败（返回错误结果） |
 | 500 | OUTPUT_VALIDATION_FAILED | 输出 schema 校验失败 |
-| 503 | NO_MATCHING_CASTER | 标签路由无匹配 Caster |
 | 503 | UNAVAILABLE | Caster 并发已满 |
+| 503 | NO_MATCHING_CASTER | 标签路由无匹配 Caster |
+| 503 | CIRCUIT_OPEN | 目标 Caster 断路器处于 Open 状态 |
+| 504 | TIMEOUT | 请求超时（Caster 执行超时） |
+
+### Flow API 错误码
+
+| 状态码 | 错误码 | 说明 |
+|--------|--------|------|
+| 400 | DAG_ERROR | DAG 拓扑错误（循环依赖、缺失步骤等） |
+| 401 | STEP_UNAUTHORIZED | Flow 步骤认证失败 |
+| 403 | STEP_FORBIDDEN | Flow 步骤权限不足 |
+| 404 | FLOW_NOT_FOUND | Flow 不存在 |
+| 409 | CONFLICT | Flow 名重复 |
+| 429 | STEP_RATE_LIMITED | Flow 步骤触发频率限制 |
+| 500 | STEP_FAILED | Flow 步骤执行失败（通用） |
+| 500 | NO_TERMINAL_STEP | Flow 无终止步骤（内部错误） |
+| 500 | SERIALIZATION_FAILED | Flow 步骤间数据序列化失败 |
+| 503 | STEP_UNAVAILABLE | Flow 步骤目标 Caster 不可用 |
+| 503 | STEP_CIRCUIT_OPEN | Flow 步骤目标断路器 Open |
+| 504 | STEP_TIMEOUT | Flow 步骤执行超时 |

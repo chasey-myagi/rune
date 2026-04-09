@@ -17,18 +17,57 @@ class PilotClient:
 
     @classmethod
     async def ensure(cls, runtime: str, api_key: str | None = None) -> "PilotClient":
+        normalized = _normalize_runtime(runtime)
+        response = None
         try:
-            return cls._from_response(await _send_request({"command": "status"}))
-        except Exception:
-            _start_pilot(runtime, api_key)
+            response = await _send_request({"command": "status"})
+        except OSError:
+            pass  # No running pilot — will start one below.
 
+        if response is not None:
+            status = _classify_status(response, normalized)
+            if status[0] == "ready":
+                return cls(status[1])
+            if status[0] == "failed":
+                raise RuntimeError(status[1])
+            if status[0] == "mismatch":
+                try:
+                    await _send_request({"command": "stop"})
+                except Exception:
+                    pass
+            elif status[0] == "retry":
+                return await cls._wait_until_ready(normalized)
+
+        _start_pilot(runtime, api_key)
+        return await cls._wait_until_ready(normalized, runtime, api_key)
+
+    @classmethod
+    async def _wait_until_ready(
+        cls,
+        normalized: str,
+        retry_runtime: str | None = None,
+        retry_key: str | None = None,
+    ) -> "PilotClient":
+        """Poll until pilot reports ready. When *retry_runtime* is given,
+        re-attempt ``_start_pilot`` on connection failure so a slow
+        predecessor release doesn't doom the single initial spawn."""
         deadline = time.monotonic() + 5.0
+        last_start = time.monotonic()
         while time.monotonic() < deadline:
             try:
-                return cls._from_response(await _send_request({"command": "status"}))
-            except Exception:
+                response = await _send_request({"command": "status"})
+            except OSError:
+                if retry_runtime and time.monotonic() - last_start >= 1.0:
+                    _start_pilot(retry_runtime, retry_key)
+                    last_start = time.monotonic()
                 await asyncio.sleep(0.1)
-
+                continue
+            status = _classify_status(response, normalized)
+            if status[0] == "ready":
+                return cls(status[1])
+            if status[0] == "failed":
+                raise RuntimeError(status[1])
+            await asyncio.sleep(0.1)
         raise RuntimeError("pilot did not become ready")
 
     async def register(self, caster_id: str, policy: ScalePolicy) -> None:
@@ -58,6 +97,8 @@ class PilotClient:
         _ensure_ok(response)
         return cls(str(response["pilot_id"]))
 
+_PILOT_CONNECTING_ERROR = "runtime session not attached"
+
 
 async def _send_request(payload: dict) -> dict:
     reader, writer = await asyncio.open_unix_connection(_socket_path())
@@ -76,6 +117,18 @@ async def _send_request(payload: dict) -> dict:
 def _ensure_ok(response: dict) -> None:
     if not response.get("ok"):
         raise RuntimeError(response.get("error") or "pilot request failed")
+
+
+def _classify_status(response: dict, normalized: str) -> tuple[str, str]:
+    runtime = response.get("runtime", "")
+    if runtime != normalized:
+        return ("mismatch", "")
+    if response.get("ok"):
+        return ("ready", str(response["pilot_id"]))
+    error = response.get("error")
+    if error == _PILOT_CONNECTING_ERROR or not error:
+        return ("retry", "")
+    return ("failed", error)
 
 
 def _start_pilot(runtime: str, api_key: str | None) -> None:

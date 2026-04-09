@@ -154,15 +154,23 @@ class Caster:
     async def _run_with_reconnect(self) -> None:
         """Reconnect loop with exponential backoff."""
         delay = self._reconnect_base_delay
-        pilot = None
-        pilot_id = None
-        if self._scale_policy is not None:
-            pilot = await PilotClient.ensure(self._addr, self._api_key)
-            await pilot.register(self._caster_id, self._scale_policy)
-            pilot_id = pilot.pilot_id
+        last_pilot: PilotClient | None = None
 
         try:
             while not self._shutdown.is_set():
+                # (Re-)establish pilot registration on every connect attempt
+                # so that a pilot daemon restart is picked up automatically.
+                pilot_id = None
+                if self._scale_policy is not None:
+                    try:
+                        pilot = await PilotClient.ensure(self._addr, self._api_key)
+                        await pilot.register(self._caster_id, self._scale_policy)
+                        pilot_id = pilot.pilot_id
+                        last_pilot = pilot
+                    except Exception as e:
+                        # Pilot failure is non-fatal — caster can still serve traffic.
+                        logger.warning("pilot registration failed: %s", e)
+
                 try:
                     await self._session(pilot_id)
                     # Session ended normally (detach) -- don't reconnect
@@ -183,9 +191,9 @@ class Caster:
                 delay = min(delay * 2, self._reconnect_max_delay)
                 logger.info("reconnecting to %s ...", self._addr)
         finally:
-            if pilot is not None:
+            if last_pilot is not None:
                 try:
-                    await pilot.deregister(self._caster_id)
+                    await last_pilot.deregister(self._caster_id)
                 except Exception:
                     logger.debug("pilot deregister failed", exc_info=True)
 
@@ -254,7 +262,7 @@ class Caster:
         )
         pressure = (
             self._load_report.pressure
-            if self._load_report is not None and self._load_report.pressure > 0.0
+            if self._load_report is not None and self._load_report.pressure is not None
             else computed_pressure
         )
         return rune_pb2.SessionMessage(

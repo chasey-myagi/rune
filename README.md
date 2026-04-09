@@ -10,11 +10,14 @@
 - **Schema 校验 + OpenAPI 生成** -- JSON Schema 输入输出校验，自动生成 OpenAPI 3.0 文档
 - **文件传输** -- multipart 上传 + FileBroker 内存中转 + 下载端点
 - **API Key 认证** -- Gate Key (HTTP) + Caster Key (gRPC)，两层隔离
-- **Rate Limiting** -- 基于滑动窗口的请求频率限制
+- **重试与断路器** -- 远程调用自动重试 + per-Caster 断路器，指数退避、可配置阈值
+- **请求追踪** -- 统一 request_id 贯穿全链路，W3C Trace Context 透传
+- **Rate Limiting** -- 全局 + per-Rune 滑动窗口频率限制，Caster 并发上限
+- **Caster 健康检查** -- 协议级 HealthReport + pressure-aware 调度
 - **高级调度** -- round-robin / random / least-load / priority / label-based 五种策略
 - **自动扩缩容** -- Pilot 守护进程 + pressure-aware 调度 + 多语言 SDK scaling policy
 - **CLI 工具** -- 单二进制管理 Runtime、调用 Rune、管理 Key 和 Flow
-- **SQLite 持久化** -- 异步任务、调用日志、API Key 全部持久化
+- **SQLite 持久化** -- 异步任务、调用日志、API Key 全部持久化，读写分离连接池
 
 ## 安装
 
@@ -25,8 +28,8 @@
 brew install chasey-myagi/tap/rune
 
 # 或直接下载二进制
-curl -fsSL https://github.com/chasey-myagi/rune/releases/latest/download/rune-v0.2.0-darwin-arm64.tar.gz | tar xz
-sudo mv rune rune-server /usr/local/bin/
+# 或直接从 release 页面下载对应平台的二进制
+# https://github.com/chasey-myagi/rune/releases/latest
 ```
 
 安装后你会得到两个二进制：
