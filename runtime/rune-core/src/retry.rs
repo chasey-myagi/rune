@@ -101,6 +101,14 @@ impl RetryInvoker {
         circuit_breaker: Arc<CircuitBreaker>,
     ) -> Self {
         let retryable = parse_retryable_errors(&config.retryable_errors);
+        if retryable.contains(&RuneErrorKind::Timeout) {
+            tracing::warn!(
+                caster_id = %caster_id,
+                "retryable_errors contains 'timeout' which is forcibly excluded — \
+                 timeout errors are never retried because the runtime does not cancel \
+                 the remote caster on timeout"
+            );
+        }
         Self {
             inner,
             caster_id,
@@ -225,14 +233,18 @@ impl RuneInvoker for RetryInvoker {
             return self.inner.invoke_stream(ctx, input).await;
         }
 
-        let _permit = self.circuit_breaker.can_execute()?;
+        let permit = self.circuit_breaker.can_execute()?;
         match self.inner.invoke_stream(ctx, input).await {
             Ok(mut inner_rx) => {
                 // Wrap the receiver so success/failure is recorded when the
                 // stream actually finishes, not at connection time.
+                // The CBPermit is moved into the closure so that in HalfOpen
+                // state the permit is held for the stream's entire lifetime,
+                // preventing additional probes until this stream completes.
                 let cb = Arc::clone(&self.circuit_breaker);
                 let (tx, rx) = mpsc::channel(32);
                 tokio::spawn(async move {
+                    let _permit = permit; // hold permit until stream ends
                     let mut saw_error = false;
                     while let Some(item) = inner_rx.recv().await {
                         if item.is_err() {
@@ -917,5 +929,95 @@ mod tests {
 
         assert!(matches!(result, Err(RuneError::Unavailable)));
         assert_eq!(inner.call_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// Regression P1-5: CBPermit must be held for the stream's entire lifetime.
+    ///
+    /// In HalfOpen state, the breaker allows at most `half_open_max_permits`
+    /// concurrent probes. If the permit is dropped when invoke_stream returns
+    /// (before the stream finishes), a second probe can enter while the first
+    /// stream is still active. After the fix, the permit is moved into the
+    /// spawn closure and held until the stream completes.
+    #[tokio::test]
+    async fn test_fix_stream_cb_permit_held_during_stream() {
+        use crate::circuit_breaker::CBState;
+
+        struct SlowStreamInvoker;
+
+        #[async_trait::async_trait]
+        impl RuneInvoker for SlowStreamInvoker {
+            async fn invoke_once(
+                &self,
+                _ctx: RuneContext,
+                _input: Bytes,
+            ) -> Result<Bytes, RuneError> {
+                panic!("not used")
+            }
+
+            async fn invoke_stream(
+                &self,
+                _ctx: RuneContext,
+                _input: Bytes,
+            ) -> Result<mpsc::Receiver<Result<Bytes, RuneError>>, RuneError> {
+                let (tx, rx) = mpsc::channel(4);
+                // Spawn a task that holds the stream open
+                tokio::spawn(async move {
+                    // Wait a bit before completing the stream
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    let _ = tx.send(Ok(Bytes::from("data"))).await;
+                });
+                Ok(rx)
+            }
+        }
+
+        // Set up breaker in HalfOpen state with max_permits=1
+        let config = CircuitBreakerConfig {
+            enabled: true,
+            failure_threshold: 1,
+            success_threshold: 1,
+            reset_timeout_ms: 1,
+            half_open_max_permits: 1,
+        };
+        let breaker = Arc::new(CircuitBreaker::new(config.clone()));
+        // Trip the breaker
+        breaker.record_failure();
+        assert_eq!(breaker.state(), CBState::Open);
+        // Wait for reset_timeout so it transitions to HalfOpen on next can_execute
+        std::thread::sleep(Duration::from_millis(5));
+
+        let retry_cfg = RetryConfig {
+            enabled: true,
+            max_retries: 0,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+            backoff_multiplier: 1.0,
+            retryable_errors: vec![],
+            circuit_breaker: config,
+        };
+
+        let invoker = RetryInvoker::new(
+            Arc::new(SlowStreamInvoker),
+            "caster-1".into(),
+            retry_cfg,
+            Arc::clone(&breaker),
+        );
+
+        // First stream: should succeed (HalfOpen allows 1 probe)
+        let stream_rx = invoker
+            .invoke_stream(test_ctx(), Bytes::new())
+            .await
+            .expect("first stream should be allowed");
+
+        // The permit must still be held inside the spawn closure.
+        // With max_permits=1, a second probe attempt must be rejected.
+        let second_attempt = invoker.invoke_stream(test_ctx(), Bytes::new()).await;
+        assert!(
+            matches!(second_attempt, Err(RuneError::CircuitOpen { .. })),
+            "second stream must be rejected while first stream is active (permit held)"
+        );
+
+        // Consume the first stream so the permit is released
+        drop(stream_rx);
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 }

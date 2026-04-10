@@ -40,6 +40,15 @@ pub enum CasterRole {
     Pilot,
 }
 
+/// Wraps per-caster health info with a generation marker (`connected_at`)
+/// so that `cleanup_session` can atomically remove only its own generation's
+/// entry via `DashMap::remove_if`.
+#[derive(Debug)]
+pub(crate) struct HealthEntry {
+    pub(crate) connected_at: Instant,
+    pub(crate) info: Arc<std::sync::RwLock<HealthInfo>>,
+}
+
 impl CasterRole {
     fn from_proto(role: &str) -> Self {
         match role {
@@ -61,6 +70,10 @@ pub struct CasterMetadata {
     pub labels: HashMap<String, String>,
     pub max_concurrent: usize,
     pub role: CasterRole,
+    /// Generation marker — matches the `CasterState::connected_at` set during
+    /// `handle_attach`.  Used by `cleanup_session` to conditionally remove only
+    /// this generation's metadata via `DashMap::remove_if`.
+    pub(crate) connected_at: Instant,
 }
 
 impl HealthStatusLevel {
@@ -99,9 +112,24 @@ pub(crate) struct PendingRequest {
     pub(crate) _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
+/// Central registry for caster gRPC stream connections.
+///
+/// `DashMap` is used throughout for concurrent shard-based access.  DashMap
+/// internally uses `std::sync::RwLock` per shard; if profiling shows lock
+/// contention on hot paths (e.g. high-frequency `pending` lookups), consider
+/// enabling the `parking_lot` feature on `dashmap` for fairer scheduling and
+/// lower overhead under contention.
 pub struct SessionManager {
     pub(crate) sessions: DashMap<String, CasterState>,
-    pub(crate) health: DashMap<String, Arc<std::sync::RwLock<HealthInfo>>>,
+    /// Health info uses `std::sync::RwLock` (not `tokio::sync::RwLock`) intentionally:
+    /// all read/write operations are short scalar assignments with no `.await` while
+    /// holding the lock, so the synchronous lock is faster (no async scheduler overhead).
+    /// Do NOT add `.await` calls while holding these locks.
+    ///
+    /// Each entry carries a `connected_at` generation marker so that
+    /// `cleanup_session` can do `remove_if` atomically per-entry, matching
+    /// the same pattern used on `sessions`.
+    pub(crate) health: DashMap<String, HealthEntry>,
     pub(crate) metadata: DashMap<String, CasterMetadata>,
     pub(crate) heartbeat_interval: Duration,
     pub(crate) heartbeat_timeout: Duration,
@@ -195,6 +223,7 @@ impl SessionManager {
     pub fn health_info(&self, caster_id: &str) -> Option<HealthInfo> {
         self.health.get(caster_id).map(|entry| {
             entry
+                .info
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
@@ -315,9 +344,13 @@ impl SessionManager {
                 connected_at: Instant::now(),
             },
         );
+        let connected_at = self.sessions.get(caster_id).unwrap().connected_at;
         self.health.insert(
             caster_id.to_string(),
-            Arc::new(std::sync::RwLock::new(HealthInfo::default())),
+            HealthEntry {
+                connected_at,
+                info: Arc::new(std::sync::RwLock::new(HealthInfo::default())),
+            },
         );
         self.metadata.insert(
             caster_id.to_string(),
@@ -325,6 +358,7 @@ impl SessionManager {
                 labels: HashMap::new(),
                 max_concurrent,
                 role: CasterRole::Caster,
+                connected_at,
             },
         );
     }
@@ -341,15 +375,15 @@ impl SessionManager {
 
     /// Set the health status of a test caster.
     pub fn set_test_health(&self, caster_id: &str, status: HealthStatusLevel) {
-        if let Some(health) = self.health.get(caster_id) {
-            let mut info = health.write().unwrap();
+        if let Some(entry) = self.health.get(caster_id) {
+            let mut info = entry.info.write().unwrap();
             info.status = status;
         }
     }
 
     pub fn set_test_pressure(&self, caster_id: &str, pressure: f64) {
-        if let Some(health) = self.health.get(caster_id) {
-            let mut info = health.write().unwrap();
+        if let Some(entry) = self.health.get(caster_id) {
+            let mut info = entry.info.write().unwrap();
             info.pressure = pressure;
             info.pressure_reported = true;
         }
@@ -380,6 +414,10 @@ struct SessionContext {
     last_heartbeat_ms: Arc<AtomicU64>,
     outbound_tx: mpsc::Sender<SessionMessage>,
     relay: Arc<Relay>,
+    /// Timestamp set during handle_attach; cleanup_session compares this
+    /// against the stored CasterState.connected_at to avoid deleting a
+    /// newer session that reconnected with the same caster_id.
+    connected_at: Option<Instant>,
 }
 
 impl SessionContext {
@@ -396,6 +434,7 @@ impl SessionContext {
             last_heartbeat_ms: Arc::new(AtomicU64::new(now_ms())),
             outbound_tx,
             relay,
+            connected_at: None,
         }
     }
 
@@ -544,6 +583,8 @@ impl SessionManager {
         tracing::info!(caster_id = %id, effective_max_concurrent = permits, "caster concurrency configured");
         ctx.semaphore.add_permits(permits);
 
+        let now = Instant::now();
+        ctx.connected_at = Some(now);
         self.sessions.insert(
             id.clone(),
             CasterState {
@@ -551,12 +592,15 @@ impl SessionManager {
                 pending: Arc::clone(&ctx.pending),
                 timeout_handles: Arc::clone(&ctx.timeout_handles),
                 semaphore: Arc::clone(&ctx.semaphore),
-                connected_at: Instant::now(),
+                connected_at: now,
             },
         );
         self.health.insert(
             id.clone(),
-            Arc::new(std::sync::RwLock::new(HealthInfo::default())),
+            HealthEntry {
+                connected_at: now,
+                info: Arc::new(std::sync::RwLock::new(HealthInfo::default())),
+            },
         );
         self.metadata.insert(
             id.clone(),
@@ -564,11 +608,17 @@ impl SessionManager {
                 labels: attach.labels.clone(),
                 max_concurrent: permits,
                 role,
+                connected_at: now,
             },
         );
 
         let mut configs = Vec::new();
         if role != CasterRole::Pilot {
+            // Remove stale relay entries from any previous session before
+            // re-registering, then stamp this generation so cleanup_session
+            // (which uses remove_caster_if_gen) will not wipe our entries.
+            ctx.relay.remove_caster(&id);
+            ctx.relay.set_caster_generation(&id, now);
             for decl in &attach.runes {
                 let config = RuneConfig {
                     name: decl.name.clone(),
@@ -703,8 +753,9 @@ impl SessionManager {
     /// This is the SOLE boundary where telemetry floats are sanitized.
     /// `pub(crate)` for direct testing — production entry is `handle_health_report()`.
     pub(crate) fn apply_health_report(&self, caster_id: &str, report: rune_proto::HealthReport) {
-        if let Some(health) = self.health.get(caster_id) {
-            let mut current = health
+        if let Some(entry) = self.health.get(caster_id) {
+            let mut current = entry
+                .info
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             current.status = HealthStatusLevel::from_proto(report.status);
@@ -732,33 +783,69 @@ impl SessionManager {
 
     async fn cleanup_session(&self, ctx: &SessionContext) {
         if let Some(id) = &ctx.caster_id {
-            tracing::info!(caster_id = %id, "cleaning up disconnected caster");
-            self.sessions.remove(id);
-            self.health.remove(id);
-            self.metadata.remove(id);
-            ctx.relay.remove_caster(id);
-            let th_keys: Vec<String> = ctx
-                .timeout_handles
-                .iter()
-                .map(|e| e.key().clone())
-                .collect();
-            for key in th_keys {
-                abort_timeout_handle(&ctx.timeout_handles, &key);
+            // Guard: only remove if the stored session is still ours.
+            // If a newer session reconnected with the same caster_id,
+            // the stored connected_at will differ — skip cleanup to
+            // avoid deleting the replacement session's data.
+            // Atomic check-and-remove: avoids TOCTOU race where a reconnect
+            // could insert a new session between our get() and remove().
+            let removed = self
+                .sessions
+                .remove_if(id, |_, s| Some(s.connected_at) == ctx.connected_at);
+            if removed.is_none() {
+                tracing::info!(
+                    caster_id = %id,
+                    "skipping cleanup — session superseded by reconnect"
+                );
+                Self::drain_local_state(ctx, id, "superseded").await;
+                return;
             }
-            let keys: Vec<String> = ctx.pending.iter().map(|e| e.key().clone()).collect();
-            for req_id in keys {
-                if let Some((_, p)) = ctx.pending.remove(&req_id) {
-                    let err = Err(RuneError::Internal(anyhow::anyhow!(
-                        "caster '{}' disconnected",
-                        id
-                    )));
-                    match p.tx {
-                        PendingResponse::Once(tx) => {
-                            let _ = tx.send(err);
-                        }
-                        PendingResponse::Stream(tx) => {
-                            let _ = tx.send(err).await;
-                        }
+            tracing::info!(caster_id = %id, "cleaning up disconnected caster");
+            // Each entry carries a `connected_at` generation marker set during
+            // handle_attach.  `remove_if` is atomic per DashMap shard, so a
+            // replacement session's entries (with a different connected_at)
+            // are never accidentally deleted — no TOCTOU window.
+            let gen = ctx
+                .connected_at
+                .expect("BUG: connected_at not set; handle_attach must run before cleanup");
+            self.health
+                .remove_if(id, |_, entry| entry.connected_at == gen);
+            self.metadata
+                .remove_if(id, |_, meta| meta.connected_at == gen);
+            // Relay: generation-aware removal.  Only removes entries
+            // stamped with our generation (set in handle_attach via
+            // set_caster_generation).  If a replacement session already
+            // re-registered with a new generation, this is a no-op.
+            ctx.relay.remove_caster_if_gen(id, gen);
+            Self::drain_local_state(ctx, id, "disconnected").await;
+        }
+    }
+
+    /// Abort pending timeout handles and drain pending requests with an error.
+    /// Shared by both "current session cleanup" and "superseded session cleanup".
+    async fn drain_local_state(ctx: &SessionContext, caster_id: &str, reason: &str) {
+        let th_keys: Vec<String> = ctx
+            .timeout_handles
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        for key in th_keys {
+            abort_timeout_handle(&ctx.timeout_handles, &key);
+        }
+        let keys: Vec<String> = ctx.pending.iter().map(|e| e.key().clone()).collect();
+        for req_id in keys {
+            if let Some((_, p)) = ctx.pending.remove(&req_id) {
+                let err = Err(RuneError::Internal(anyhow::anyhow!(
+                    "caster '{}' {} — pending request aborted",
+                    caster_id,
+                    reason
+                )));
+                match p.tx {
+                    PendingResponse::Once(tx) => {
+                        let _ = tx.send(err);
+                    }
+                    PendingResponse::Stream(tx) => {
+                        let _ = tx.send(err).await;
                     }
                 }
             }
@@ -2597,6 +2684,7 @@ mod tests {
                 },
                 max_concurrent: 4,
                 role: CasterRole::Caster,
+                connected_at: Instant::now(),
             },
         );
     }

@@ -8,6 +8,7 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 type EntryMap = HashMap<String, RuneEntry>;
 
@@ -26,6 +27,9 @@ pub struct Relay {
     gate_path_index: DashMap<String, String>,
     /// Reverse index: caster_id -> registered rune names
     caster_index: DashMap<String, Vec<String>>,
+    /// Generation marker per caster — set during handle_attach, checked by
+    /// remove_caster_if_gen to avoid deleting a reconnected session's entries.
+    caster_connected_at: DashMap<String, Instant>,
     /// Serializes register/remove_caster to prevent race conditions on gate_path_index
     write_lock: Mutex<()>,
     generation: AtomicU64,
@@ -46,6 +50,7 @@ impl Relay {
             entries: DashMap::new(),
             gate_path_index: DashMap::new(),
             caster_index: DashMap::new(),
+            caster_connected_at: DashMap::new(),
             write_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
             local_key_counter: AtomicU64::new(0),
@@ -59,6 +64,7 @@ impl Relay {
             entries: DashMap::new(),
             gate_path_index: DashMap::new(),
             caster_index: DashMap::new(),
+            caster_connected_at: DashMap::new(),
             write_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
             local_key_counter: AtomicU64::new(0),
@@ -207,7 +213,89 @@ impl Relay {
         if let Some(registry) = &self.circuit_breaker_registry {
             registry.remove(caster_id);
         }
+        self.caster_connected_at.remove(caster_id);
         self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Record the session generation for a caster.  Called from
+    /// `handle_attach` right after `remove_caster` and before
+    /// re-registering runes, so `remove_caster_if_gen` can later
+    /// distinguish stale cleanup from current entries.
+    pub fn set_caster_generation(&self, caster_id: &str, gen: Instant) {
+        self.caster_connected_at.insert(caster_id.to_string(), gen);
+    }
+
+    /// Generation-aware variant of `remove_caster`.  Only removes if the
+    /// stored generation matches `gen`.  Returns `true` if removal happened.
+    /// Used by `cleanup_session` to avoid wiping a reconnected session's
+    /// relay entries.
+    pub fn remove_caster_if_gen(&self, caster_id: &str, gen: Instant) -> bool {
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Check generation under write_lock — prevents TOCTOU with
+        // a concurrent remove_caster + set_caster_generation + register
+        // sequence in handle_attach.
+        if let Some(stored) = self.caster_connected_at.get(caster_id) {
+            if *stored != gen {
+                return false;
+            }
+        }
+        // No entry means the caster was already unconditionally removed
+        // (e.g. by handle_attach's remove_caster).  Nothing left to do.
+        if !self.caster_index.contains_key(caster_id) {
+            return false;
+        }
+
+        // Proceed with the same removal logic as remove_caster.
+        let rune_names = self
+            .caster_index
+            .remove(caster_id)
+            .map(|(_, names)| names)
+            .unwrap_or_default();
+
+        let mut keys_to_check: Vec<(String, String)> = Vec::new();
+        for rune_name in &rune_names {
+            if let Some(mut entries) = self.entries.get_mut(rune_name) {
+                if let Some(entry) = entries.get(caster_id) {
+                    if let Some(ref gate) = entry.config.gate {
+                        keys_to_check
+                            .push((format!("{}:{}", gate.method, gate.path), rune_name.clone()));
+                    }
+                }
+                entries.remove(caster_id);
+            }
+        }
+
+        for rune_name in &rune_names {
+            self.entries.remove_if(rune_name, |_, v| v.is_empty());
+        }
+
+        for (key, rune_name) in keys_to_check {
+            let still_exists = self
+                .entries
+                .get(&rune_name)
+                .map(|entries| {
+                    entries.value().values().any(|e| {
+                        e.config
+                            .gate
+                            .as_ref()
+                            .map(|g| format!("{}:{}", g.method, g.path))
+                            .as_deref()
+                            == Some(&key)
+                    })
+                })
+                .unwrap_or(false);
+            if !still_exists {
+                self.gate_path_index.remove(&key);
+            }
+        }
+
+        if let Some(registry) = &self.circuit_breaker_registry {
+            registry.remove(caster_id);
+        }
+        self.caster_connected_at.remove(caster_id);
+        self.generation.fetch_add(1, Ordering::Release);
+        true
     }
 
     /// Find all candidates for a rune name
@@ -2810,6 +2898,59 @@ mod tests {
         assert!(
             relay.resolve_by_gate_path("POST", "/shared").is_none(),
             "gate_path should be removed after removing all casters"
+        );
+    }
+
+    #[test]
+    fn test_fix_remove_caster_if_gen_skips_new_generation() {
+        let relay = Relay::new();
+        let h = || {
+            Arc::new(crate::invoker::LocalInvoker::new(make_handler(
+                |_ctx, _input| async { Ok(Bytes::new()) },
+            )))
+        };
+        let config = || RuneConfig {
+            name: "echo".into(),
+            version: String::new(),
+            description: "".into(),
+            supports_stream: false,
+            gate: None,
+            input_schema: None,
+            output_schema: None,
+            priority: 0,
+            labels: Default::default(),
+        };
+
+        // Session 1 registers
+        let gen1 = Instant::now();
+        relay
+            .register(config(), h(), Some("caster-1".into()))
+            .unwrap();
+        relay.set_caster_generation("caster-1", gen1);
+        assert!(relay.find("echo").is_some());
+
+        // Reconnect: handle_attach removes old + sets new generation + re-registers
+        relay.remove_caster("caster-1");
+        let gen2 = Instant::now();
+        relay
+            .register(config(), h(), Some("caster-1".into()))
+            .unwrap();
+        relay.set_caster_generation("caster-1", gen2);
+
+        // Old cleanup tries to remove with stale generation — must be no-op
+        let removed = relay.remove_caster_if_gen("caster-1", gen1);
+        assert!(!removed, "stale generation should be rejected");
+        assert!(
+            relay.find("echo").is_some(),
+            "new session's relay entries must survive old cleanup"
+        );
+
+        // Current generation removal should work
+        let removed = relay.remove_caster_if_gen("caster-1", gen2);
+        assert!(removed, "current generation should be accepted");
+        assert!(
+            relay.find("echo").is_none(),
+            "entries should be removed for matching generation"
         );
     }
 }

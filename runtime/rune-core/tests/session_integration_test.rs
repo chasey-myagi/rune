@@ -924,3 +924,104 @@ async fn test_fix_timeout_trips_cb_but_never_retries_integration() {
 
     tx.send(make_detach_msg("done")).await.unwrap();
 }
+
+/// Regression P0-1: cleanup_session of old session must NOT delete new session's data.
+///
+/// Scenario: caster-A connects → session 1 active → caster-A reconnects (session 2)
+/// → session 1 loop breaks and cleanup runs. Before the fix, cleanup_session
+/// unconditionally removed all data for the caster_id, deleting session 2's entries.
+#[tokio::test]
+async fn test_fix_reconnect_cleanup_does_not_delete_new_session() {
+    let config = default_session_config();
+    let relay = Arc::new(Relay::new());
+    let session_mgr = Arc::new(SessionManager::new_dev(
+        config.heartbeat_interval(),
+        config.heartbeat_timeout(),
+    ));
+
+    let (addr, _shutdown) = start_server(Arc::clone(&relay), Arc::clone(&session_mgr)).await;
+
+    // Session 1: connect and attach
+    let mut client1 = connect_client(addr).await;
+    let (tx1, rx1) = mpsc::channel(32);
+    let stream1 = ReceiverStream::new(rx1);
+    let mut resp1 = client1
+        .session(Request::new(stream1))
+        .await
+        .unwrap()
+        .into_inner();
+
+    tx1.send(make_attach_msg(
+        "reconnect-caster",
+        vec![make_echo_rune_decl("echo")],
+        2,
+    ))
+    .await
+    .unwrap();
+    let ack1 = resp1.message().await.unwrap().unwrap();
+    assert!(matches!(ack1.payload, Some(session_message::Payload::AttachAck(ref a)) if a.accepted));
+    assert_eq!(session_mgr.caster_count(), 1);
+
+    // Session 2: connect and attach with SAME caster_id (reconnect)
+    let mut client2 = connect_client(addr).await;
+    let (tx2, rx2) = mpsc::channel(32);
+    let stream2 = ReceiverStream::new(rx2);
+    let mut resp2 = client2
+        .session(Request::new(stream2))
+        .await
+        .unwrap()
+        .into_inner();
+
+    tx2.send(make_attach_msg(
+        "reconnect-caster",
+        vec![make_echo_rune_decl("echo")],
+        4,
+    ))
+    .await
+    .unwrap();
+    let ack2 = resp2.message().await.unwrap().unwrap();
+    assert!(matches!(ack2.payload, Some(session_message::Payload::AttachAck(ref a)) if a.accepted));
+
+    // Session 2 is now the active session. max_concurrent should be 4.
+    assert_eq!(session_mgr.max_concurrent("reconnect-caster"), 4);
+
+    // Now disconnect session 1 (triggers cleanup of old session)
+    tx1.send(make_detach_msg("reconnect")).await.unwrap();
+    // Wait for cleanup to complete
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Session 2's data must still be intact
+    assert_eq!(
+        session_mgr.caster_count(),
+        1,
+        "new session must survive old session's cleanup"
+    );
+    assert_eq!(
+        session_mgr.max_concurrent("reconnect-caster"),
+        4,
+        "new session's metadata must not be deleted by old cleanup"
+    );
+    assert!(
+        session_mgr.connected_at("reconnect-caster").is_some(),
+        "new session entry must still exist"
+    );
+    // Relay entries from session 2 must survive old cleanup
+    assert!(
+        relay.find("echo").is_some(),
+        "new session's relay entries must not be wiped by old cleanup"
+    );
+
+    // Clean up session 2
+    tx2.send(make_detach_msg("done")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        session_mgr.caster_count(),
+        0,
+        "session 2 cleanup should work normally"
+    );
+    // After session 2 disconnects normally, relay should be clean
+    assert!(
+        relay.find("echo").is_none(),
+        "relay should be clean after final session disconnects"
+    );
+}

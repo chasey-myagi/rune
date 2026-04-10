@@ -2,7 +2,7 @@ use crate::session::{CasterRole, HealthStatusLevel, SessionManager};
 use dashmap::DashMap;
 use rune_proto::{session_message, ScaleAction, ScaleSignal, SessionMessage, ShutdownRequest};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,7 +27,6 @@ struct BreachTracker {
 
 #[derive(Debug, Clone)]
 struct ScalingPolicy {
-    pilot_id: Option<String>,
     scale_up_threshold: f64,
     scale_down_threshold: f64,
     sustained_secs: u64,
@@ -39,6 +38,9 @@ struct ScalingPolicy {
 struct GroupState {
     policy: ScalingPolicy,
     caster_ids: Vec<String>,
+    pilot_ids: HashSet<String>,
+    /// Number of casters managed by each pilot in this group.
+    pilot_caster_counts: HashMap<String, usize>,
     average_pressure: Option<f64>,
 }
 
@@ -46,6 +48,11 @@ pub struct ScaleEvaluator {
     session_mgr: Arc<SessionManager>,
     check_interval: Duration,
     statuses: DashMap<String, ScalingStatusSnapshot>,
+    /// Uses `std::sync::Mutex` (not `tokio::sync::Mutex`) intentionally: the
+    /// critical section in `evaluate_once` performs only CPU-bound comparisons
+    /// with no `.await`. The lock is held for the duration of the breach-tracking
+    /// loop (~60 lines) which is acceptable because evaluate_once runs on a
+    /// single periodic task, not on hot request paths.
     breaches: Mutex<HashMap<String, BreachTracker>>,
 }
 
@@ -85,10 +92,10 @@ impl ScaleEvaluator {
 
     pub async fn evaluate_once(&self) {
         let groups = self.collect_groups();
-        let mut seen = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
 
         for (group_id, group) in groups {
-            seen.push(group_id.clone());
+            seen.insert(group_id.clone());
             let current = group.caster_ids.len();
             let mut status = ScalingStatusSnapshot {
                 group_id: group_id.clone(),
@@ -97,24 +104,29 @@ impl ScaleEvaluator {
                 average_pressure: group.average_pressure,
                 action: "idle".into(),
                 reason: "stable".into(),
-                pilot_id: group.policy.pilot_id.clone(),
+                // Display-only: picks an arbitrary pilot from the group.
+                // Multi-pilot groups have multiple entries; this is for
+                // status serialization, not routing decisions.
+                pilot_id: group.pilot_ids.iter().next().cloned(),
             };
             enum ActionPlan {
                 None,
                 ScaleUp {
-                    pilot_id: Option<String>,
+                    pilot_ids: HashSet<String>,
                 },
                 ScaleDown {
                     victim_id: String,
-                    pilot_id: Option<String>,
+                    /// Captured at candidate selection time — used to verify
+                    /// the victim hasn't reconnected before we send shutdown.
+                    victim_connected_at: Option<Instant>,
                 },
             }
 
             let action_plan = {
-                let mut tracker_map = self
-                    .breaches
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut tracker_map = self.breaches.lock().unwrap_or_else(|poisoned| {
+                    tracing::warn!("breaches mutex was poisoned — recovering stale data");
+                    poisoned.into_inner()
+                });
                 let tracker = tracker_map.entry(group_id.clone()).or_default();
 
                 if let Some(pressure) = group.average_pressure {
@@ -132,7 +144,7 @@ impl ScaleEvaluator {
                             );
                             tracker.up_since = Some(Instant::now());
                             ActionPlan::ScaleUp {
-                                pilot_id: group.policy.pilot_id.clone(),
+                                pilot_ids: group.pilot_ids.clone(),
                             }
                         } else {
                             status.reason = "waiting for sustained scale-up window".into();
@@ -149,9 +161,10 @@ impl ScaleEvaluator {
                                 status.desired_replicas = current.saturating_sub(1);
                                 status.reason = format!("scale down {}", victim_id);
                                 tracker.down_since = Some(Instant::now());
+                                let victim_connected_at = self.session_mgr.connected_at(&victim_id);
                                 ActionPlan::ScaleDown {
                                     victim_id,
-                                    pilot_id: group.policy.pilot_id.clone(),
+                                    victim_connected_at,
                                 }
                             } else {
                                 status.reason = "no idle caster available for scale-down".into();
@@ -176,60 +189,117 @@ impl ScaleEvaluator {
 
             match action_plan {
                 ActionPlan::None => {}
-                ActionPlan::ScaleUp { pilot_id } => {
-                    if let Some(pilot_id) = pilot_id {
-                        let _ = self
-                            .session_mgr
-                            .send_message(
-                                &pilot_id,
-                                SessionMessage {
-                                    payload: Some(session_message::Payload::ScaleSignal(
-                                        ScaleSignal {
-                                            action: ScaleAction::Up.into(),
-                                            group_id: group_id.clone(),
-                                            desired_replicas: status.desired_replicas as u32,
-                                            current_pressure: group.average_pressure.unwrap_or(0.0),
-                                            reason: status.reason.clone(),
-                                        },
-                                    )),
-                                },
-                            )
-                            .await;
-                    } else {
+                ActionPlan::ScaleUp { pilot_ids } => {
+                    if pilot_ids.is_empty() {
                         status.reason = "missing pilot".into();
+                    } else {
+                        // Pick the pilot managing the fewest casters in this
+                        // group so new replicas are spread across hosts.  Send
+                        // desired_replicas relative to that pilot's LOCAL count
+                        // so it spawns exactly one new caster (not the global
+                        // target, which would cause every pilot to over-scale).
+                        let target_pilot = pilot_ids
+                            .iter()
+                            .min_by_key(|pid| {
+                                group.pilot_caster_counts.get(*pid).copied().unwrap_or(0)
+                            })
+                            .cloned();
+
+                        if let Some(pilot_id) = target_pilot {
+                            let local_count = group
+                                .pilot_caster_counts
+                                .get(&pilot_id)
+                                .copied()
+                                .unwrap_or(0) as u32;
+                            if let Err(e) = self
+                                .session_mgr
+                                .send_message(
+                                    &pilot_id,
+                                    SessionMessage {
+                                        payload: Some(session_message::Payload::ScaleSignal(
+                                            ScaleSignal {
+                                                action: ScaleAction::Up.into(),
+                                                group_id: group_id.clone(),
+                                                desired_replicas: local_count + 1,
+                                                current_pressure: group
+                                                    .average_pressure
+                                                    .unwrap_or(0.0),
+                                                reason: status.reason.clone(),
+                                            },
+                                        )),
+                                    },
+                                )
+                                .await
+                            {
+                                tracing::warn!(pilot_id = %pilot_id, group_id = %group_id, error = %e, "scale-up signal failed");
+                            }
+                        }
                     }
                 }
                 ActionPlan::ScaleDown {
                     victim_id,
-                    pilot_id,
+                    victim_connected_at,
                 } => {
-                    let _ = self
+                    // Verify the victim is still the same session we selected.
+                    // If it reconnected (different connected_at), skip shutdown
+                    // to avoid draining a replacement session.
+                    let still_same_session = self
                         .session_mgr
-                        .send_message(
-                            &victim_id,
-                            SessionMessage {
-                                payload: Some(session_message::Payload::Shutdown(
-                                    ShutdownRequest {
-                                        reason: "scale_down".into(),
-                                        grace_period_ms: DEFAULT_SHUTDOWN_GRACE_PERIOD_MS,
-                                    },
-                                )),
-                            },
-                        )
-                        .await;
+                        .connected_at(&victim_id)
+                        .zip(victim_connected_at)
+                        .map(|(current, original)| current == original)
+                        .unwrap_or(false);
+                    if still_same_session {
+                        if let Err(e) = self
+                            .session_mgr
+                            .send_message(
+                                &victim_id,
+                                SessionMessage {
+                                    payload: Some(session_message::Payload::Shutdown(
+                                        ShutdownRequest {
+                                            reason: "scale_down".into(),
+                                            grace_period_ms: DEFAULT_SHUTDOWN_GRACE_PERIOD_MS,
+                                        },
+                                    )),
+                                },
+                            )
+                            .await
+                        {
+                            tracing::warn!(victim_id = %victim_id, error = %e, "scale-down shutdown failed");
+                        }
+                    }
 
-                    if let Some(pilot_id) = pilot_id {
+                    // Look up the victim's own pilot from its labels, not the
+                    // group-level pilot which may belong to a different host.
+                    let victim_pilot_id = self
+                        .session_mgr
+                        .metadata
+                        .get(&victim_id)
+                        .and_then(|meta| meta.labels.get("_pilot_id").cloned());
+
+                    if let Some(pilot_id) = victim_pilot_id {
                         let session_mgr = Arc::clone(&self.session_mgr);
                         let group_id_clone = group_id.clone();
                         let reason = format!("force_kill:{}", victim_id);
                         let current_pressure = group.average_pressure.unwrap_or(0.0);
                         let desired_replicas = status.desired_replicas as u32;
+                        // Capture the victim's connected_at BEFORE the grace period.
+                        // After sleeping, we compare against the current connected_at
+                        // to detect if the caster reconnected (same ID, new session).
+                        let victim_connected_at = self.session_mgr.connected_at(&victim_id);
                         tokio::spawn(async move {
                             tokio::time::sleep(Duration::from_millis(
                                 DEFAULT_SHUTDOWN_GRACE_PERIOD_MS as u64,
                             ))
                             .await;
-                            if session_mgr.connected_at(&victim_id).is_some() {
+                            // Only force_kill if the victim is STILL the same session.
+                            // If it reconnected, connected_at will differ — skip.
+                            let still_same_session = session_mgr
+                                .connected_at(&victim_id)
+                                .zip(victim_connected_at)
+                                .map(|(current, original)| current == original)
+                                .unwrap_or(false);
+                            if still_same_session {
                                 let _ = session_mgr
                                     .send_message(
                                         &pilot_id,
@@ -255,10 +325,15 @@ impl ScaleEvaluator {
             self.statuses.insert(group_id, status);
         }
 
-        self.statuses
-            .retain(|group_id, _| seen.iter().any(|seen_id| seen_id == group_id));
+        self.statuses.retain(|group_id, _| seen.contains(group_id));
     }
 
+    /// Build a snapshot of scaling groups from live caster metadata.
+    ///
+    /// Iterates every connected Caster, groups them by `labels["group"]`, and
+    /// aggregates per-group pressure (from `HealthReport`) plus the set of
+    /// associated pilot IDs.  Returns an owned map so callers can evaluate
+    /// scaling decisions without holding DashMap guards across await points.
     fn collect_groups(&self) -> HashMap<String, GroupState> {
         let mut groups = HashMap::new();
 
@@ -273,19 +348,37 @@ impl ScaleEvaluator {
                 continue;
             };
 
-            let (avg, reported_count) = self.session_mgr.group_pressure("group", &group_id);
-            // When no caster in the group has reported pressure yet, treat
-            // the group as having unknown load so we skip scaling decisions
-            // rather than misinterpreting silence as 0.0.
-            let average_pressure = if reported_count > 0 { Some(avg) } else { None };
+            let pilot_id = meta.value().labels.get("_pilot_id").cloned();
             groups
                 .entry(group_id.clone())
-                .and_modify(|state: &mut GroupState| state.caster_ids.push(meta.key().clone()))
-                .or_insert_with(|| GroupState {
-                    policy,
-                    caster_ids: vec![meta.key().clone()],
-                    average_pressure,
+                .and_modify(|state: &mut GroupState| {
+                    state.caster_ids.push(meta.key().clone());
+                    if let Some(ref pid) = pilot_id {
+                        state.pilot_ids.insert(pid.clone());
+                        *state.pilot_caster_counts.entry(pid.clone()).or_insert(0) += 1;
+                    }
+                })
+                .or_insert_with(|| {
+                    let mut pilot_ids = HashSet::new();
+                    let mut pilot_caster_counts = HashMap::new();
+                    if let Some(ref pid) = pilot_id {
+                        pilot_ids.insert(pid.clone());
+                        pilot_caster_counts.insert(pid.clone(), 1);
+                    }
+                    GroupState {
+                        policy,
+                        caster_ids: vec![meta.key().clone()],
+                        pilot_ids,
+                        pilot_caster_counts,
+                        average_pressure: None, // filled below
+                    }
                 });
+        }
+
+        // Compute per-group pressure once per group (not once per caster).
+        for (group_id, state) in groups.iter_mut() {
+            let (avg, reported_count) = self.session_mgr.group_pressure("group", group_id);
+            state.average_pressure = if reported_count > 0 { Some(avg) } else { None };
         }
 
         groups
@@ -296,7 +389,6 @@ impl ScaleEvaluator {
         labels: &HashMap<String, String>,
     ) -> Option<ScalingPolicy> {
         Some(ScalingPolicy {
-            pilot_id: labels.get("_pilot_id").cloned(),
             scale_up_threshold: labels.get("_scale_up")?.parse().ok()?,
             scale_down_threshold: labels.get("_scale_down")?.parse().ok()?,
             sustained_secs: labels.get("_sustained")?.parse().ok()?,
@@ -377,13 +469,17 @@ mod tests {
                 connected_at: Instant::now(),
             },
         );
+        let now = Instant::now();
         mgr.health.insert(
             caster_id.to_string(),
-            Arc::new(std::sync::RwLock::new(crate::session::HealthInfo {
-                pressure,
-                pressure_reported,
-                ..Default::default()
-            })),
+            crate::session::HealthEntry {
+                connected_at: now,
+                info: Arc::new(std::sync::RwLock::new(crate::session::HealthInfo {
+                    pressure,
+                    pressure_reported,
+                    ..Default::default()
+                })),
+            },
         );
         let mut labels = HashMap::from([
             ("group".to_string(), group.to_string()),
@@ -402,6 +498,7 @@ mod tests {
                 labels,
                 max_concurrent,
                 role: CasterRole::Caster,
+                connected_at: now,
             },
         );
         Some(rx)
@@ -456,9 +553,13 @@ mod tests {
                 connected_at: Instant::now(),
             },
         );
+        let now = Instant::now();
         mgr.health.insert(
             pilot_id.to_string(),
-            Arc::new(std::sync::RwLock::new(crate::session::HealthInfo::default())),
+            crate::session::HealthEntry {
+                connected_at: now,
+                info: Arc::new(std::sync::RwLock::new(crate::session::HealthInfo::default())),
+            },
         );
         mgr.metadata.insert(
             pilot_id.to_string(),
@@ -466,6 +567,7 @@ mod tests {
                 labels: HashMap::new(),
                 max_concurrent: 1,
                 role: CasterRole::Pilot,
+                connected_at: now,
             },
         );
         rx
@@ -646,5 +748,190 @@ mod tests {
             "reported idle caster should NOT be chosen when unreported caster exists"
         );
         assert!(pilot_rx.try_recv().is_err());
+    }
+
+    /// Regression P0-2: force_kill connected_at comparison logic.
+    ///
+    /// The force_kill spawn captures connected_at before sleeping. After the
+    /// grace period, it compares against the current connected_at. If the
+    /// victim reconnected (different Instant), the force_kill is skipped.
+    ///
+    /// We test the comparison logic directly via SessionManager: insert a
+    /// caster, capture its connected_at, remove and re-insert (different
+    /// Instant), and verify the Instants differ.
+    #[test]
+    fn test_fix_force_kill_detects_reconnected_caster() {
+        let mgr = SessionManager::new_dev(Duration::from_secs(10), Duration::from_secs(35));
+        insert_scaling_caster(&mgr, "victim", "gpu", Some("pilot-1"), 2, 0.05);
+
+        let original_connected_at = mgr.connected_at("victim");
+        assert!(original_connected_at.is_some());
+
+        // Simulate reconnect: remove and re-insert
+        mgr.sessions.remove("victim");
+        mgr.health.remove("victim");
+        mgr.metadata.remove("victim");
+        // Small sleep to ensure Instant::now() differs
+        std::thread::sleep(Duration::from_millis(2));
+        insert_scaling_caster(&mgr, "victim", "gpu", Some("pilot-1"), 2, 0.05);
+
+        let new_connected_at = mgr.connected_at("victim");
+        assert!(new_connected_at.is_some());
+
+        // The force_kill logic: `current == original` must be false after reconnect
+        assert_ne!(
+            original_connected_at, new_connected_at,
+            "connected_at must differ after reconnect so force_kill detects stale identity"
+        );
+
+        // Also verify: if NOT reconnected, connected_at stays the same
+        let same_check = mgr.connected_at("victim");
+        assert_eq!(
+            new_connected_at, same_check,
+            "connected_at must be stable when no reconnect occurs"
+        );
+    }
+
+    /// Regression: scale-up in a multi-pilot group must send ScaleSignal to
+    /// exactly ONE pilot with per-pilot `desired_replicas` (local_count + 1),
+    /// NOT the global target to all pilots (which would cause over-scaling).
+    #[tokio::test]
+    async fn test_fix_multi_pilot_group_sends_to_one_pilot_with_local_desired() {
+        let mgr = Arc::new(SessionManager::new_dev(
+            Duration::from_secs(10),
+            Duration::from_secs(35),
+        ));
+        let mut pilot_a_rx = insert_pilot(&mgr, "pilot-a");
+        let mut pilot_b_rx = insert_pilot(&mgr, "pilot-b");
+
+        // Two casters in the same group "gpu" but managed by different pilots.
+        // Each pilot has exactly 1 caster.
+        insert_scaling_caster(&mgr, "caster-1", "gpu", Some("pilot-a"), 2, 0.95);
+        insert_scaling_caster(&mgr, "caster-2", "gpu", Some("pilot-b"), 2, 0.90);
+
+        let evaluator = ScaleEvaluator::new(Arc::clone(&mgr), Duration::from_secs(30));
+        evaluator.evaluate_once().await;
+
+        // Exactly ONE pilot should receive a ScaleSignal — the one with the
+        // fewest casters (tied here, so either is valid).
+        let mut received_signal: Option<ScaleSignal> = None;
+        let mut received_pilot = String::new();
+
+        if let Ok(Some(msg)) =
+            tokio::time::timeout(Duration::from_millis(200), pilot_a_rx.recv()).await
+        {
+            if let Some(session_message::Payload::ScaleSignal(signal)) = msg.payload {
+                received_signal = Some(signal);
+                received_pilot = "pilot-a".into();
+            }
+        }
+        if received_signal.is_none() {
+            if let Ok(Some(msg)) =
+                tokio::time::timeout(Duration::from_millis(200), pilot_b_rx.recv()).await
+            {
+                if let Some(session_message::Payload::ScaleSignal(signal)) = msg.payload {
+                    received_signal = Some(signal);
+                    received_pilot = "pilot-b".into();
+                }
+            }
+        }
+
+        let signal = received_signal.expect("one pilot must receive ScaleSignal");
+        assert_eq!(signal.action(), ScaleAction::Up);
+        assert_eq!(signal.group_id, "gpu");
+        // desired_replicas must be the pilot's LOCAL count (1) + 1 = 2,
+        // NOT the global count (2) + 1 = 3 which would over-scale.
+        assert_eq!(
+            signal.desired_replicas, 2,
+            "desired_replicas should be local_count(1) + 1 = 2, not global(3)"
+        );
+
+        // The OTHER pilot must NOT receive a signal.
+        let other_rx = if received_pilot == "pilot-a" {
+            &mut pilot_b_rx
+        } else {
+            &mut pilot_a_rx
+        };
+        assert!(
+            other_rx.try_recv().is_err(),
+            "only one pilot should receive scale-up signal, not both"
+        );
+    }
+
+    /// Regression: when scaling down, the force_kill signal should go to the
+    /// victim's OWN pilot, not a random pilot from the group.
+    #[tokio::test]
+    async fn test_fix_multi_pilot_group_force_kill_uses_victim_pilot() {
+        let mgr = Arc::new(SessionManager::new_dev(
+            Duration::from_secs(10),
+            Duration::from_secs(35),
+        ));
+        let mut pilot_a_rx = insert_pilot(&mgr, "pilot-a");
+        let mut pilot_b_rx = insert_pilot(&mgr, "pilot-b");
+
+        // caster-1 on pilot-a: idle (low pressure, all permits available)
+        let mut caster_1_rx =
+            insert_scaling_caster(&mgr, "caster-1", "gpu", Some("pilot-a"), 2, 0.05).unwrap();
+        // caster-2 on pilot-b: also idle
+        insert_scaling_caster(&mgr, "caster-2", "gpu", Some("pilot-b"), 2, 0.1);
+
+        let evaluator = ScaleEvaluator::new(Arc::clone(&mgr), Duration::from_secs(30));
+        evaluator.evaluate_once().await;
+
+        // One of the casters should receive a shutdown request
+        let victim_msg = tokio::time::timeout(Duration::from_millis(200), caster_1_rx.recv()).await;
+        if let Ok(Some(msg)) = victim_msg {
+            match msg.payload {
+                Some(session_message::Payload::Shutdown(_)) => {
+                    // caster-1 was the victim, so force_kill should go to pilot-a (its pilot)
+                    // pilot-b should NOT receive the force_kill
+                    // (We can't easily test the delayed force_kill without waiting 30s,
+                    // but we verify the shutdown goes to the right caster)
+                }
+                other => panic!("expected ShutdownRequest on caster-1, got {:?}", other),
+            }
+        }
+
+        // pilot-b should NOT receive an immediate signal for this scale-down
+        assert!(
+            pilot_b_rx.try_recv().is_err(),
+            "pilot-b should not receive signals when caster-1 (on pilot-a) is the victim"
+        );
+        // pilot-a should also not receive an immediate signal (force_kill is delayed)
+        assert!(
+            pilot_a_rx.try_recv().is_err(),
+            "pilot-a should not receive immediate signal (force_kill is delayed)"
+        );
+    }
+
+    /// Regression: the initial ShutdownRequest must verify connected_at
+    /// to avoid draining a replacement session that reconnected between
+    /// candidate selection and the actual send.
+    #[test]
+    fn test_fix_scale_down_shutdown_skips_reconnected_victim() {
+        // The fix captures connected_at when selecting the victim and compares
+        // it before sending shutdown.  This test verifies the comparison logic
+        // directly: after reconnect, connected_at differs so the guard fires.
+        let mgr = SessionManager::new_dev(Duration::from_secs(10), Duration::from_secs(35));
+        insert_scaling_caster(&mgr, "victim", "gpu", Some("pilot-1"), 2, 0.05);
+        let selected_at = mgr.connected_at("victim");
+
+        // Simulate reconnect
+        mgr.sessions.remove("victim");
+        mgr.health.remove("victim");
+        mgr.metadata.remove("victim");
+        std::thread::sleep(Duration::from_millis(2));
+        insert_scaling_caster(&mgr, "victim", "gpu", Some("pilot-1"), 2, 0.05);
+
+        // Guard logic from ScaleDown match arm:
+        let still_same = mgr
+            .connected_at("victim")
+            .zip(selected_at)
+            .map(|(current, original)| current == original)
+            .unwrap_or(false);
+        assert!(
+            !still_same,
+            "shutdown guard must detect reconnected victim and skip"
+        );
     }
 }

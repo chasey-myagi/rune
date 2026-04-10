@@ -29,7 +29,7 @@ class PilotClient:
             if status[0] == "ready":
                 return cls(status[1])
             if status[0] == "failed":
-                raise RuntimeError(status[1])
+                raise RuntimeError(status[1]) from None
             if status[0] == "mismatch":
                 try:
                     await _send_request({"command": "stop"})
@@ -66,9 +66,9 @@ class PilotClient:
             if status[0] == "ready":
                 return cls(status[1])
             if status[0] == "failed":
-                raise RuntimeError(status[1])
+                raise RuntimeError(status[1]) from None
             await asyncio.sleep(0.1)
-        raise RuntimeError("pilot did not become ready")
+        raise RuntimeError("pilot did not become ready") from None
 
     async def register(self, caster_id: str, policy: ScalePolicy) -> None:
         response = await _send_request(
@@ -116,7 +116,7 @@ async def _send_request(payload: dict) -> dict:
 
 def _ensure_ok(response: dict) -> None:
     if not response.get("ok"):
-        raise RuntimeError(response.get("error") or "pilot request failed")
+        raise RuntimeError(response.get("error") or "pilot request failed") from None
 
 
 def _classify_status(response: dict, normalized: str) -> tuple[str, str]:
@@ -154,7 +154,7 @@ def _find_rune_binary() -> str:
     if found:
         return found
 
-    raise RuntimeError("failed to locate rune binary; set RUNE_BIN or add rune to PATH")
+    raise RuntimeError("failed to locate rune binary; set RUNE_BIN or add rune to PATH") from None
 
 
 def _socket_path() -> str:

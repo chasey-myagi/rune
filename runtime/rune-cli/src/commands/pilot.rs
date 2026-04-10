@@ -211,23 +211,16 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn status(json_mode: bool) -> Result<()> {
+pub async fn status(_json_mode: bool) -> Result<()> {
     let response = send_request(PilotRequest::Status).await?;
-    if json_mode {
-        crate::output::print_json(&serde_json::to_value(&response)?);
-    } else {
-        crate::output::print_json(&serde_json::to_value(&response)?);
-    }
+    // TODO(M2): implement text mode table output for non-JSON mode
+    crate::output::print_json(&serde_json::to_value(&response)?);
     Ok(())
 }
 
-pub async fn stop(json_mode: bool) -> Result<()> {
+pub async fn stop(_json_mode: bool) -> Result<()> {
     let response = send_request(PilotRequest::Stop).await?;
-    if json_mode {
-        crate::output::print_json(&serde_json::to_value(&response)?);
-    } else {
-        crate::output::print_json(&serde_json::to_value(&response)?);
-    }
+    crate::output::print_json(&serde_json::to_value(&response)?);
     Ok(())
 }
 
@@ -393,14 +386,19 @@ async fn handle_scale_signal(
                 .find(|registration| registration.group == signal.group_id)
             {
                 for _ in 0..needed {
-                    let mut child = Command::new("sh");
-                    child
+                    let mut child = Command::new("sh")
                         .arg("-lc")
                         .arg(&template.spawn_command)
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .spawn()
                         .with_context(|| format!("failed to spawn '{}'", template.spawn_command))?;
+                    // Reap the child process in the background to prevent zombies.
+                    // Without this, dropped Child handles on Unix leave zombies
+                    // in the process table until the pilot daemon exits.
+                    tokio::spawn(async move {
+                        let _ = child.wait().await;
+                    });
                 }
             }
         }
