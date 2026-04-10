@@ -7056,6 +7056,7 @@ mod tests {
             assert!(caster.get("pressure").is_some());
             assert!(caster.get("metrics").is_some());
             assert!(caster.get("health_status").is_some());
+            assert!(caster.get("connected_since").is_some());
             assert!(caster.get("session_generation").is_some());
         }
     }

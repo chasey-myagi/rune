@@ -74,6 +74,9 @@ pub struct CasterMetadata {
     /// during `handle_attach`.  Used by `cleanup_session` to conditionally
     /// remove only this generation's metadata via `DashMap::remove_if`.
     pub(crate) generation: u64,
+    /// Wall-clock connection time — used only for display in management APIs
+    /// (e.g. `connected_since` in `/api/v1/casters`).  NOT used for identity.
+    pub connected_at: Instant,
 }
 
 impl HealthStatusLevel {
@@ -344,6 +347,11 @@ impl SessionManager {
         self.sessions.get(caster_id).map(|s| s.generation)
     }
 
+    /// Wall-clock connection time for display in management APIs.
+    pub fn connected_at(&self, caster_id: &str) -> Option<Instant> {
+        self.metadata.get(caster_id).map(|m| m.connected_at)
+    }
+
     /// Allocate the next monotonic generation value.
     fn next_generation(&self) -> u64 {
         self.generation_counter.fetch_add(1, Ordering::Relaxed)
@@ -377,6 +385,7 @@ impl SessionManager {
                 max_concurrent,
                 role: CasterRole::Caster,
                 generation: gen,
+                connected_at: Instant::now(),
             },
         );
         self.caster_count_atomic.fetch_add(1, Ordering::Relaxed);
@@ -628,6 +637,7 @@ impl SessionManager {
                 max_concurrent: permits,
                 role,
                 generation: gen,
+                connected_at: Instant::now(),
             },
         );
 
@@ -2727,6 +2737,7 @@ mod tests {
                 max_concurrent: 4,
                 role: CasterRole::Caster,
                 generation: 1,
+                connected_at: Instant::now(),
             },
         );
     }

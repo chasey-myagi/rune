@@ -290,10 +290,10 @@ impl ScaleEvaluator {
                         let reason = format!("force_kill:{}", victim_id);
                         let current_pressure = group.average_pressure.unwrap_or(0.0);
                         let desired_replicas = status.desired_replicas as u32;
-                        // Capture the victim's connected_at BEFORE the grace period.
-                        // After sleeping, we compare against the current connected_at
-                        // to detect if the caster reconnected (same ID, new session).
-                        let victim_generation = self.session_mgr.session_generation(&victim_id);
+                        // victim_generation was captured when we built ActionPlan::ScaleDown
+                        // — do NOT re-read here, because send_message().await above may
+                        // have stalled long enough for the victim to reconnect, which
+                        // would give us the *new* session's generation and defeat the guard.
                         tokio::spawn(async move {
                             tokio::time::sleep(Duration::from_millis(
                                 DEFAULT_SHUTDOWN_GRACE_PERIOD_MS as u64,
@@ -518,6 +518,7 @@ mod tests {
                 max_concurrent,
                 role: CasterRole::Caster,
                 generation: gen,
+                connected_at: Instant::now(),
             },
         );
         Some(rx)
@@ -587,6 +588,7 @@ mod tests {
                 max_concurrent: 1,
                 role: CasterRole::Pilot,
                 generation: gen,
+                connected_at: Instant::now(),
             },
         );
         rx
