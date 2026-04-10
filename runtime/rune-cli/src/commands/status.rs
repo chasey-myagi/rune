@@ -11,7 +11,7 @@ pub async fn run(client: &RuneClient, json_mode: bool) -> Result<()> {
     let local_state = state::read_state()?;
     let is_alive = local_state
         .as_ref()
-        .map(|s| runtime::is_runtime_alive(s))
+        .map(runtime::is_runtime_alive)
         .unwrap_or(false);
 
     // Remote API check

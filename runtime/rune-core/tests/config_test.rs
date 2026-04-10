@@ -916,6 +916,25 @@ fn test_rate_limit_env_override() {
     std::env::remove_var("RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE");
 }
 
+#[test]
+fn test_fix_rate_limit_window_secs_default() {
+    let config = AppConfig::default();
+    assert_eq!(config.rate_limit.window_secs, 60);
+}
+
+#[test]
+fn test_fix_rate_limit_window_secs_env_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("RUNE_RATE_LIMIT__WINDOW_SECS", "30");
+
+    let mut config = AppConfig::default();
+    config.apply_env_overrides();
+
+    assert_eq!(config.rate_limit.window_secs, 30);
+
+    std::env::remove_var("RUNE_RATE_LIMIT__WINDOW_SECS");
+}
+
 // ---- LOG__FILE env override ----
 
 #[test]

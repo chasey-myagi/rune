@@ -32,6 +32,7 @@ pub fn resolve_input(input: Option<&str>, input_file: Option<&str>) -> Result<Va
 ///
 /// Dispatches to sync / stream / async based on flags, then optionally
 /// formats the output as JSON.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     client: &RuneClient,
     name: &str,

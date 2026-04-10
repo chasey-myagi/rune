@@ -78,6 +78,7 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
     std::fs::create_dir_all(&paths.base_dir)?;
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path()?)?;
@@ -200,17 +201,30 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
                 }
             }
             accept = listener.accept() => {
-                let (mut stream, _) = accept?;
-                let response = handle_client(
+                let (mut stream, _) = match accept {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        eprintln!("[pilot] accept error: {e}");
+                        continue;
+                    }
+                };
+                let response = match handle_client(
                     &mut stream,
                     &pilot_id,
                     &runtime,
                     Arc::clone(&registry),
                     shutdown_tx.clone(),
                     runtime_state_rx.clone(),
-                ).await;
-                let payload = serde_json::to_vec(&response?)?;
-                stream.write_all(&payload).await?;
+                ).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("[pilot] client error: {e}");
+                        continue;
+                    }
+                };
+                if let Ok(payload) = serde_json::to_vec(&response) {
+                    let _ = stream.write_all(&payload).await;
+                }
             }
         }
     }
@@ -370,7 +384,9 @@ async fn run_pilot_session(
                         let _ = runtime_state_tx.send(PilotRuntimeState::Ready);
                     }
                     Some(session_message::Payload::ScaleSignal(signal)) => {
-                        handle_scale_signal(signal, Arc::clone(&registry)).await?;
+                        if let Err(e) = handle_scale_signal(signal, Arc::clone(&registry)).await {
+                            eprintln!("[pilot] scale signal error: {e}");
+                        }
                     }
                     Some(session_message::Payload::Heartbeat(_)) => {}
                     _ => {}
@@ -380,6 +396,19 @@ async fn run_pilot_session(
     }
 
     Ok(())
+}
+
+fn parse_signal(name: &str) -> Option<i32> {
+    match name.to_uppercase().trim_start_matches("SIG") {
+        "TERM" => Some(libc::SIGTERM),
+        "INT" => Some(libc::SIGINT),
+        "HUP" => Some(libc::SIGHUP),
+        "QUIT" => Some(libc::SIGQUIT),
+        "KILL" => Some(libc::SIGKILL),
+        "USR1" => Some(libc::SIGUSR1),
+        "USR2" => Some(libc::SIGUSR2),
+        other => other.parse::<i32>().ok().filter(|&n| n > 0 && n < 32),
+    }
 }
 
 async fn handle_scale_signal(
@@ -441,12 +470,24 @@ async fn handle_scale_signal(
                 if let Some(registration) = registrations.get(caster_id) {
                     if let Some(safe_pid) = validate_pid(registration.pid) {
                         if process_alive_strict(registration.pid, registration.start_time) {
-                            // TODO(v1.3): honor registration.shutdown_signal with
-                            // graceful shutdown before escalating to SIGKILL.
-                            // Currently shutdown_signal is stored but unused.
+                            let sig = parse_signal(&registration.shutdown_signal)
+                                .unwrap_or(libc::SIGTERM);
                             unsafe {
-                                libc::kill(safe_pid, libc::SIGKILL);
+                                libc::kill(safe_pid, sig);
                             }
+                            // Background: wait for graceful exit, then SIGKILL if still alive.
+                            let pid = registration.pid;
+                            let start_time = registration.start_time;
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                if process_alive_strict(pid, start_time) {
+                                    if let Some(pid_i32) = validate_pid(pid) {
+                                        unsafe {
+                                            libc::kill(pid_i32, libc::SIGKILL);
+                                        }
+                                    }
+                                }
+                            });
                         }
                     }
                 }
@@ -672,5 +713,48 @@ mod tests {
 
         let _ = send_request(PilotRequest::Stop).await;
         let _ = daemon.await;
+    }
+
+    #[tokio::test]
+    async fn test_fix_daemon_survives_malformed_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(temp.path());
+
+        let daemon = tokio::spawn(async { run_daemon("127.0.0.1:9", true).await });
+        wait_for_socket().await;
+
+        // Send garbage data — daemon must not crash.
+        let sock = socket_path().unwrap();
+        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        stream.write_all(b"NOT VALID JSON!!!").await.unwrap();
+        AsyncWriteExt::shutdown(&mut stream).await.unwrap();
+        drop(stream);
+
+        // Small delay for the daemon to process the bad request.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // A subsequent valid request must succeed.
+        let status = send_request(PilotRequest::Status).await.unwrap();
+        assert!(status.error.is_some(), "daemon should still be alive");
+
+        let _ = send_request(PilotRequest::Stop).await;
+        let _ = daemon.await;
+    }
+
+    #[test]
+    fn test_fix_parse_signal() {
+        assert_eq!(parse_signal("SIGTERM"), Some(libc::SIGTERM));
+        assert_eq!(parse_signal("TERM"), Some(libc::SIGTERM));
+        assert_eq!(parse_signal("sigterm"), Some(libc::SIGTERM));
+        assert_eq!(parse_signal("SIGINT"), Some(libc::SIGINT));
+        assert_eq!(parse_signal("SIGKILL"), Some(libc::SIGKILL));
+        assert_eq!(parse_signal("SIGUSR1"), Some(libc::SIGUSR1));
+        assert_eq!(parse_signal("SIGUSR2"), Some(libc::SIGUSR2));
+        assert_eq!(parse_signal("SIGHUP"), Some(libc::SIGHUP));
+        assert_eq!(parse_signal("SIGQUIT"), Some(libc::SIGQUIT));
+        assert_eq!(parse_signal("15"), Some(15));
+        assert_eq!(parse_signal("invalid"), None);
+        assert_eq!(parse_signal("0"), None);
+        assert_eq!(parse_signal("99"), None);
     }
 }

@@ -69,7 +69,7 @@ impl PilotClient {
             match Self::classify_status(response, &normalized) {
                 EnsureStatus::Ready(client) => return Ok(client),
                 EnsureStatus::Retry => {
-                    return Self::wait_until_ready(&normalized, deadline, None, None).await;
+                    return Self::wait_until_ready(&normalized, deadline, Some(runtime), key).await;
                 }
                 EnsureStatus::Mismatch => {
                     // Existing pilot is bound to a different runtime — stop it first.

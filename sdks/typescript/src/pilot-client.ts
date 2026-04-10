@@ -52,7 +52,7 @@ export class PilotClient {
         try { await sendRequest({ command: 'stop' }); } catch { /* ignore */ }
       }
       if (status.kind === 'retry') {
-        return PilotClient.waitUntilReady(normalized);
+        return PilotClient.waitUntilReady(normalized, runtime, key);
       }
     }
 

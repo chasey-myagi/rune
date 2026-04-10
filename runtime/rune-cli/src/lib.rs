@@ -6,16 +6,15 @@ pub mod output;
 pub mod runtime;
 
 fn long_about() -> String {
-    format!(
-        "\x1b[33;1m  ᚱ\x1b[0m\n\
-         \x1b[36m     ____\n\
-         \x1b[36m    / __ \\__  ______  ___\n\
-         \x1b[36m   / /_/ / / / / __ \\/ _ \\\n\
-         \x1b[36m  / _, _/ /_/ / / / /  __/\n\
-         \x1b[36m /_/ |_|\\__,_/_/ /_/\\___/\x1b[0m\n\
-         \x1b[2m  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n\
-         \x1b[2m  Define functions. Get APIs + Workflows + Distributed Execution.\x1b[0m"
-    )
+    "\x1b[33;1m  ᚱ\x1b[0m\n\
+     \x1b[36m     ____\n\
+     \x1b[36m    / __ \\__  ______  ___\n\
+     \x1b[36m   / /_/ / / / / __ \\/ _ \\\n\
+     \x1b[36m  / _, _/ /_/ / / / /  __/\n\
+     \x1b[36m /_/ |_|\\__,_/_/ /_/\\___/\x1b[0m\n\
+     \x1b[2m  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n\
+     \x1b[2m  Define functions. Get APIs + Workflows + Distributed Execution.\x1b[0m"
+        .to_string()
 }
 
 #[derive(Parser, Debug)]

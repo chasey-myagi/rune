@@ -36,7 +36,7 @@ class PilotClient:
                 except Exception:
                     pass
             elif status[0] == "retry":
-                return await cls._wait_until_ready(normalized)
+                return await cls._wait_until_ready(normalized, runtime, api_key)
 
         _start_pilot(runtime, api_key)
         return await cls._wait_until_ready(normalized, runtime, api_key)

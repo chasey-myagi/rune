@@ -189,6 +189,8 @@ impl Default for RetryConfig {
 #[serde(default)]
 pub struct RateLimitConfig {
     pub requests_per_minute: u32,
+    /// Sliding window size in seconds. Default 60, matching `requests_per_minute` semantics.
+    pub window_secs: u64,
     pub per_rune: HashMap<String, PerRuneRateLimit>,
     pub default_caster_max_concurrent: u32,
 }
@@ -211,6 +213,7 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
             requests_per_minute: 600,
+            window_secs: 60,
             per_rune: HashMap::new(),
             default_caster_max_concurrent: 1024,
         }
@@ -478,6 +481,11 @@ impl AppConfig {
             "RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE",
             self.rate_limit.requests_per_minute,
             u32
+        );
+        env_override!(
+            "RUNE_RATE_LIMIT__WINDOW_SECS",
+            self.rate_limit.window_secs,
+            u64
         );
         env_override!(
             "RUNE_RATE_LIMIT__DEFAULT_CASTER_MAX_CONCURRENT",
