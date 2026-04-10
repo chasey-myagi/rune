@@ -79,6 +79,10 @@ struct GroupState {
     /// Number of casters managed by each pilot in this group.
     pilot_caster_counts: HashMap<String, usize>,
     average_pressure: Option<f64>,
+    /// Set when casters in this group advertise conflicting scaling
+    /// policies.  A poisoned group is skipped during evaluation to
+    /// avoid nondeterministic behavior from DashMap iteration order.
+    poisoned: bool,
 }
 
 pub struct ScaleEvaluator {
@@ -187,6 +191,23 @@ impl ScaleEvaluator {
 
         for (group_id, group) in groups {
             seen.insert(group_id.clone());
+
+            if group.poisoned {
+                self.statuses.insert(
+                    group_id.clone(),
+                    ScalingStatusSnapshot {
+                        group_id,
+                        current_replicas: group.caster_ids.len(),
+                        desired_replicas: group.caster_ids.len(),
+                        average_pressure: group.average_pressure,
+                        action: "disabled".into(),
+                        reason: "policy mismatch in group — scaling disabled".into(),
+                        pilot_id: group.pilot_ids.iter().next().cloned(),
+                    },
+                );
+                continue;
+            }
+
             let current = group.caster_ids.len();
             let mut status = ScalingStatusSnapshot {
                 group_id: group_id.clone(),
@@ -433,17 +454,20 @@ impl ScaleEvaluator {
                 .entry(group_id.clone())
                 .and_modify(|state: &mut GroupState| {
                     if !policy_eq(&state.policy, &policy) {
-                        // Mismatched policy — exclude this caster from the group
-                        // so the effective policy is always deterministic (first-seen
-                        // defines it).  The caster still serves traffic; it just
-                        // won't participate in scaling decisions for this cycle.
-                        tracing::warn!(
-                            group_id = %group_id,
-                            caster_id = %meta.key(),
-                            "scaling policy mismatch — caster excluded from group evaluation"
-                        );
-                        return;
+                        // Poison the entire group so it is skipped during
+                        // evaluation.  This avoids nondeterministic behavior
+                        // from DashMap iteration order choosing the "winner".
+                        if !state.poisoned {
+                            tracing::warn!(
+                                group_id = %group_id,
+                                caster_id = %meta.key(),
+                                "scaling policy mismatch — group evaluation disabled"
+                            );
+                        }
+                        state.poisoned = true;
                     }
+                    // Always include the caster for replica counting even when
+                    // poisoned — status snapshot should reflect actual count.
                     state.caster_ids.push(meta.key().clone());
                     if let Some(ref pid) = pilot_id {
                         state.pilot_ids.insert(pid.clone());
@@ -463,6 +487,7 @@ impl ScaleEvaluator {
                         pilot_ids,
                         pilot_caster_counts,
                         average_pressure: None, // filled below
+                        poisoned: false,
                     }
                 });
         }
