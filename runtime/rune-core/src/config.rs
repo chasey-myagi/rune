@@ -188,8 +188,12 @@ impl Default for RetryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RateLimitConfig {
+    /// Maximum requests allowed in `window_secs` seconds (default 60s).
+    /// When `window_secs = 60` (default), this is equivalent to requests per minute.
     pub requests_per_minute: u32,
-    /// Sliding window size in seconds. Default 60, matching `requests_per_minute` semantics.
+    /// Sliding window size in seconds. Default 60.
+    /// Changing this alters the effective rate: e.g. `requests_per_minute = 600`
+    /// with `window_secs = 30` allows 600 requests per 30 seconds.
     pub window_secs: u64,
     pub per_rune: HashMap<String, PerRuneRateLimit>,
     pub default_caster_max_concurrent: u32,
@@ -341,6 +345,16 @@ impl AppConfig {
         self.server.grpc_host = IpAddr::V4(Ipv4Addr::LOCALHOST);
         self.server.http_host = IpAddr::V4(Ipv4Addr::LOCALHOST);
         self.auth.enabled = false;
+    }
+
+    /// Validate configuration values. Call after [`apply_env_overrides`](Self::apply_env_overrides)
+    /// to catch invalid final config (e.g. zero `window_secs` set via env).
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.rate_limit.window_secs > 0,
+            "rate_limit.window_secs must be > 0"
+        );
+        Ok(())
     }
 
     /// Apply environment variable overrides.

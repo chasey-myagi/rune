@@ -935,6 +935,24 @@ fn test_fix_rate_limit_window_secs_env_override() {
     std::env::remove_var("RUNE_RATE_LIMIT__WINDOW_SECS");
 }
 
+#[test]
+fn test_fix_rate_limit_window_secs_zero_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, "[rate_limit]\nwindow_secs = 0\n").unwrap();
+    let mut config = AppConfig::from_path(&path).unwrap();
+    config.apply_env_overrides();
+    let result = config.validate();
+    assert!(result.is_err(), "window_secs=0 should be rejected");
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("window_secs must be > 0"),
+        "error message should mention window_secs"
+    );
+}
+
 // ---- LOG__FILE env override ----
 
 #[test]

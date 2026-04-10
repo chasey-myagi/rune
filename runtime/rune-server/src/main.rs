@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
         config.apply_dev_mode();
     }
     config.apply_env_overrides();
+    config.validate()?;
 
     // ── Telemetry (tracing + metrics) ──
     let _tracer_provider = init_telemetry(&config.telemetry);

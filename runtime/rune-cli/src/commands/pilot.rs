@@ -17,6 +17,8 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PilotRegistration {
     caster_id: String,
@@ -407,7 +409,9 @@ fn parse_signal(name: &str) -> Option<i32> {
         "KILL" => Some(libc::SIGKILL),
         "USR1" => Some(libc::SIGUSR1),
         "USR2" => Some(libc::SIGUSR2),
-        other => other.parse::<i32>().ok().filter(|&n| n > 0 && n < 32),
+        // Linux: signals 1-64 (includes RT signals); macOS: 1-31.
+        // Out-of-range signals cause EINVAL from kill(), which is harmless here.
+        other => other.parse::<i32>().ok().filter(|&n| n > 0 && n <= 64),
     }
 }
 
@@ -439,13 +443,19 @@ async fn handle_scale_signal(
             // Lock dropped — safe to fork+exec now.
             if let Some((spawn_command, needed)) = spawn_info {
                 for _ in 0..needed {
-                    let mut child = Command::new("sh")
+                    let mut child = match Command::new("sh")
                         .arg("-c")
                         .arg(&spawn_command)
                         .stdout(Stdio::null())
                         .stderr(Stdio::piped())
                         .spawn()
-                        .with_context(|| format!("failed to spawn '{}'", spawn_command))?;
+                    {
+                        Ok(child) => child,
+                        Err(e) => {
+                            eprintln!("[pilot] spawn '{}' failed: {e}", spawn_command);
+                            continue;
+                        }
+                    };
                     // Reap the child process in the background and log stderr
                     // to aid debugging spawn failures.
                     let spawn_cmd = spawn_command.clone();
@@ -466,30 +476,33 @@ async fn handle_scale_signal(
         }
         ScaleAction::Down => {
             if let Some(caster_id) = signal.reason.strip_prefix("force_kill:") {
-                let registrations = registry.lock().await;
-                if let Some(registration) = registrations.get(caster_id) {
-                    if let Some(safe_pid) = validate_pid(registration.pid) {
-                        if process_alive_strict(registration.pid, registration.start_time) {
-                            let sig = parse_signal(&registration.shutdown_signal)
-                                .unwrap_or(libc::SIGTERM);
-                            unsafe {
-                                libc::kill(safe_pid, sig);
-                            }
-                            // Background: wait for graceful exit, then SIGKILL if still alive.
-                            let pid = registration.pid;
-                            let start_time = registration.start_time;
-                            tokio::spawn(async move {
-                                tokio::time::sleep(Duration::from_secs(5)).await;
-                                if process_alive_strict(pid, start_time) {
-                                    if let Some(pid_i32) = validate_pid(pid) {
-                                        unsafe {
-                                            libc::kill(pid_i32, libc::SIGKILL);
-                                        }
-                                    }
-                                }
-                            });
+                // Extract fields under lock, then drop before syscall.
+                let kill_info = {
+                    let registrations = registry.lock().await;
+                    registrations.get(caster_id).and_then(|reg| {
+                        let safe_pid = validate_pid(reg.pid)?;
+                        if process_alive_strict(reg.pid, reg.start_time) {
+                            Some((safe_pid, reg.start_time, reg.shutdown_signal.clone()))
+                        } else {
+                            None
                         }
+                    })
+                };
+                // Lock dropped — safe to issue signals.
+                if let Some((safe_pid, start_time, shutdown_signal)) = kill_info {
+                    let sig = parse_signal(&shutdown_signal).unwrap_or(libc::SIGTERM);
+                    unsafe {
+                        libc::kill(safe_pid, sig);
                     }
+                    let raw_pid = safe_pid as u32;
+                    tokio::spawn(async move {
+                        tokio::time::sleep(GRACEFUL_SHUTDOWN_TIMEOUT).await;
+                        if process_alive_strict(raw_pid, start_time) {
+                            unsafe {
+                                libc::kill(safe_pid, libc::SIGKILL);
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -753,8 +766,10 @@ mod tests {
         assert_eq!(parse_signal("SIGHUP"), Some(libc::SIGHUP));
         assert_eq!(parse_signal("SIGQUIT"), Some(libc::SIGQUIT));
         assert_eq!(parse_signal("15"), Some(15));
+        assert_eq!(parse_signal("36"), Some(36)); // RT signal
+        assert_eq!(parse_signal("64"), Some(64)); // max RT signal
         assert_eq!(parse_signal("invalid"), None);
         assert_eq!(parse_signal("0"), None);
-        assert_eq!(parse_signal("99"), None);
+        assert_eq!(parse_signal("65"), None); // out of range
     }
 }
