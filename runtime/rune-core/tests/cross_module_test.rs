@@ -398,3 +398,21 @@ async fn relay_concurrent_resolve_and_remove_no_panic() {
         h.await.unwrap();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Regression: PR #18 code review fixes
+// ---------------------------------------------------------------------------
+
+/// Fix 4: App::new() must wire up retry/circuit-breaker via build_relay(),
+/// not bypass it with bare Relay::new(). RetryConfig::default().enabled is
+/// true, so the default constructor should produce a Relay with a
+/// CircuitBreakerRegistry.
+#[test]
+fn test_fix_app_new_has_retry_enabled() {
+    let app = App::new();
+    assert!(
+        app.relay.circuit_breaker_registry().is_some(),
+        "App::new() must wire retry/circuit-breaker — got None, \
+         which means Relay::new() was used instead of build_relay()"
+    );
+}

@@ -388,31 +388,38 @@ async fn handle_scale_signal(
 ) -> Result<()> {
     match signal.action() {
         ScaleAction::Up => {
-            let registrations = registry.lock().await;
-            let current = registrations
-                .values()
-                .filter(|registration| registration.group == signal.group_id)
-                .count();
-            let needed = signal.desired_replicas.saturating_sub(current as u32);
-            if needed == 0 {
-                return Ok(());
-            }
-
-            if let Some(template) = registrations
-                .values()
-                .find(|registration| registration.group == signal.group_id)
-            {
+            // Extract needed fields under lock, then drop lock before fork+exec.
+            // Holding the Mutex during Command::spawn() risks blocking all
+            // registry access if the spawn_command path stalls.
+            let spawn_info = {
+                let registrations = registry.lock().await;
+                let current = registrations
+                    .values()
+                    .filter(|registration| registration.group == signal.group_id)
+                    .count();
+                let needed = signal.desired_replicas.saturating_sub(current as u32);
+                if needed == 0 {
+                    None
+                } else {
+                    registrations
+                        .values()
+                        .find(|registration| registration.group == signal.group_id)
+                        .map(|template| (template.spawn_command.clone(), needed))
+                }
+            };
+            // Lock dropped — safe to fork+exec now.
+            if let Some((spawn_command, needed)) = spawn_info {
                 for _ in 0..needed {
                     let mut child = Command::new("sh")
                         .arg("-c")
-                        .arg(&template.spawn_command)
+                        .arg(&spawn_command)
                         .stdout(Stdio::null())
                         .stderr(Stdio::piped())
                         .spawn()
-                        .with_context(|| format!("failed to spawn '{}'", template.spawn_command))?;
+                        .with_context(|| format!("failed to spawn '{}'", spawn_command))?;
                     // Reap the child process in the background and log stderr
                     // to aid debugging spawn failures.
-                    let spawn_cmd = template.spawn_command.clone();
+                    let spawn_cmd = spawn_command.clone();
                     tokio::spawn(async move {
                         if let Some(stderr) = child.stderr.take() {
                             let mut reader = tokio::io::BufReader::new(stderr);
@@ -434,6 +441,9 @@ async fn handle_scale_signal(
                 if let Some(registration) = registrations.get(caster_id) {
                     if let Some(safe_pid) = validate_pid(registration.pid) {
                         if process_alive_strict(registration.pid, registration.start_time) {
+                            // TODO(v1.3): honor registration.shutdown_signal with
+                            // graceful shutdown before escalating to SIGKILL.
+                            // Currently shutdown_signal is stored but unused.
                             unsafe {
                                 libc::kill(safe_pid, libc::SIGKILL);
                             }

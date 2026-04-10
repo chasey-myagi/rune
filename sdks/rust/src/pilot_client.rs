@@ -165,7 +165,9 @@ impl PilotClient {
             });
         }
         match response.error {
-            Some(error) if error == PILOT_CONNECTING_ERROR => EnsureStatus::Retry,
+            Some(error) if error == PILOT_CONNECTING_ERROR || error.is_empty() => {
+                EnsureStatus::Retry
+            }
             Some(error) => EnsureStatus::Failed(error),
             None => EnsureStatus::Retry,
         }
@@ -221,6 +223,13 @@ async fn start_pilot(runtime: &str, key: Option<&str>) -> SdkResult<()> {
         .stderr(Stdio::null());
     if let Some(key) = key {
         command.env("RUNE_KEY", key);
+    }
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
     }
     command
         .spawn()
@@ -372,5 +381,23 @@ mod tests {
         assert_eq!(client.pilot_id(), "pilot-1");
 
         server.await.unwrap();
+    }
+
+    /// Regression: empty-string error must retry (aligned with Python/TS SDKs).
+    /// Rust previously treated Some("") as Failed(""), while Python/TS treated
+    /// falsy error as retry.
+    #[test]
+    fn test_fix_classify_status_empty_error_retries() {
+        let response = PilotResponse {
+            ok: false,
+            pilot_id: "pilot-1".into(),
+            runtime: "127.0.0.1:50051".into(),
+            error: Some("".into()),
+        };
+        let result = PilotClient::classify_status(response, "127.0.0.1:50051");
+        assert!(
+            matches!(result, EnsureStatus::Retry),
+            "empty error string should classify as Retry, not Failed"
+        );
     }
 }

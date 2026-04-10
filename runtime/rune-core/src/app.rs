@@ -57,7 +57,7 @@ impl App {
         ));
         let resolver = resolver_from_strategy(&config.resolver.strategy, &session_mgr);
         Self {
-            relay: Arc::new(Relay::new()),
+            relay: build_relay(&config.retry),
             resolver,
             session_mgr,
             config,

@@ -131,10 +131,10 @@ impl CircuitBreaker {
         self.inner.lock().state
     }
 
-    pub fn snapshot(&self, caster_id: &str) -> CircuitBreakerSnapshot {
+    pub fn snapshot(&self) -> CircuitBreakerSnapshot {
         let inner = self.inner.lock();
         CircuitBreakerSnapshot {
-            caster_id: caster_id.to_string(),
+            caster_id: self.caster_id.clone(),
             state: inner.state,
             consecutive_failures: inner.consecutive_failures,
             consecutive_successes: inner.consecutive_successes,
@@ -229,7 +229,7 @@ impl CircuitBreakerRegistry {
         let mut states: Vec<_> = self
             .breakers
             .iter()
-            .map(|entry| entry.value().snapshot(entry.key()))
+            .map(|entry| entry.value().snapshot())
             .collect();
         states.sort_by(|left, right| left.caster_id.cmp(&right.caster_id));
         states

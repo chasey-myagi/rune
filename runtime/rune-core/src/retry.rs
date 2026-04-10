@@ -224,6 +224,10 @@ impl RuneInvoker for RetryInvoker {
         }
     }
 
+    /// Streaming invocations are NOT retried.  The receiver is handed to the
+    /// caller immediately, so a mid-stream error cannot be replayed without
+    /// starting a second concurrent execution on the remote caster.  Only
+    /// circuit-breaker gating applies to streams.
     async fn invoke_stream(
         &self,
         ctx: RuneContext,

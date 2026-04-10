@@ -4,9 +4,9 @@ use parking_lot::Mutex;
 use rune_proto::{session_message, ScaleAction, ScaleSignal, SessionMessage, ShutdownRequest};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS: u32 = 30_000;
 
@@ -93,7 +93,12 @@ pub struct ScaleEvaluator {
     /// critical section in `evaluate_once` performs only CPU-bound comparisons
     /// with no `.await`.
     breaches: Mutex<HashMap<String, BreachTracker>>,
-    shutdown: Arc<AtomicBool>,
+    /// Shared shutdown signal.  `notify_waiters()` wakes both the periodic
+    /// loop in `start()` and any pending force_kill grace-period sleeps,
+    /// ensuring orphan tasks exit promptly instead of lingering for up to
+    /// `DEFAULT_SHUTDOWN_GRACE_PERIOD_MS`.
+    shutdown: Arc<Notify>,
+    shutdown_called: std::sync::atomic::AtomicBool,
 }
 
 impl ScaleEvaluator {
@@ -103,7 +108,8 @@ impl ScaleEvaluator {
             check_interval,
             statuses: DashMap::new(),
             breaches: Mutex::new(HashMap::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(Notify::new()),
+            shutdown_called: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -122,22 +128,34 @@ impl ScaleEvaluator {
     }
 
     pub fn start(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let shutdown = Arc::clone(&self.shutdown);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(self.check_interval);
             loop {
-                interval.tick().await;
-                if self.shutdown.load(Ordering::Acquire) {
-                    break;
+                tokio::select! {
+                    _ = interval.tick() => {
+                        self.evaluate_once().await;
+                    }
+                    _ = shutdown.notified() => {
+                        break;
+                    }
                 }
-                self.evaluate_once().await;
             }
         })
     }
 
-    /// Signal the evaluator to stop its periodic loop and skip pending
-    /// grace-period force_kill spawns.
+    /// Signal the evaluator to stop its periodic loop and immediately
+    /// wake all pending force_kill grace-period sleeps so they exit
+    /// without sending stale signals.
     pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown_called
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.shutdown.notify_waiters();
+    }
+
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown_called
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Pure decision function: inspects breach tracker timestamps and
@@ -193,6 +211,10 @@ impl ScaleEvaluator {
             seen.insert(group_id.clone());
 
             if group.poisoned {
+                // Clear any accumulated breach timers so that when the
+                // mismatch resolves, scaling starts from a clean slate
+                // instead of immediately firing on stale elapsed time.
+                self.breaches.lock().remove(&group_id);
                 self.statuses.insert(
                     group_id.clone(),
                     ScalingStatusSnapshot {
@@ -237,10 +259,13 @@ impl ScaleEvaluator {
                         status.reason = "missing pilot".into();
                         ActionPlan::None
                     } else {
-                        // Re-acquire lock briefly to consume the sustained window.
+                        // Re-acquire lock briefly to reset the cooldown window.
                         // This second acquisition is intentional: the first lock
                         // only covers the pure decision; resetting the tracker is
-                        // deferred until we confirm a pilot exists.
+                        // deferred until we confirm a pilot exists.  Setting
+                        // up_since to now() starts a fresh sustained-breach
+                        // interval, allowing consecutive scale-ups if pressure
+                        // remains above threshold.
                         self.breaches
                             .lock()
                             .entry(group_id.clone())
@@ -260,7 +285,8 @@ impl ScaleEvaluator {
                 }
                 ScaleIntent::Down => {
                     if let Some(victim_id) = self.select_scale_down_candidate(&group) {
-                        // Consume the sustained window.
+                        // Reset the cooldown window — next scale-down requires
+                        // a fresh sustained breach below the threshold.
                         self.breaches
                             .lock()
                             .entry(group_id.clone())
@@ -370,6 +396,12 @@ impl ScaleEvaluator {
                         .and_then(|meta| meta.labels.get("_pilot_id").cloned());
 
                     if let Some(pilot_id) = victim_pilot_id {
+                        // Guard: if shutdown() was called while evaluate_once()
+                        // was in flight, skip spawning — the Notify may already
+                        // have fired before this task's notified() future exists.
+                        if self.is_shutdown() {
+                            continue;
+                        }
                         let session_mgr = Arc::clone(&self.session_mgr);
                         let shutdown = Arc::clone(&self.shutdown);
                         let group_id_clone = group_id.clone();
@@ -381,17 +413,19 @@ impl ScaleEvaluator {
                         // have stalled long enough for the victim to reconnect, which
                         // would give us the *new* session's generation and defeat the guard.
                         tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_millis(
-                                DEFAULT_SHUTDOWN_GRACE_PERIOD_MS as u64,
-                            ))
-                            .await;
-                            // Skip force_kill if the evaluator is shutting down —
-                            // the runtime is exiting and we should not send new signals.
-                            if shutdown.load(Ordering::Acquire) {
-                                return;
+                            // Wait for grace period OR immediate cancellation on shutdown.
+                            // Without this select!, the task would linger for up to 30s
+                            // as an orphan after the evaluator shuts down.
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_millis(
+                                    DEFAULT_SHUTDOWN_GRACE_PERIOD_MS as u64,
+                                )) => {}
+                                _ = shutdown.notified() => {
+                                    return; // evaluator shutting down — skip force_kill
+                                }
                             }
                             // Only force_kill if the victim is STILL the same session.
-                            // If it reconnected, connected_at will differ — skip.
+                            // If it reconnected, generation will differ — skip.
                             let still_same_session = session_mgr
                                 .session_generation(&victim_id)
                                 .zip(victim_generation)
