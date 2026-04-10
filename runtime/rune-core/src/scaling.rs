@@ -136,15 +136,23 @@ impl ScaleEvaluator {
                         if started.elapsed() >= Duration::from_secs(group.policy.sustained_secs)
                             && current < group.policy.max_replicas
                         {
-                            status.action = "scale_up".into();
-                            status.desired_replicas = current + 1;
-                            status.reason = format!(
-                                "pressure {:.3} exceeded threshold {:.3}",
-                                pressure, group.policy.scale_up_threshold
-                            );
-                            tracker.up_since = Some(Instant::now());
-                            ActionPlan::ScaleUp {
-                                pilot_ids: group.pilot_ids.clone(),
+                            if group.pilot_ids.is_empty() {
+                                // No pilot to accept the scale-up — preserve the
+                                // sustained window so we don't re-wait the full
+                                // duration once a pilot registers.
+                                status.reason = "missing pilot".into();
+                                ActionPlan::None
+                            } else {
+                                status.action = "scale_up".into();
+                                status.desired_replicas = current + 1;
+                                status.reason = format!(
+                                    "pressure {:.3} exceeded threshold {:.3}",
+                                    pressure, group.policy.scale_up_threshold
+                                );
+                                tracker.up_since = Some(Instant::now());
+                                ActionPlan::ScaleUp {
+                                    pilot_ids: group.pilot_ids.clone(),
+                                }
                             }
                         } else {
                             status.reason = "waiting for sustained scale-up window".into();
@@ -190,49 +198,38 @@ impl ScaleEvaluator {
             match action_plan {
                 ActionPlan::None => {}
                 ActionPlan::ScaleUp { pilot_ids } => {
-                    if pilot_ids.is_empty() {
-                        status.reason = "missing pilot".into();
-                    } else {
-                        // Pick the pilot managing the fewest casters in this
-                        // group so new replicas are spread across hosts.  Send
-                        // desired_replicas relative to that pilot's LOCAL count
-                        // so it spawns exactly one new caster (not the global
-                        // target, which would cause every pilot to over-scale).
-                        let target_pilot = pilot_ids
-                            .iter()
-                            .min_by_key(|pid| {
-                                group.pilot_caster_counts.get(*pid).copied().unwrap_or(0)
-                            })
-                            .cloned();
+                    // pilot_ids is guaranteed non-empty here — the decision
+                    // phase returns ActionPlan::None when no pilot exists.
+                    let target_pilot = pilot_ids
+                        .iter()
+                        .min_by_key(|pid| group.pilot_caster_counts.get(*pid).copied().unwrap_or(0))
+                        .cloned();
 
-                        if let Some(pilot_id) = target_pilot {
-                            let local_count = group
-                                .pilot_caster_counts
-                                .get(&pilot_id)
-                                .copied()
-                                .unwrap_or(0) as u32;
-                            if let Err(e) = self
-                                .session_mgr
-                                .send_message(
-                                    &pilot_id,
-                                    SessionMessage {
-                                        payload: Some(session_message::Payload::ScaleSignal(
-                                            ScaleSignal {
-                                                action: ScaleAction::Up.into(),
-                                                group_id: group_id.clone(),
-                                                desired_replicas: local_count + 1,
-                                                current_pressure: group
-                                                    .average_pressure
-                                                    .unwrap_or(0.0),
-                                                reason: status.reason.clone(),
-                                            },
-                                        )),
-                                    },
-                                )
-                                .await
-                            {
-                                tracing::warn!(pilot_id = %pilot_id, group_id = %group_id, error = %e, "scale-up signal failed");
-                            }
+                    if let Some(pilot_id) = target_pilot {
+                        let local_count = group
+                            .pilot_caster_counts
+                            .get(&pilot_id)
+                            .copied()
+                            .unwrap_or(0) as u32;
+                        if let Err(e) = self
+                            .session_mgr
+                            .send_message(
+                                &pilot_id,
+                                SessionMessage {
+                                    payload: Some(session_message::Payload::ScaleSignal(
+                                        ScaleSignal {
+                                            action: ScaleAction::Up.into(),
+                                            group_id: group_id.clone(),
+                                            desired_replicas: local_count + 1,
+                                            current_pressure: group.average_pressure.unwrap_or(0.0),
+                                            reason: status.reason.clone(),
+                                        },
+                                    )),
+                                },
+                            )
+                            .await
+                        {
+                            tracing::warn!(pilot_id = %pilot_id, group_id = %group_id, error = %e, "scale-up signal failed");
                         }
                     }
                 }
@@ -932,6 +929,67 @@ mod tests {
         assert!(
             !still_same,
             "shutdown guard must detect reconnected victim and skip"
+        );
+    }
+
+    /// Regression: when sustained scale-up fires but no pilot exists,
+    /// the tracker must NOT reset `up_since`.  Otherwise, the sustained
+    /// window is wasted and the next evaluation cycle must wait the full
+    /// duration again before retrying.
+    #[tokio::test]
+    async fn test_fix_scale_up_without_pilot_preserves_sustained_window() {
+        let mgr = Arc::new(SessionManager::new_dev(
+            Duration::from_secs(10),
+            Duration::from_secs(35),
+        ));
+        // Two high-pressure casters in the same group — but NO pilot registered.
+        insert_scaling_caster(&mgr, "caster-a", "gpu", None, 2, 0.95);
+        insert_scaling_caster(&mgr, "caster-b", "gpu", None, 2, 0.9);
+
+        let evaluator = ScaleEvaluator::new(Arc::clone(&mgr), Duration::from_secs(30));
+
+        // First evaluation: breach tracker starts timing.
+        evaluator.evaluate_once().await;
+
+        let tracker_after_first = {
+            let map = evaluator.breaches.lock().unwrap();
+            map.get("gpu").cloned()
+        };
+        assert!(
+            tracker_after_first
+                .as_ref()
+                .and_then(|t| t.up_since)
+                .is_some(),
+            "first eval should start timing the breach"
+        );
+        let first_up_since = tracker_after_first.unwrap().up_since.unwrap();
+
+        // Second evaluation: still no pilot.  up_since must be preserved
+        // (not reset) so the sustained window keeps accumulating.
+        evaluator.evaluate_once().await;
+
+        let tracker_after_second = {
+            let map = evaluator.breaches.lock().unwrap();
+            map.get("gpu").cloned()
+        };
+        let second_up_since = tracker_after_second
+            .as_ref()
+            .and_then(|t| t.up_since)
+            .expect("up_since should still be set after second eval");
+
+        assert_eq!(
+            first_up_since, second_up_since,
+            "up_since must NOT be reset when no pilot is available — \
+             the sustained window should be preserved for next cycle"
+        );
+
+        // Status should reflect "missing pilot", not "scale_up".
+        let statuses = evaluator.snapshot_status();
+        let gpu_status = statuses.iter().find(|s| s.group_id == "gpu").unwrap();
+        assert!(
+            gpu_status.reason.contains("missing pilot"),
+            "reason should indicate missing pilot, got: {}",
+            gpu_status.reason
         );
     }
 }
