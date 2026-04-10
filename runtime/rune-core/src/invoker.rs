@@ -495,7 +495,7 @@ mod tests {
                 pending: Arc::clone(&pending),
                 timeout_handles: Arc::new(dashmap::DashMap::new()),
                 semaphore: Arc::clone(&semaphore),
-                connected_at: std::time::Instant::now(),
+                generation: 1,
             },
         );
 
@@ -584,7 +584,7 @@ mod tests {
                 pending: Arc::clone(&pending),
                 timeout_handles: Arc::new(dashmap::DashMap::new()),
                 semaphore: Arc::clone(&semaphore),
-                connected_at: std::time::Instant::now(),
+                generation: 1,
             },
         );
 

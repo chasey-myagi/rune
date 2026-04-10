@@ -118,8 +118,7 @@ pub async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
                 "pressure": health.pressure,
                 "metrics": health.metrics,
                 "health_status": format!("{:?}", health.status).to_uppercase(),
-                "connected_since": state.rune.session_mgr.connected_at(cid)
-                    .map(|t| t.elapsed().as_secs())
+                "session_generation": state.rune.session_mgr.session_generation(cid)
                     .unwrap_or(0),
             })
         })

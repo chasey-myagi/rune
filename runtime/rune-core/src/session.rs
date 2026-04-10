@@ -6,7 +6,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use rune_proto::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -40,12 +40,12 @@ pub enum CasterRole {
     Pilot,
 }
 
-/// Wraps per-caster health info with a generation marker (`connected_at`)
-/// so that `cleanup_session` can atomically remove only its own generation's
+/// Wraps per-caster health info with a generation marker so that
+/// `cleanup_session` can atomically remove only its own generation's
 /// entry via `DashMap::remove_if`.
 #[derive(Debug)]
 pub(crate) struct HealthEntry {
-    pub(crate) connected_at: Instant,
+    pub(crate) generation: u64,
     pub(crate) info: Arc<std::sync::RwLock<HealthInfo>>,
 }
 
@@ -70,10 +70,10 @@ pub struct CasterMetadata {
     pub labels: HashMap<String, String>,
     pub max_concurrent: usize,
     pub role: CasterRole,
-    /// Generation marker — matches the `CasterState::connected_at` set during
-    /// `handle_attach`.  Used by `cleanup_session` to conditionally remove only
-    /// this generation's metadata via `DashMap::remove_if`.
-    pub(crate) connected_at: Instant,
+    /// Monotonic generation marker — matches the `CasterState::generation` set
+    /// during `handle_attach`.  Used by `cleanup_session` to conditionally
+    /// remove only this generation's metadata via `DashMap::remove_if`.
+    pub(crate) generation: u64,
 }
 
 impl HealthStatusLevel {
@@ -110,6 +110,9 @@ pub(crate) enum PendingResponse {
 pub(crate) struct PendingRequest {
     pub(crate) tx: PendingResponse,
     pub(crate) _permit: tokio::sync::OwnedSemaphorePermit,
+    /// Per-request timing — when the request was enqueued.
+    #[allow(dead_code)]
+    pub(crate) created_at: Instant,
 }
 
 /// Central registry for caster gRPC stream connections.
@@ -134,6 +137,11 @@ pub struct SessionManager {
     pub(crate) heartbeat_interval: Duration,
     pub(crate) heartbeat_timeout: Duration,
     pub(crate) default_caster_max_concurrent: usize,
+    caster_count_atomic: AtomicUsize,
+    /// Monotonic counter for session generations — each attach gets a unique
+    /// u64, eliminating the `Instant`-based identity which could collide in
+    /// fast-reconnect scenarios.
+    generation_counter: AtomicU64,
     on_caster_attach: OnceLock<OnCasterAttach>,
     key_verifier: Arc<dyn KeyVerifier>,
     dev_mode: bool,
@@ -144,7 +152,7 @@ pub(crate) struct CasterState {
     pub(crate) pending: Arc<DashMap<String, PendingRequest>>,
     pub(crate) timeout_handles: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
     pub(crate) semaphore: Arc<Semaphore>,
-    pub(crate) connected_at: Instant,
+    pub(crate) generation: u64,
 }
 
 impl SessionManager {
@@ -166,6 +174,8 @@ impl SessionManager {
             heartbeat_interval,
             heartbeat_timeout,
             default_caster_max_concurrent,
+            caster_count_atomic: AtomicUsize::new(0),
+            generation_counter: AtomicU64::new(1),
             on_caster_attach: OnceLock::new(),
             key_verifier: Arc::new(crate::auth::NoopVerifier),
             dev_mode: true,
@@ -201,6 +211,8 @@ impl SessionManager {
             heartbeat_interval,
             heartbeat_timeout,
             default_caster_max_concurrent,
+            caster_count_atomic: AtomicUsize::new(0),
+            generation_counter: AtomicU64::new(1),
             on_caster_attach: OnceLock::new(),
             key_verifier,
             dev_mode,
@@ -255,8 +267,9 @@ impl SessionManager {
     }
 
     /// Return the number of connected casters (excludes Pilot sessions).
+    /// O(1) via atomic counter — maintained by handle_attach / cleanup_session.
     pub fn caster_count(&self) -> usize {
-        self.list_caster_ids().len()
+        self.caster_count_atomic.load(Ordering::Relaxed)
     }
 
     /// Return the number of available permits (free concurrency slots) for a caster.
@@ -326,13 +339,19 @@ impl SessionManager {
         }
     }
 
-    /// Return the `Instant` when a caster connected, or `None` if not found.
-    pub fn connected_at(&self, caster_id: &str) -> Option<Instant> {
-        self.sessions.get(caster_id).map(|s| s.connected_at)
+    /// Return the monotonic session generation for a caster, or `None` if not found.
+    pub fn session_generation(&self, caster_id: &str) -> Option<u64> {
+        self.sessions.get(caster_id).map(|s| s.generation)
+    }
+
+    /// Allocate the next monotonic generation value.
+    fn next_generation(&self) -> u64 {
+        self.generation_counter.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Insert a dummy caster for integration tests in downstream crates.
     pub fn insert_test_caster(&self, caster_id: &str, max_concurrent: usize) {
+        let gen = self.next_generation();
         let (tx, _rx) = mpsc::channel(16);
         self.sessions.insert(
             caster_id.to_string(),
@@ -341,14 +360,13 @@ impl SessionManager {
                 pending: Arc::new(DashMap::new()),
                 timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::new(Semaphore::new(max_concurrent)),
-                connected_at: Instant::now(),
+                generation: gen,
             },
         );
-        let connected_at = self.sessions.get(caster_id).unwrap().connected_at;
         self.health.insert(
             caster_id.to_string(),
             HealthEntry {
-                connected_at,
+                generation: gen,
                 info: Arc::new(std::sync::RwLock::new(HealthInfo::default())),
             },
         );
@@ -358,9 +376,10 @@ impl SessionManager {
                 labels: HashMap::new(),
                 max_concurrent,
                 role: CasterRole::Caster,
-                connected_at,
+                generation: gen,
             },
         );
+        self.caster_count_atomic.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Acquire one permit from a test caster's semaphore (saturate capacity).
@@ -414,10 +433,10 @@ struct SessionContext {
     last_heartbeat_ms: Arc<AtomicU64>,
     outbound_tx: mpsc::Sender<SessionMessage>,
     relay: Arc<Relay>,
-    /// Timestamp set during handle_attach; cleanup_session compares this
-    /// against the stored CasterState.connected_at to avoid deleting a
+    /// Monotonic generation set during handle_attach; cleanup_session compares
+    /// this against the stored CasterState.generation to avoid deleting a
     /// newer session that reconnected with the same caster_id.
-    connected_at: Option<Instant>,
+    generation: Option<u64>,
 }
 
 impl SessionContext {
@@ -434,7 +453,7 @@ impl SessionContext {
             last_heartbeat_ms: Arc::new(AtomicU64::new(now_ms())),
             outbound_tx,
             relay,
-            connected_at: None,
+            generation: None,
         }
     }
 
@@ -583,8 +602,8 @@ impl SessionManager {
         tracing::info!(caster_id = %id, effective_max_concurrent = permits, "caster concurrency configured");
         ctx.semaphore.add_permits(permits);
 
-        let now = Instant::now();
-        ctx.connected_at = Some(now);
+        let gen = self.next_generation();
+        ctx.generation = Some(gen);
         self.sessions.insert(
             id.clone(),
             CasterState {
@@ -592,25 +611,38 @@ impl SessionManager {
                 pending: Arc::clone(&ctx.pending),
                 timeout_handles: Arc::clone(&ctx.timeout_handles),
                 semaphore: Arc::clone(&ctx.semaphore),
-                connected_at: now,
+                generation: gen,
             },
         );
         self.health.insert(
             id.clone(),
             HealthEntry {
-                connected_at: now,
+                generation: gen,
                 info: Arc::new(std::sync::RwLock::new(HealthInfo::default())),
             },
         );
-        self.metadata.insert(
+        let old_meta = self.metadata.insert(
             id.clone(),
             CasterMetadata {
                 labels: attach.labels.clone(),
                 max_concurrent: permits,
                 role,
-                connected_at: now,
+                generation: gen,
             },
         );
+
+        // Maintain caster_count_atomic: only net-increment when a new Caster
+        // appears. If a Caster reconnects (old_meta was also Caster), the
+        // count stays the same. If role changed, adjust accordingly.
+        let old_was_caster = old_meta
+            .map(|m| m.role == CasterRole::Caster)
+            .unwrap_or(false);
+        let new_is_caster = role == CasterRole::Caster;
+        if new_is_caster && !old_was_caster {
+            self.caster_count_atomic.fetch_add(1, Ordering::Relaxed);
+        } else if !new_is_caster && old_was_caster {
+            self.caster_count_atomic.fetch_sub(1, Ordering::Relaxed);
+        }
 
         let mut configs = Vec::new();
         if role != CasterRole::Pilot {
@@ -618,7 +650,7 @@ impl SessionManager {
             // re-registering, then stamp this generation so cleanup_session
             // (which uses remove_caster_if_gen) will not wipe our entries.
             ctx.relay.remove_caster(&id);
-            ctx.relay.set_caster_generation(&id, now);
+            ctx.relay.set_caster_generation(&id, gen);
             for decl in &attach.runes {
                 let config = RuneConfig {
                     name: decl.name.clone(),
@@ -785,13 +817,13 @@ impl SessionManager {
         if let Some(id) = &ctx.caster_id {
             // Guard: only remove if the stored session is still ours.
             // If a newer session reconnected with the same caster_id,
-            // the stored connected_at will differ — skip cleanup to
+            // the stored generation will differ — skip cleanup to
             // avoid deleting the replacement session's data.
             // Atomic check-and-remove: avoids TOCTOU race where a reconnect
             // could insert a new session between our get() and remove().
             let removed = self
                 .sessions
-                .remove_if(id, |_, s| Some(s.connected_at) == ctx.connected_at);
+                .remove_if(id, |_, s| Some(s.generation) == ctx.generation);
             if removed.is_none() {
                 tracing::info!(
                     caster_id = %id,
@@ -801,17 +833,23 @@ impl SessionManager {
                 return;
             }
             tracing::info!(caster_id = %id, "cleaning up disconnected caster");
-            // Each entry carries a `connected_at` generation marker set during
-            // handle_attach.  `remove_if` is atomic per DashMap shard, so a
-            // replacement session's entries (with a different connected_at)
-            // are never accidentally deleted — no TOCTOU window.
+            // Each entry carries a generation marker set during handle_attach.
+            // `remove_if` is atomic per DashMap shard, so a replacement
+            // session's entries (with a different generation) are never
+            // accidentally deleted — no TOCTOU window.
             let gen = ctx
-                .connected_at
-                .expect("BUG: connected_at not set; handle_attach must run before cleanup");
+                .generation
+                .expect("BUG: generation not set; handle_attach must run before cleanup");
             self.health
-                .remove_if(id, |_, entry| entry.connected_at == gen);
-            self.metadata
-                .remove_if(id, |_, meta| meta.connected_at == gen);
+                .remove_if(id, |_, entry| entry.generation == gen);
+            let meta_removed = self
+                .metadata
+                .remove_if(id, |_, meta| meta.generation == gen);
+            if let Some((_, meta)) = meta_removed {
+                if meta.role == CasterRole::Caster {
+                    self.caster_count_atomic.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
             // Relay: generation-aware removal.  Only removes entries
             // stamped with our generation (set in handle_attach via
             // set_caster_generation).  If a replacement session already
@@ -878,6 +916,7 @@ impl SessionManager {
                 PendingRequest {
                     tx: PendingResponse::Once(tx),
                     _permit: permit,
+                    created_at: Instant::now(),
                 },
             );
 
@@ -944,6 +983,7 @@ impl SessionManager {
                 PendingRequest {
                     tx: PendingResponse::Stream(tx),
                     _permit: permit,
+                    created_at: Instant::now(),
                 },
             );
 
@@ -1151,7 +1191,7 @@ mod tests {
                 pending: Arc::clone(&pending),
                 timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::clone(&semaphore),
-                connected_at: Instant::now(),
+                generation: 1,
             },
         );
 
@@ -1340,6 +1380,7 @@ mod tests {
                 PendingRequest {
                     tx: PendingResponse::Once(tx),
                     _permit: permit,
+                    created_at: Instant::now(),
                 },
             );
         }
@@ -1435,7 +1476,7 @@ mod tests {
                 pending: Arc::clone(&pending1),
                 timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::clone(&sem1),
-                connected_at: Instant::now(),
+                generation: 1,
             },
         );
 
@@ -1449,7 +1490,7 @@ mod tests {
                 pending: Arc::clone(&pending2),
                 timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::clone(&sem2),
-                connected_at: Instant::now(),
+                generation: 2,
             },
         );
 
@@ -1752,7 +1793,7 @@ mod tests {
                     pending: Arc::clone(&pending),
                     timeout_handles: Arc::new(DashMap::new()),
                     semaphore: Arc::clone(&sem),
-                    connected_at: Instant::now(),
+                    generation: 1,
                 },
             );
             pending_maps.push(pending);
@@ -1896,6 +1937,7 @@ mod tests {
         // Simulate disconnect: remove from sessions and metadata
         mgr.sessions.remove("reconnect-caster");
         mgr.metadata.remove("reconnect-caster");
+        mgr.caster_count_atomic.fetch_sub(1, Ordering::Relaxed);
         assert!(!mgr.is_available("reconnect-caster"));
         assert_eq!(mgr.caster_count(), 0);
 
@@ -1927,7 +1969,7 @@ mod tests {
                 pending: Arc::new(DashMap::new()),
                 timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::clone(&sem),
-                connected_at: Instant::now(),
+                generation: 1,
             },
         );
 
@@ -2265,7 +2307,7 @@ mod tests {
                 pending: Arc::new(DashMap::new()),
                 timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::clone(&sem),
-                connected_at: Instant::now(),
+                generation: 1,
             },
         );
 
@@ -2292,7 +2334,7 @@ mod tests {
                 pending: Arc::clone(&pending),
                 timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::clone(&semaphore),
-                connected_at: Instant::now(),
+                generation: 1,
             },
         );
 
@@ -2335,7 +2377,7 @@ mod tests {
                 pending: Arc::clone(&pending),
                 timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::clone(&semaphore),
-                connected_at: Instant::now(),
+                generation: 1,
             },
         );
 
@@ -2639,7 +2681,7 @@ mod tests {
                 pending: Arc::new(DashMap::new()),
                 timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::new(Semaphore::new(1)),
-                connected_at: Instant::now(),
+                generation: 1,
             },
         );
 
@@ -2684,7 +2726,7 @@ mod tests {
                 },
                 max_concurrent: 4,
                 role: CasterRole::Caster,
-                connected_at: Instant::now(),
+                generation: 1,
             },
         );
     }

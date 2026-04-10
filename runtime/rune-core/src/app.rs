@@ -452,12 +452,16 @@ mod tests {
         // Use a custom resolver that always picks the first
         struct FirstResolver;
         impl Resolver for FirstResolver {
-            fn pick<'a>(
+            fn pick(
                 &self,
                 _rune_name: &str,
-                candidates: &'a [crate::relay::RuneEntry],
-            ) -> Option<&'a crate::relay::RuneEntry> {
-                candidates.first()
+                candidates: &[crate::relay::RuneEntry],
+            ) -> Option<usize> {
+                if candidates.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                }
             }
         }
         app.set_resolver(FirstResolver);

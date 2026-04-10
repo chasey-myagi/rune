@@ -3,9 +3,14 @@ use dashmap::DashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// Resolver trait — picks one candidate from the registry
+/// Resolver trait — picks one candidate from the provided slice.
+///
+/// Returns the **index** into `candidates` of the chosen entry, or `None`
+/// if `candidates` is empty. Returning an index instead of a reference
+/// eliminates the `ptr::eq` fragility that previously existed when
+/// delegating resolvers worked with cloned sub-slices.
 pub trait Resolver: Send + Sync {
-    fn pick<'a>(&self, rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry>;
+    fn pick(&self, rune_name: &str, candidates: &[RuneEntry]) -> Option<usize>;
 }
 
 /// Round-robin resolver
@@ -28,7 +33,7 @@ impl RoundRobinResolver {
 }
 
 impl Resolver for RoundRobinResolver {
-    fn pick<'a>(&self, rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry> {
+    fn pick(&self, rune_name: &str, candidates: &[RuneEntry]) -> Option<usize> {
         if candidates.is_empty() {
             return None;
         }
@@ -37,7 +42,7 @@ impl Resolver for RoundRobinResolver {
             .entry(rune_name.to_string())
             .or_insert_with(|| AtomicUsize::new(0))
             .fetch_add(1, Ordering::Relaxed);
-        Some(&candidates[idx % candidates.len()])
+        Some(idx % candidates.len())
     }
 }
 
@@ -61,13 +66,12 @@ impl RandomResolver {
 }
 
 impl Resolver for RandomResolver {
-    fn pick<'a>(&self, _rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry> {
+    fn pick(&self, _rune_name: &str, candidates: &[RuneEntry]) -> Option<usize> {
         if candidates.is_empty() {
             return None;
         }
         use rand::Rng;
-        let idx = rand::thread_rng().gen_range(0..candidates.len());
-        Some(&candidates[idx])
+        Some(rand::thread_rng().gen_range(0..candidates.len()))
     }
 }
 
@@ -107,7 +111,7 @@ impl HealthAwareResolver {
 }
 
 impl Resolver for HealthAwareResolver {
-    fn pick<'a>(&self, rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry> {
+    fn pick(&self, rune_name: &str, candidates: &[RuneEntry]) -> Option<usize> {
         if candidates.is_empty() {
             return None;
         }
@@ -124,51 +128,32 @@ impl Resolver for HealthAwareResolver {
             .collect();
 
         if top_indices.len() == candidates.len() {
-            // All same rank — delegate directly (no clone needed).
+            // All same rank — delegate directly.
             return self.inner.pick(rune_name, candidates);
         }
 
         // Build temporary vec for inner resolver, then map back via index.
         let top_tier: Vec<RuneEntry> = top_indices.iter().map(|&i| candidates[i].clone()).collect();
-        let picked = self.inner.pick(rune_name, &top_tier)?;
+        let inner_idx = self.inner.pick(rune_name, &top_tier)?;
 
-        // Map the picked reference back to the original candidates slice.
-        // `picked` points into `top_tier`, so ptr::eq reliably identifies
-        // the exact element — unlike value matching which fails when multiple
-        // local entries share the same (name, caster_id=None).
-        let inner_idx = top_tier
-            .iter()
-            .position(|e| std::ptr::eq(e, picked))
-            .expect("picked entry must exist in top_tier");
-
-        Some(&candidates[top_indices[inner_idx]])
+        Some(top_indices[inner_idx])
     }
 }
 
 impl Resolver for LeastLoadResolver {
-    fn pick<'a>(&self, _rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry> {
+    fn pick(&self, _rune_name: &str, candidates: &[RuneEntry]) -> Option<usize> {
         if candidates.is_empty() {
             return None;
         }
 
-        // Prefer lower reported pressure when available.  For casters that
-        // have not (yet) reported pressure, synthesize an estimate from permit
-        // utilisation so they compete fairly instead of being treated as 0.0
-        // (best) or being unconditionally demoted.
-        //
-        // Sanitize pressure: NaN, negative, and infinite values are clamped
-        // so they don't corrupt the sort.  NaN/infinity → 1.0 (worst);
-        // negative → 0.0 (best reasonable).  Then use f64::total_cmp for a
-        // total-order comparison that avoids the old to_bits() inversion bug.
-        let mut best: Option<(f64, usize, &'a RuneEntry)> = None;
-        for entry in candidates {
+        let mut best: Option<(f64, usize, usize)> = None;
+        for (idx, entry) in candidates.iter().enumerate() {
             let (pressure, permits) = match &entry.caster_id {
                 Some(cid) => {
                     let permits = self.session_mgr.available_permits(cid);
                     let raw_pressure = match self.session_mgr.reported_pressure(cid) {
                         Some(p) => p,
                         None => {
-                            // Synthesize pressure from permit utilisation.
                             let max = self.session_mgr.max_concurrent(cid);
                             if max > 0 {
                                 1.0 - (permits as f64 / max as f64)
@@ -177,7 +162,6 @@ impl Resolver for LeastLoadResolver {
                             }
                         }
                     };
-                    // Sanitize: NaN/infinity → worst; negative → best-possible.
                     let p = if raw_pressure.is_nan() || raw_pressure.is_infinite() {
                         1.0
                     } else if raw_pressure < 0.0 {
@@ -189,22 +173,19 @@ impl Resolver for LeastLoadResolver {
                 }
                 None => (0.0, usize::MAX),
             };
-            // Lower pressure is better; for ties, more permits is better.
             let dominated = match &best {
                 None => false,
-                Some((best_p, best_perm, _)) => {
-                    match pressure.total_cmp(best_p) {
-                        std::cmp::Ordering::Less => false,   // this is better
-                        std::cmp::Ordering::Greater => true, // best is better
-                        std::cmp::Ordering::Equal => permits <= *best_perm, // tie-break on permits
-                    }
-                }
+                Some((best_p, best_perm, _)) => match pressure.total_cmp(best_p) {
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Equal => permits <= *best_perm,
+                },
             };
             if !dominated {
-                best = Some((pressure, permits, entry));
+                best = Some((pressure, permits, idx));
             }
         }
-        best.map(|(_, _, entry)| entry)
+        best.map(|(_, _, idx)| idx)
     }
 }
 
@@ -221,15 +202,13 @@ impl PriorityResolver {
 }
 
 impl Resolver for PriorityResolver {
-    fn pick<'a>(&self, rune_name: &str, candidates: &'a [RuneEntry]) -> Option<&'a RuneEntry> {
+    fn pick(&self, rune_name: &str, candidates: &[RuneEntry]) -> Option<usize> {
         if candidates.is_empty() {
             return None;
         }
 
-        // Find the maximum priority value
         let max_priority = candidates.iter().map(|e| e.config.priority).max().unwrap();
 
-        // Collect indices of top-tier candidates
         let top_indices: Vec<usize> = candidates
             .iter()
             .enumerate()
@@ -238,35 +217,12 @@ impl Resolver for PriorityResolver {
             .collect();
 
         if top_indices.len() == candidates.len() {
-            // All same priority — delegate directly to inner
             self.inner.pick(rune_name, candidates)
         } else {
-            // Build a temporary vec of top-tier entries for inner resolver
             let top_tier: Vec<RuneEntry> =
                 top_indices.iter().map(|&i| candidates[i].clone()).collect();
-            let picked = self.inner.pick(rune_name, &top_tier)?;
-            // Safe index lookup: match by (name, caster_id) value equality,
-            // which is robust even if inner resolver clones or rebinds references.
-            // Precondition: (name, caster_id) must be unique within top_tier.
-            debug_assert!(
-                {
-                    let mut pairs: Vec<_> = top_tier
-                        .iter()
-                        .map(|e| (&e.config.name, &e.caster_id))
-                        .collect();
-                    pairs.sort();
-                    pairs.dedup();
-                    pairs.len() == top_tier.len()
-                },
-                "top_tier contains duplicate (name, caster_id) entries"
-            );
-            let inner_idx = top_tier
-                .iter()
-                .position(|e| {
-                    e.config.name == picked.config.name && e.caster_id == picked.caster_id
-                })
-                .expect("picked entry must exist in top_tier by (name, caster_id)");
-            Some(&candidates[top_indices[inner_idx]])
+            let inner_idx = self.inner.pick(rune_name, &top_tier)?;
+            Some(top_indices[inner_idx])
         }
     }
 }
@@ -314,16 +270,16 @@ mod tests {
         ];
 
         // First pick should be high_a (index 1 in original)
-        let picked = resolver.pick("test", &candidates).unwrap();
-        assert_eq!(picked.config.name, "high_a");
+        let idx = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(candidates[idx].config.name, "high_a");
 
         // Second pick should be high_b (index 2 in original)
-        let picked = resolver.pick("test", &candidates).unwrap();
-        assert_eq!(picked.config.name, "high_b");
+        let idx = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(candidates[idx].config.name, "high_b");
 
         // Third pick should round back to high_a
-        let picked = resolver.pick("test", &candidates).unwrap();
-        assert_eq!(picked.config.name, "high_a");
+        let idx = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(candidates[idx].config.name, "high_a");
     }
 
     #[test]
@@ -333,12 +289,12 @@ mod tests {
 
         let candidates = vec![make_entry("a", 5), make_entry("b", 5), make_entry("c", 5)];
 
-        let picked = resolver.pick("test", &candidates).unwrap();
-        assert_eq!(picked.config.name, "a");
-        let picked = resolver.pick("test", &candidates).unwrap();
-        assert_eq!(picked.config.name, "b");
-        let picked = resolver.pick("test", &candidates).unwrap();
-        assert_eq!(picked.config.name, "c");
+        let idx = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(candidates[idx].config.name, "a");
+        let idx = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(candidates[idx].config.name, "b");
+        let idx = resolver.pick("test", &candidates).unwrap();
+        assert_eq!(candidates[idx].config.name, "c");
     }
 
     #[test]
@@ -353,27 +309,9 @@ mod tests {
         ];
 
         for _ in 0..5 {
-            let picked = resolver.pick("test", &candidates).unwrap();
-            assert_eq!(picked.config.name, "high");
+            let idx = resolver.pick("test", &candidates).unwrap();
+            assert_eq!(candidates[idx].config.name, "high");
         }
-    }
-
-    #[test]
-    fn priority_resolver_returns_reference_to_original_candidate() {
-        // Ensure the returned reference points into the original slice,
-        // not a temporary clone
-        let inner = Arc::new(RoundRobinResolver::new());
-        let resolver = PriorityResolver::new(inner);
-
-        let candidates = vec![make_entry("low", 0), make_entry("high", 10)];
-
-        let picked = resolver.pick("test", &candidates).unwrap();
-        let picked_ptr = picked as *const RuneEntry;
-        let orig_ptr = &candidates[1] as *const RuneEntry;
-        assert_eq!(
-            picked_ptr, orig_ptr,
-            "picked should point to original candidate, not a clone"
-        );
     }
 
     // NF-7: RoundRobin counter cleanup
@@ -411,12 +349,8 @@ mod tests {
 
         let names: Vec<String> = (0..6)
             .map(|_| {
-                resolver
-                    .pick("stress", &candidates)
-                    .unwrap()
-                    .config
-                    .name
-                    .clone()
+                let idx = resolver.pick("stress", &candidates).unwrap();
+                candidates[idx].config.name.clone()
             })
             .collect();
         assert_eq!(names[0], "high_a");
@@ -442,22 +376,14 @@ mod tests {
         ];
 
         // 第一次 pick 应该是 high_a
-        let first = resolver.pick("test_i1", &candidates).unwrap();
-        assert_eq!(first.config.name, "high_a");
+        let first_idx = resolver.pick("test_i1", &candidates).unwrap();
+        assert_eq!(candidates[first_idx].config.name, "high_a");
 
         // 第二次 pick 应该是 high_b（round-robin 在 top_tier 中前进）
-        let second = resolver.pick("test_i1", &candidates).unwrap();
+        let second_idx = resolver.pick("test_i1", &candidates).unwrap();
         assert_eq!(
-            second.config.name, "high_b",
-            "second pick should be high_b, not high_a; ptr::eq fallback to index 0 is the bug"
-        );
-
-        // 验证返回的引用指向原始 candidates 切片
-        let second_ptr = second as *const RuneEntry;
-        let original_ptr = &candidates[2] as *const RuneEntry;
-        assert_eq!(
-            second_ptr, original_ptr,
-            "returned reference must point to original candidate slice, not a clone"
+            candidates[second_idx].config.name, "high_b",
+            "second pick should be high_b, not high_a; fallback to index 0 is the bug"
         );
     }
 
@@ -493,19 +419,12 @@ mod tests {
             },
         ];
 
-        let first = resolver.pick("echo", &candidates).unwrap();
-        let second = resolver.pick("echo", &candidates).unwrap();
+        let first_idx = resolver.pick("echo", &candidates).unwrap();
+        let second_idx = resolver.pick("echo", &candidates).unwrap();
 
         assert_ne!(
-            first.caster_id, second.caster_id,
+            candidates[first_idx].caster_id, candidates[second_idx].caster_id,
             "HealthAwareResolver must round-robin among same-rank candidates"
-        );
-        // References must point into the original candidates slice
-        let first_ptr = first as *const RuneEntry;
-        let second_ptr = second as *const RuneEntry;
-        assert!(first_ptr == &candidates[0] as *const _ || first_ptr == &candidates[1] as *const _,);
-        assert!(
-            second_ptr == &candidates[0] as *const _ || second_ptr == &candidates[1] as *const _,
         );
     }
 
@@ -541,16 +460,14 @@ mod tests {
             },
         ];
 
-        let first = resolver.pick("echo", &candidates).unwrap();
-        let second = resolver.pick("echo", &candidates).unwrap();
+        let first_idx = resolver.pick("echo", &candidates).unwrap();
+        let second_idx = resolver.pick("echo", &candidates).unwrap();
 
         // Round-robin should pick candidates[0] then candidates[1]
-        let first_ptr = first as *const RuneEntry;
-        let second_ptr = second as *const RuneEntry;
-        assert_eq!(first_ptr, &candidates[0] as *const _);
+        assert_eq!(first_idx, 0);
         assert_eq!(
-            second_ptr, &candidates[1] as *const _,
-            "second pick must return candidates[1], not candidates[0] again (seen=0 bug)"
+            second_idx, 1,
+            "second pick must return index 1, not 0 again (seen=0 bug)"
         );
     }
 
@@ -562,8 +479,8 @@ mod tests {
         ));
         session_mgr.insert_test_caster("healthy", 1);
         session_mgr.insert_test_caster("degraded", 1);
-        if let Some(health) = session_mgr.health.get("degraded") {
-            let mut info = health.write().unwrap();
+        if let Some(entry) = session_mgr.health.get("degraded") {
+            let mut info = entry.info.write().unwrap();
             *info = HealthInfo {
                 status: HealthStatusLevel::Degraded,
                 ..HealthInfo::default()
@@ -591,8 +508,8 @@ mod tests {
             },
         ];
 
-        let picked = resolver.pick("echo", &candidates).unwrap();
-        assert_eq!(picked.caster_id.as_deref(), Some("healthy"));
+        let idx = resolver.pick("echo", &candidates).unwrap();
+        assert_eq!(candidates[idx].caster_id.as_deref(), Some("healthy"));
     }
 
     #[test]
@@ -603,7 +520,7 @@ mod tests {
         ));
         session_mgr.insert_test_caster("unhealthy", 1);
         if let Some(health) = session_mgr.health.get("unhealthy") {
-            let mut info = health.write().unwrap();
+            let mut info = health.info.write().unwrap();
             *info = HealthInfo {
                 status: HealthStatusLevel::Unhealthy,
                 ..HealthInfo::default()
@@ -647,8 +564,8 @@ mod tests {
         ];
 
         let resolver = LeastLoadResolver::new(session_mgr);
-        let picked = resolver.pick("echo", &candidates).unwrap();
-        assert_eq!(picked.caster_id.as_deref(), Some("low-pressure"));
+        let idx = resolver.pick("echo", &candidates).unwrap();
+        assert_eq!(candidates[idx].caster_id.as_deref(), Some("low-pressure"));
     }
 
     #[test]
@@ -683,8 +600,8 @@ mod tests {
         ];
 
         let resolver = LeastLoadResolver::new(session_mgr);
-        let picked = resolver.pick("echo", &candidates).unwrap();
-        assert_eq!(picked.caster_id.as_deref(), Some("idle"));
+        let idx = resolver.pick("echo", &candidates).unwrap();
+        assert_eq!(candidates[idx].caster_id.as_deref(), Some("idle"));
     }
 
     // ---------------------------------------------------------------
@@ -704,7 +621,7 @@ mod tests {
         session_mgr.insert_test_caster("unhealthy_c", 1);
         // 把 unhealthy_c 标记为 Unhealthy，使得 top_tier 只包含 healthy_a 和 healthy_b
         if let Some(health) = session_mgr.health.get("unhealthy_c") {
-            let mut info = health.write().unwrap();
+            let mut info = health.info.write().unwrap();
             *info = HealthInfo {
                 status: HealthStatusLevel::Unhealthy,
                 ..HealthInfo::default()
@@ -741,24 +658,18 @@ mod tests {
         ];
 
         // 第一次 pick 应选 healthy_a
-        let first = resolver.pick("echo", &candidates).unwrap();
-        assert_eq!(first.caster_id.as_deref(), Some("healthy_a"));
-
-        // 第二次 pick 应选 healthy_b（round-robin 在 top_tier 中前进）
-        // 如果使用 ptr::eq，这里会 panic 或返回错误结果
-        let second = resolver.pick("echo", &candidates).unwrap();
+        let first_idx = resolver.pick("echo", &candidates).unwrap();
         assert_eq!(
-            second.caster_id.as_deref(),
-            Some("healthy_b"),
-            "second pick should be healthy_b; ptr::eq fallback bug would break this"
+            candidates[first_idx].caster_id.as_deref(),
+            Some("healthy_a")
         );
 
-        // 验证返回的引用指向原始 candidates 切片
-        let second_ptr = second as *const RuneEntry;
-        let original_ptr = &candidates[1] as *const RuneEntry;
+        // 第二次 pick 应选 healthy_b（round-robin 在 top_tier 中前进）
+        let second_idx = resolver.pick("echo", &candidates).unwrap();
         assert_eq!(
-            second_ptr, original_ptr,
-            "returned reference must point to original candidate slice"
+            candidates[second_idx].caster_id.as_deref(),
+            Some("healthy_b"),
+            "second pick should be healthy_b; fallback bug would break this"
         );
     }
 
@@ -799,9 +710,9 @@ mod tests {
         ];
 
         let resolver = LeastLoadResolver::new(session_mgr);
-        let picked = resolver.pick("echo", &candidates).unwrap();
+        let idx = resolver.pick("echo", &candidates).unwrap();
         assert_eq!(
-            picked.caster_id.as_deref(),
+            candidates[idx].caster_id.as_deref(),
             Some("normal-caster"),
             "NaN pressure caster should NOT be preferred; it should be sorted to last"
         );
@@ -841,10 +752,10 @@ mod tests {
         ];
 
         let resolver = LeastLoadResolver::new(session_mgr);
-        let picked = resolver.pick("echo", &candidates).unwrap();
+        let idx = resolver.pick("echo", &candidates).unwrap();
         // 负 pressure 意味着更低负载，应该被优先选中
         assert_eq!(
-            picked.caster_id.as_deref(),
+            candidates[idx].caster_id.as_deref(),
             Some("negative"),
             "negative pressure caster should be preferred over positive pressure"
         );
@@ -882,7 +793,7 @@ mod tests {
         ];
 
         let resolver = LeastLoadResolver::new(session_mgr);
-        let picked = resolver.pick("echo", &candidates).unwrap();
-        assert_eq!(picked.caster_id.as_deref(), Some("idle"));
+        let idx = resolver.pick("echo", &candidates).unwrap();
+        assert_eq!(candidates[idx].caster_id.as_deref(), Some("idle"));
     }
 }

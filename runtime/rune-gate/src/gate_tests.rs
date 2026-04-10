@@ -7056,7 +7056,7 @@ mod tests {
             assert!(caster.get("pressure").is_some());
             assert!(caster.get("metrics").is_some());
             assert!(caster.get("health_status").is_some());
-            assert!(caster.get("connected_since").is_some());
+            assert!(caster.get("session_generation").is_some());
         }
     }
 
@@ -8372,17 +8372,15 @@ mod tests {
     }
 
     // ====================================================================
-    // Regression: S12 — connected_since reflects caster connect time, not server uptime
+    // Regression: S12 — generation is exposed for connected casters
     // ====================================================================
 
     #[tokio::test]
-    async fn test_connected_since_reflects_caster_connect_time() {
-        // Create a state whose started_at is far in the past
+    async fn test_generation_exposed_for_connected_caster() {
         let mut state = test_state();
-        // Simulate server running for a long time by setting started_at 1000s ago
         state.admin.started_at = std::time::Instant::now() - std::time::Duration::from_secs(1000);
 
-        // Insert a caster that connected "now" via the public test helper
+        // Insert a caster via the public test helper
         state
             .rune
             .session_mgr
@@ -8401,13 +8399,11 @@ mod tests {
         let casters = json["casters"].as_array().expect("should have casters");
         assert_eq!(casters.len(), 1);
 
-        let connected_since = casters[0]["connected_since"].as_u64().unwrap();
-        // The caster just connected, so connected_since should be small (< 5 seconds),
-        // NOT the server uptime of ~1000 seconds.
+        let generation = casters[0]["session_generation"].as_u64().unwrap();
         assert!(
-            connected_since < 5,
-            "connected_since should reflect caster connect time (< 5s), not server uptime. Got: {}s",
-            connected_since
+            generation >= 1,
+            "session_generation should be at least 1 for a connected caster. Got: {}",
+            generation
         );
     }
 

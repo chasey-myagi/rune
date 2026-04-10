@@ -1002,7 +1002,7 @@ async fn test_fix_reconnect_cleanup_does_not_delete_new_session() {
         "new session's metadata must not be deleted by old cleanup"
     );
     assert!(
-        session_mgr.connected_at("reconnect-caster").is_some(),
+        session_mgr.session_generation("reconnect-caster").is_some(),
         "new session entry must still exist"
     );
     // Relay entries from session 2 must survive old cleanup

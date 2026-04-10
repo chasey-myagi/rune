@@ -1,8 +1,9 @@
 use crate::config::CircuitBreakerConfig;
 use crate::rune::RuneError;
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use serde::Serialize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -55,14 +56,7 @@ impl CircuitBreaker {
             return Ok(CBPermit::new(Arc::clone(self), false));
         }
 
-        // Safety: we deliberately recover from mutex poisoning here.
-        // CircuitBreaker inner state (counters + state enum) is always
-        // self-consistent — a panic during a previous lock hold cannot
-        // leave it in a partially-updated state because each method
-        // writes all dependent fields atomically within a single
-        // critical section.  Propagating the poison would bring down
-        // the entire runtime for a single caster's transient failure.
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         match inner.state {
             CBState::Closed => Ok(CBPermit::new(Arc::clone(self), false)),
             CBState::Open => {
@@ -92,7 +86,7 @@ impl CircuitBreaker {
             return;
         }
 
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         match inner.state {
             CBState::Closed => {
                 inner.consecutive_failures = 0;
@@ -116,7 +110,7 @@ impl CircuitBreaker {
             return;
         }
 
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         match inner.state {
             CBState::Closed => {
                 inner.consecutive_successes = 0;
@@ -132,11 +126,11 @@ impl CircuitBreaker {
     }
 
     pub fn state(&self) -> CBState {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).state
+        self.inner.lock().state
     }
 
     pub fn snapshot(&self, caster_id: &str) -> CircuitBreakerSnapshot {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = self.inner.lock();
         CircuitBreakerSnapshot {
             caster_id: caster_id.to_string(),
             state: inner.state,
@@ -164,7 +158,7 @@ impl CircuitBreaker {
             return;
         }
 
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         if inner.state == CBState::HalfOpen && inner.half_open_permits > 0 {
             inner.half_open_permits -= 1;
         }

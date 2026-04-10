@@ -339,7 +339,7 @@ async fn main() -> anyhow::Result<()> {
             store: store.clone(),
             started_at: Instant::now(),
             dev_mode: config.server.dev_mode,
-            scaling,
+            scaling: scaling.clone(),
         },
         cors_origins: Arc::new(config.gate.cors_origins.clone()),
         rate_limiter: if config.server.dev_mode {
@@ -488,6 +488,11 @@ async fn main() -> anyhow::Result<()> {
     // ── Wait for shutdown signal ──
     tokio::signal::ctrl_c().await?;
     tracing::info!("received SIGINT, starting graceful shutdown");
+
+    // 0. Stop the scale evaluator so no new grace-period force_kill spawns fire
+    if let Some(ref evaluator) = scaling {
+        evaluator.shutdown();
+    }
 
     // 1. Signal drain mode — new requests will be rejected with 503
     shutdown.start_drain();

@@ -99,6 +99,7 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
     let registry = Arc::new(Mutex::new(HashMap::<String, PilotRegistration>::new()));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let (runtime_state_tx, runtime_state_rx) = watch::channel(PilotRuntimeState::Connecting);
+    let session_exit_notify = Arc::new(tokio::sync::Notify::new());
     let session_runtime = runtime.clone();
     let session_pilot_id = pilot_id.clone();
     let session_registry = Arc::clone(&registry);
@@ -106,6 +107,7 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
     let session_task = tokio::spawn({
         let runtime_state_tx = runtime_state_tx.clone();
         let mut shutdown_watch = shutdown_rx.clone();
+        let session_exit = Arc::clone(&session_exit_notify);
         async move {
             let base_delay = Duration::from_millis(500);
             let max_delay = Duration::from_secs(30);
@@ -124,6 +126,7 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
 
                 // If shutdown was requested, exit the loop.
                 if *shutdown_watch.borrow() {
+                    session_exit.notify_one();
                     break;
                 }
 
@@ -132,6 +135,7 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
                     let msg = err.to_string();
                     if msg.contains("attach rejected") {
                         let _ = runtime_state_tx.send(PilotRuntimeState::Failed(msg));
+                        session_exit.notify_one();
                         break;
                     }
                 }
@@ -163,7 +167,12 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
     let reaper_task = tokio::spawn(async move {
         // Grace period: give the first caster time to discover the pilot
         // and call register() before we start checking for emptiness.
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        // If session_task exits early (e.g. attach rejected), wake up
+        // immediately instead of sleeping the full 15 seconds.
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(15)) => {}
+            _ = session_exit_notify.notified() => {}
+        }
 
         loop {
             let mut registrations = reaper_registry.lock().await;
@@ -406,8 +415,12 @@ async fn handle_scale_signal(
             if let Some(caster_id) = signal.reason.strip_prefix("force_kill:") {
                 let registrations = registry.lock().await;
                 if let Some(registration) = registrations.get(caster_id) {
-                    unsafe {
-                        libc::kill(registration.pid as i32, libc::SIGKILL);
+                    if let Some(safe_pid) = validate_pid(registration.pid) {
+                        if process_alive(registration.pid) {
+                            unsafe {
+                                libc::kill(safe_pid, libc::SIGKILL);
+                            }
+                        }
                     }
                 }
             }
@@ -435,8 +448,22 @@ fn normalize_runtime(runtime: &str) -> String {
     runtime.trim().trim_end_matches('/').to_string()
 }
 
+/// Validate that a PID is safe to pass to `libc::kill`.
+/// Returns `None` for PID 0 (which would signal the entire process group)
+/// and for values exceeding `i32::MAX` (which would overflow on cast).
+fn validate_pid(pid: u32) -> Option<i32> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        None
+    } else {
+        Some(pid as i32)
+    }
+}
+
 fn process_alive(pid: u32) -> bool {
-    let rc = unsafe { libc::kill(pid as i32, 0) };
+    let Some(safe_pid) = validate_pid(pid) else {
+        return false;
+    };
+    let rc = unsafe { libc::kill(safe_pid, 0) };
     if rc == 0 {
         true
     } else {

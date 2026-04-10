@@ -5,10 +5,10 @@ use crate::resolver::Resolver;
 use crate::retry::RetryInvoker;
 use crate::rune::RuneConfig;
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::Arc;
 
 type EntryMap = HashMap<String, RuneEntry>;
 
@@ -27,9 +27,9 @@ pub struct Relay {
     gate_path_index: DashMap<String, String>,
     /// Reverse index: caster_id -> registered rune names
     caster_index: DashMap<String, Vec<String>>,
-    /// Generation marker per caster — set during handle_attach, checked by
+    /// Monotonic generation per caster — set during handle_attach, checked by
     /// remove_caster_if_gen to avoid deleting a reconnected session's entries.
-    caster_connected_at: DashMap<String, Instant>,
+    caster_generation: DashMap<String, u64>,
     /// Serializes register/remove_caster to prevent race conditions on gate_path_index
     write_lock: Mutex<()>,
     generation: AtomicU64,
@@ -50,7 +50,7 @@ impl Relay {
             entries: DashMap::new(),
             gate_path_index: DashMap::new(),
             caster_index: DashMap::new(),
-            caster_connected_at: DashMap::new(),
+            caster_generation: DashMap::new(),
             write_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
             local_key_counter: AtomicU64::new(0),
@@ -60,19 +60,12 @@ impl Relay {
     }
 
     pub fn with_retry(config: RetryConfig) -> Self {
-        Self {
-            entries: DashMap::new(),
-            gate_path_index: DashMap::new(),
-            caster_index: DashMap::new(),
-            caster_connected_at: DashMap::new(),
-            write_lock: Mutex::new(()),
-            generation: AtomicU64::new(0),
-            local_key_counter: AtomicU64::new(0),
-            circuit_breaker_registry: Some(Arc::new(CircuitBreakerRegistry::new(
-                config.circuit_breaker.clone(),
-            ))),
-            retry_config: Some(config),
-        }
+        let mut relay = Self::new();
+        relay.circuit_breaker_registry = Some(Arc::new(CircuitBreakerRegistry::new(
+            config.circuit_breaker.clone(),
+        )));
+        relay.retry_config = Some(config);
+        relay
     }
 
     /// 注册一个 Rune（进程内或远程），检查 gate.path 冲突
@@ -82,7 +75,7 @@ impl Relay {
         invoker: Arc<dyn RuneInvoker>,
         caster_id: Option<String>,
     ) -> Result<(), String> {
-        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write_lock.lock();
 
         // Check gate.path conflict: different rune_name with same path+method is a hard error
         // Uses gate_path_index for O(1) lookup instead of iterating all entries.
@@ -163,7 +156,7 @@ impl Relay {
 
     /// 移除某个 Caster 的所有 Rune
     pub fn remove_caster(&self, caster_id: &str) {
-        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.write_lock.lock();
 
         let rune_names = self
             .caster_index
@@ -171,8 +164,15 @@ impl Relay {
             .map(|(_, names)| names)
             .unwrap_or_default();
 
+        self.cleanup_after_caster_remove(caster_id, &rune_names);
+    }
+
+    /// Shared cleanup logic for `remove_caster` and `remove_caster_if_gen`.
+    /// Caller must already hold `write_lock` and have removed `caster_id`
+    /// from `caster_index`.
+    fn cleanup_after_caster_remove(&self, caster_id: &str, rune_names: &[String]) {
         let mut keys_to_check: Vec<(String, String)> = Vec::new();
-        for rune_name in &rune_names {
+        for rune_name in rune_names {
             if let Some(mut entries) = self.entries.get_mut(rune_name) {
                 if let Some(entry) = entries.get(caster_id) {
                     if let Some(ref gate) = entry.config.gate {
@@ -184,12 +184,10 @@ impl Relay {
             }
         }
 
-        for rune_name in &rune_names {
+        for rune_name in rune_names {
             self.entries.remove_if(rune_name, |_, v| v.is_empty());
         }
 
-        // Clean up gate_path_index: only check the specific rune_name's remaining
-        // entries instead of iterating all entries across all rune names.
         for (key, rune_name) in keys_to_check {
             let still_exists = self
                 .entries
@@ -213,7 +211,7 @@ impl Relay {
         if let Some(registry) = &self.circuit_breaker_registry {
             registry.remove(caster_id);
         }
-        self.caster_connected_at.remove(caster_id);
+        self.caster_generation.remove(caster_id);
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -221,21 +219,21 @@ impl Relay {
     /// `handle_attach` right after `remove_caster` and before
     /// re-registering runes, so `remove_caster_if_gen` can later
     /// distinguish stale cleanup from current entries.
-    pub fn set_caster_generation(&self, caster_id: &str, gen: Instant) {
-        self.caster_connected_at.insert(caster_id.to_string(), gen);
+    pub fn set_caster_generation(&self, caster_id: &str, gen: u64) {
+        self.caster_generation.insert(caster_id.to_string(), gen);
     }
 
     /// Generation-aware variant of `remove_caster`.  Only removes if the
     /// stored generation matches `gen`.  Returns `true` if removal happened.
     /// Used by `cleanup_session` to avoid wiping a reconnected session's
     /// relay entries.
-    pub fn remove_caster_if_gen(&self, caster_id: &str, gen: Instant) -> bool {
-        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn remove_caster_if_gen(&self, caster_id: &str, gen: u64) -> bool {
+        let _guard = self.write_lock.lock();
 
         // Check generation under write_lock — prevents TOCTOU with
         // a concurrent remove_caster + set_caster_generation + register
         // sequence in handle_attach.
-        if let Some(stored) = self.caster_connected_at.get(caster_id) {
+        if let Some(stored) = self.caster_generation.get(caster_id) {
             if *stored != gen {
                 return false;
             }
@@ -246,55 +244,13 @@ impl Relay {
             return false;
         }
 
-        // Proceed with the same removal logic as remove_caster.
         let rune_names = self
             .caster_index
             .remove(caster_id)
             .map(|(_, names)| names)
             .unwrap_or_default();
 
-        let mut keys_to_check: Vec<(String, String)> = Vec::new();
-        for rune_name in &rune_names {
-            if let Some(mut entries) = self.entries.get_mut(rune_name) {
-                if let Some(entry) = entries.get(caster_id) {
-                    if let Some(ref gate) = entry.config.gate {
-                        keys_to_check
-                            .push((format!("{}:{}", gate.method, gate.path), rune_name.clone()));
-                    }
-                }
-                entries.remove(caster_id);
-            }
-        }
-
-        for rune_name in &rune_names {
-            self.entries.remove_if(rune_name, |_, v| v.is_empty());
-        }
-
-        for (key, rune_name) in keys_to_check {
-            let still_exists = self
-                .entries
-                .get(&rune_name)
-                .map(|entries| {
-                    entries.value().values().any(|e| {
-                        e.config
-                            .gate
-                            .as_ref()
-                            .map(|g| format!("{}:{}", g.method, g.path))
-                            .as_deref()
-                            == Some(&key)
-                    })
-                })
-                .unwrap_or(false);
-            if !still_exists {
-                self.gate_path_index.remove(&key);
-            }
-        }
-
-        if let Some(registry) = &self.circuit_breaker_registry {
-            registry.remove(caster_id);
-        }
-        self.caster_connected_at.remove(caster_id);
-        self.generation.fetch_add(1, Ordering::Release);
+        self.cleanup_after_caster_remove(caster_id, &rune_names);
         true
     }
 
@@ -311,8 +267,8 @@ impl Relay {
     pub fn select_entry(&self, rune_name: &str, resolver: &dyn Resolver) -> Option<RuneEntry> {
         let entries = self.find(rune_name)?;
         let candidates: Vec<RuneEntry> = entries.value().values().cloned().collect();
-        let picked = resolver.pick(rune_name, &candidates)?;
-        Some(picked.clone())
+        let idx = resolver.pick(rune_name, &candidates)?;
+        Some(candidates[idx].clone())
     }
 
     /// Select a concrete candidate with label filtering applied.
@@ -341,8 +297,8 @@ impl Relay {
             return None;
         }
 
-        let picked = resolver.pick(rune_name, &filtered)?;
-        Some(picked.clone())
+        let idx = resolver.pick(rune_name, &filtered)?;
+        Some(filtered[idx].clone())
     }
 
     /// Convenience: find + pick using a resolver
@@ -2922,7 +2878,7 @@ mod tests {
         };
 
         // Session 1 registers
-        let gen1 = Instant::now();
+        let gen1 = 1u64;
         relay
             .register(config(), h(), Some("caster-1".into()))
             .unwrap();
@@ -2931,7 +2887,7 @@ mod tests {
 
         // Reconnect: handle_attach removes old + sets new generation + re-registers
         relay.remove_caster("caster-1");
-        let gen2 = Instant::now();
+        let gen2 = 2u64;
         relay
             .register(config(), h(), Some("caster-1".into()))
             .unwrap();

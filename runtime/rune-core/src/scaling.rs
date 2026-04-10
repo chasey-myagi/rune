@@ -1,9 +1,11 @@
 use crate::session::{CasterRole, HealthStatusLevel, SessionManager};
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use rune_proto::{session_message, ScaleAction, ScaleSignal, SessionMessage, ShutdownRequest};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS: u32 = 30_000;
@@ -48,12 +50,11 @@ pub struct ScaleEvaluator {
     session_mgr: Arc<SessionManager>,
     check_interval: Duration,
     statuses: DashMap<String, ScalingStatusSnapshot>,
-    /// Uses `std::sync::Mutex` (not `tokio::sync::Mutex`) intentionally: the
+    /// Uses `parking_lot::Mutex` (not `tokio::sync::Mutex`) intentionally: the
     /// critical section in `evaluate_once` performs only CPU-bound comparisons
-    /// with no `.await`. The lock is held for the duration of the breach-tracking
-    /// loop (~60 lines) which is acceptable because evaluate_once runs on a
-    /// single periodic task, not on hot request paths.
+    /// with no `.await`.
     breaches: Mutex<HashMap<String, BreachTracker>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl ScaleEvaluator {
@@ -63,6 +64,7 @@ impl ScaleEvaluator {
             check_interval,
             statuses: DashMap::new(),
             breaches: Mutex::new(HashMap::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -85,9 +87,18 @@ impl ScaleEvaluator {
             let mut interval = tokio::time::interval(self.check_interval);
             loop {
                 interval.tick().await;
+                if self.shutdown.load(Ordering::Acquire) {
+                    break;
+                }
                 self.evaluate_once().await;
             }
         })
+    }
+
+    /// Signal the evaluator to stop its periodic loop and skip pending
+    /// grace-period force_kill spawns.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
     }
 
     pub async fn evaluate_once(&self) {
@@ -118,15 +129,12 @@ impl ScaleEvaluator {
                     victim_id: String,
                     /// Captured at candidate selection time — used to verify
                     /// the victim hasn't reconnected before we send shutdown.
-                    victim_connected_at: Option<Instant>,
+                    victim_generation: Option<u64>,
                 },
             }
 
             let action_plan = {
-                let mut tracker_map = self.breaches.lock().unwrap_or_else(|poisoned| {
-                    tracing::warn!("breaches mutex was poisoned — recovering stale data");
-                    poisoned.into_inner()
-                });
+                let mut tracker_map = self.breaches.lock();
                 let tracker = tracker_map.entry(group_id.clone()).or_default();
 
                 if let Some(pressure) = group.average_pressure {
@@ -169,10 +177,11 @@ impl ScaleEvaluator {
                                 status.desired_replicas = current.saturating_sub(1);
                                 status.reason = format!("scale down {}", victim_id);
                                 tracker.down_since = Some(Instant::now());
-                                let victim_connected_at = self.session_mgr.connected_at(&victim_id);
+                                let victim_generation =
+                                    self.session_mgr.session_generation(&victim_id);
                                 ActionPlan::ScaleDown {
                                     victim_id,
-                                    victim_connected_at,
+                                    victim_generation,
                                 }
                             } else {
                                 status.reason = "no idle caster available for scale-down".into();
@@ -235,15 +244,15 @@ impl ScaleEvaluator {
                 }
                 ActionPlan::ScaleDown {
                     victim_id,
-                    victim_connected_at,
+                    victim_generation,
                 } => {
                     // Verify the victim is still the same session we selected.
-                    // If it reconnected (different connected_at), skip shutdown
+                    // If it reconnected (different generation), skip shutdown
                     // to avoid draining a replacement session.
                     let still_same_session = self
                         .session_mgr
-                        .connected_at(&victim_id)
-                        .zip(victim_connected_at)
+                        .session_generation(&victim_id)
+                        .zip(victim_generation)
                         .map(|(current, original)| current == original)
                         .unwrap_or(false);
                     if still_same_session {
@@ -276,6 +285,7 @@ impl ScaleEvaluator {
 
                     if let Some(pilot_id) = victim_pilot_id {
                         let session_mgr = Arc::clone(&self.session_mgr);
+                        let shutdown = Arc::clone(&self.shutdown);
                         let group_id_clone = group_id.clone();
                         let reason = format!("force_kill:{}", victim_id);
                         let current_pressure = group.average_pressure.unwrap_or(0.0);
@@ -283,17 +293,22 @@ impl ScaleEvaluator {
                         // Capture the victim's connected_at BEFORE the grace period.
                         // After sleeping, we compare against the current connected_at
                         // to detect if the caster reconnected (same ID, new session).
-                        let victim_connected_at = self.session_mgr.connected_at(&victim_id);
+                        let victim_generation = self.session_mgr.session_generation(&victim_id);
                         tokio::spawn(async move {
                             tokio::time::sleep(Duration::from_millis(
                                 DEFAULT_SHUTDOWN_GRACE_PERIOD_MS as u64,
                             ))
                             .await;
+                            // Skip force_kill if the evaluator is shutting down —
+                            // the runtime is exiting and we should not send new signals.
+                            if shutdown.load(Ordering::Acquire) {
+                                return;
+                            }
                             // Only force_kill if the victim is STILL the same session.
                             // If it reconnected, connected_at will differ — skip.
                             let still_same_session = session_mgr
-                                .connected_at(&victim_id)
-                                .zip(victim_connected_at)
+                                .session_generation(&victim_id)
+                                .zip(victim_generation)
                                 .map(|(current, original)| current == original)
                                 .unwrap_or(false);
                             if still_same_session {
@@ -419,7 +434,7 @@ impl ScaleEvaluator {
                     reported_pressure.is_some(),
                     pressure,
                     available_permits,
-                    self.session_mgr.connected_at(caster_id),
+                    self.session_mgr.session_generation(caster_id),
                     caster_id.clone(),
                 ))
             })
@@ -444,7 +459,14 @@ mod tests {
     use super::*;
     use crate::session::{CasterMetadata, CasterState};
     use dashmap::DashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::sync::{mpsc, Semaphore};
+
+    static TEST_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+    fn next_generation() -> u64 {
+        TEST_GENERATION.fetch_add(1, Ordering::Relaxed)
+    }
 
     fn insert_scaling_caster_with_reported(
         mgr: &SessionManager,
@@ -455,6 +477,7 @@ mod tests {
         pressure: f64,
         pressure_reported: bool,
     ) -> Option<mpsc::Receiver<SessionMessage>> {
+        let gen = next_generation();
         let (tx, rx) = mpsc::channel(16);
         mgr.sessions.insert(
             caster_id.to_string(),
@@ -463,14 +486,13 @@ mod tests {
                 pending: Arc::new(DashMap::new()),
                 timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::new(Semaphore::new(max_concurrent)),
-                connected_at: Instant::now(),
+                generation: gen,
             },
         );
-        let now = Instant::now();
         mgr.health.insert(
             caster_id.to_string(),
             crate::session::HealthEntry {
-                connected_at: now,
+                generation: gen,
                 info: Arc::new(std::sync::RwLock::new(crate::session::HealthInfo {
                     pressure,
                     pressure_reported,
@@ -495,7 +517,7 @@ mod tests {
                 labels,
                 max_concurrent,
                 role: CasterRole::Caster,
-                connected_at: now,
+                generation: gen,
             },
         );
         Some(rx)
@@ -539,6 +561,7 @@ mod tests {
     }
 
     fn insert_pilot(mgr: &SessionManager, pilot_id: &str) -> mpsc::Receiver<SessionMessage> {
+        let gen = next_generation();
         let (tx, rx) = mpsc::channel(16);
         mgr.sessions.insert(
             pilot_id.to_string(),
@@ -547,14 +570,13 @@ mod tests {
                 pending: Arc::new(DashMap::new()),
                 timeout_handles: Arc::new(DashMap::new()),
                 semaphore: Arc::new(Semaphore::new(1)),
-                connected_at: Instant::now(),
+                generation: gen,
             },
         );
-        let now = Instant::now();
         mgr.health.insert(
             pilot_id.to_string(),
             crate::session::HealthEntry {
-                connected_at: now,
+                generation: gen,
                 info: Arc::new(std::sync::RwLock::new(crate::session::HealthInfo::default())),
             },
         );
@@ -564,7 +586,7 @@ mod tests {
                 labels: HashMap::new(),
                 max_concurrent: 1,
                 role: CasterRole::Pilot,
-                connected_at: now,
+                generation: gen,
             },
         );
         rx
@@ -747,45 +769,43 @@ mod tests {
         assert!(pilot_rx.try_recv().is_err());
     }
 
-    /// Regression P0-2: force_kill connected_at comparison logic.
+    /// Regression P0-2: force_kill generation comparison logic.
     ///
-    /// The force_kill spawn captures connected_at before sleeping. After the
-    /// grace period, it compares against the current connected_at. If the
-    /// victim reconnected (different Instant), the force_kill is skipped.
+    /// The force_kill spawn captures the generation before sleeping. After the
+    /// grace period, it compares against the current generation. If the
+    /// victim reconnected (different generation), the force_kill is skipped.
     ///
     /// We test the comparison logic directly via SessionManager: insert a
-    /// caster, capture its connected_at, remove and re-insert (different
-    /// Instant), and verify the Instants differ.
+    /// caster, capture its generation, remove and re-insert (different
+    /// generation), and verify the generations differ.
     #[test]
     fn test_fix_force_kill_detects_reconnected_caster() {
         let mgr = SessionManager::new_dev(Duration::from_secs(10), Duration::from_secs(35));
         insert_scaling_caster(&mgr, "victim", "gpu", Some("pilot-1"), 2, 0.05);
 
-        let original_connected_at = mgr.connected_at("victim");
-        assert!(original_connected_at.is_some());
+        let original_generation = mgr.session_generation("victim");
+        assert!(original_generation.is_some());
 
         // Simulate reconnect: remove and re-insert
         mgr.sessions.remove("victim");
         mgr.health.remove("victim");
         mgr.metadata.remove("victim");
-        // Small sleep to ensure Instant::now() differs
-        std::thread::sleep(Duration::from_millis(2));
         insert_scaling_caster(&mgr, "victim", "gpu", Some("pilot-1"), 2, 0.05);
 
-        let new_connected_at = mgr.connected_at("victim");
-        assert!(new_connected_at.is_some());
+        let new_generation = mgr.session_generation("victim");
+        assert!(new_generation.is_some());
 
         // The force_kill logic: `current == original` must be false after reconnect
         assert_ne!(
-            original_connected_at, new_connected_at,
-            "connected_at must differ after reconnect so force_kill detects stale identity"
+            original_generation, new_generation,
+            "generation must differ after reconnect so force_kill detects stale identity"
         );
 
-        // Also verify: if NOT reconnected, connected_at stays the same
-        let same_check = mgr.connected_at("victim");
+        // Also verify: if NOT reconnected, generation stays the same
+        let same_check = mgr.session_generation("victim");
         assert_eq!(
-            new_connected_at, same_check,
-            "connected_at must be stable when no reconnect occurs"
+            new_generation, same_check,
+            "generation must be stable when no reconnect occurs"
         );
     }
 
@@ -901,28 +921,27 @@ mod tests {
         );
     }
 
-    /// Regression: the initial ShutdownRequest must verify connected_at
+    /// Regression: the initial ShutdownRequest must verify generation
     /// to avoid draining a replacement session that reconnected between
     /// candidate selection and the actual send.
     #[test]
     fn test_fix_scale_down_shutdown_skips_reconnected_victim() {
-        // The fix captures connected_at when selecting the victim and compares
+        // The fix captures generation when selecting the victim and compares
         // it before sending shutdown.  This test verifies the comparison logic
-        // directly: after reconnect, connected_at differs so the guard fires.
+        // directly: after reconnect, generation differs so the guard fires.
         let mgr = SessionManager::new_dev(Duration::from_secs(10), Duration::from_secs(35));
         insert_scaling_caster(&mgr, "victim", "gpu", Some("pilot-1"), 2, 0.05);
-        let selected_at = mgr.connected_at("victim");
+        let selected_at = mgr.session_generation("victim");
 
         // Simulate reconnect
         mgr.sessions.remove("victim");
         mgr.health.remove("victim");
         mgr.metadata.remove("victim");
-        std::thread::sleep(Duration::from_millis(2));
         insert_scaling_caster(&mgr, "victim", "gpu", Some("pilot-1"), 2, 0.05);
 
         // Guard logic from ScaleDown match arm:
         let still_same = mgr
-            .connected_at("victim")
+            .session_generation("victim")
             .zip(selected_at)
             .map(|(current, original)| current == original)
             .unwrap_or(false);
@@ -952,7 +971,7 @@ mod tests {
         evaluator.evaluate_once().await;
 
         let tracker_after_first = {
-            let map = evaluator.breaches.lock().unwrap();
+            let map = evaluator.breaches.lock();
             map.get("gpu").cloned()
         };
         assert!(
@@ -969,7 +988,7 @@ mod tests {
         evaluator.evaluate_once().await;
 
         let tracker_after_second = {
-            let map = evaluator.breaches.lock().unwrap();
+            let map = evaluator.breaches.lock();
             map.get("gpu").cloned()
         };
         let second_up_since = tracker_after_second
