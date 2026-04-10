@@ -1,7 +1,7 @@
 //! Caster — connects to Rune runtime and executes registered handlers.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -32,6 +32,8 @@ pub struct Caster {
     runes: Arc<RwLock<HashMap<String, RegisteredRune>>>,
     shutdown_token: CancellationToken,
     active_requests: Arc<AtomicU32>,
+    /// When true, new Execute requests are rejected with SHUTTING_DOWN.
+    draining: Arc<AtomicBool>,
 }
 
 impl Caster {
@@ -47,6 +49,7 @@ impl Caster {
             runes: Arc::new(RwLock::new(HashMap::new())),
             shutdown_token: CancellationToken::new(),
             active_requests: Arc::new(AtomicU32::new(0)),
+            draining: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -250,6 +253,8 @@ impl Caster {
     }
 
     async fn connect_and_run(&self, pilot_id: Option<&str>) -> SdkResult<()> {
+        // Reset draining state from any previous shutdown cycle.
+        self.draining.store(false, Ordering::Relaxed);
         let endpoint = format!("http://{}", self.config.runtime);
         let channel = Channel::from_shared(endpoint)
             .map_err(|e| SdkError::InvalidUri(e.to_string()))?
@@ -272,9 +277,9 @@ impl Caster {
         // Start heartbeat
         let hb_tx = tx.clone();
         let hb_interval = Duration::from_secs_f64(self.config.heartbeat_interval_secs);
-        let scaling_enabled = self.config.scale_policy.is_some();
         let config = self.config.clone();
         let active_requests = Arc::clone(&self.active_requests);
+        let hb_draining = Arc::clone(&self.draining);
         let hb_handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(hb_interval).await;
@@ -289,15 +294,15 @@ impl Caster {
                 if hb_tx.send(msg).await.is_err() {
                     break;
                 }
-                if scaling_enabled {
-                    let active = active_requests.load(Ordering::Relaxed);
-                    if hb_tx
-                        .send(build_health_report_message(&config, active))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
+                // Always send HealthReport regardless of scale_policy
+                let active = active_requests.load(Ordering::Relaxed);
+                let is_draining = hb_draining.load(Ordering::Relaxed);
+                if hb_tx
+                    .send(build_health_report_message(&config, active, is_draining))
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
         });
@@ -327,20 +332,40 @@ impl Caster {
                             self.config.runtime,
                             self.caster_id
                         );
-                        if self.config.scale_policy.is_some() {
-                            tx.send(build_health_report_message(
-                                &self.config,
-                                self.active_requests.load(Ordering::Relaxed),
-                            ))
-                            .await
-                            .map_err(|e| SdkError::ChannelSend(e.to_string()))?;
-                        }
+                        // Always send initial HealthReport regardless of scale_policy
+                        tx.send(build_health_report_message(
+                            &self.config,
+                            self.active_requests.load(Ordering::Relaxed),
+                            self.draining.load(Ordering::Relaxed),
+                        ))
+                        .await
+                        .map_err(|e| SdkError::ChannelSend(e.to_string()))?;
                     } else {
                         tracing::error!("attach rejected: {}", ack.reason);
                         return Err(SdkError::Other(format!("attach rejected: {}", ack.reason)));
                     }
                 }
                 Some(Payload::Execute(req)) => {
+                    // Reject new requests while draining for graceful shutdown.
+                    if self.draining.load(Ordering::Relaxed) {
+                        let _ = tx
+                            .send(SessionMessage {
+                                payload: Some(Payload::Result(ExecuteResult {
+                                    request_id: req.request_id,
+                                    status: rune_proto::Status::Failed.into(),
+                                    output: vec![],
+                                    error: Some(ErrorDetail {
+                                        code: "SHUTTING_DOWN".into(),
+                                        message: "caster is draining, no new requests accepted"
+                                            .into(),
+                                        details: vec![],
+                                    }),
+                                    attachments: vec![],
+                                })),
+                            })
+                            .await;
+                        continue;
+                    }
                     let registered = self.runes.read().unwrap().get(&req.rune_name).cloned();
                     self.active_requests.fetch_add(1, Ordering::Relaxed);
 
@@ -379,7 +404,36 @@ impl Caster {
                     // Server heartbeat — acknowledged silently
                 }
                 Some(Payload::Shutdown(shutdown)) => {
-                    tracing::info!("shutdown requested: {}", shutdown.reason);
+                    tracing::info!(
+                        "shutdown requested: {}, grace_period_ms={}",
+                        shutdown.reason,
+                        shutdown.grace_period_ms
+                    );
+                    // Mark as draining to reject new Execute requests.
+                    self.draining.store(true, Ordering::Relaxed);
+                    // Immediately advertise UNHEALTHY so the runtime stops
+                    // routing new work to this caster during the grace window.
+                    let _ = tx
+                        .send(build_health_report_message(
+                            &self.config,
+                            self.active_requests.load(Ordering::Relaxed),
+                            true,
+                        ))
+                        .await;
+                    // Graceful drain: wait for in-flight requests to complete
+                    // or until grace_period_ms expires, whichever comes first.
+                    let grace = Duration::from_millis(shutdown.grace_period_ms as u64);
+                    let drain_start = tokio::time::Instant::now();
+                    while self.active_requests.load(Ordering::Relaxed) > 0 {
+                        if drain_start.elapsed() >= grace {
+                            tracing::warn!(
+                                "grace period expired with {} active requests remaining",
+                                self.active_requests.load(Ordering::Relaxed)
+                            );
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
                     self.stop();
                     break;
                 }
@@ -458,7 +512,11 @@ impl Caster {
     }
 }
 
-fn build_health_report_message(config: &CasterConfig, active_requests: u32) -> SessionMessage {
+fn build_health_report_message(
+    config: &CasterConfig,
+    active_requests: u32,
+    draining: bool,
+) -> SessionMessage {
     let mut metrics = config
         .load_report
         .as_ref()
@@ -485,9 +543,14 @@ fn build_health_report_message(config: &CasterConfig, active_requests: u32) -> S
         .and_then(|lr| lr.pressure)
         .unwrap_or(computed_pressure);
 
+    let status = if draining {
+        HealthStatus::Unhealthy
+    } else {
+        HealthStatus::Healthy
+    };
     SessionMessage {
         payload: Some(Payload::HealthReport(HealthReport {
-            status: HealthStatus::Healthy.into(),
+            status: status.into(),
             active_requests,
             error_rate: 0.0,
             custom_info: String::new(),

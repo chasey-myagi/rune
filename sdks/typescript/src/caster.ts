@@ -115,6 +115,8 @@ export class Caster {
 
   private _runes: Map<string, RegisteredRune> = new Map();
   private _stopped = false;
+  // P0-3: Flag to reject new requests during graceful shutdown drain.
+  private _draining = false;
   private _abortControllers: Map<string, AbortController> = new Map();
   private _activeStream: grpc.ClientDuplexStream<any, any> | null = null;
   private _activeRequests = 0;
@@ -220,6 +222,7 @@ export class Caster {
    */
   async run(): Promise<void> {
     this._stopped = false;
+    this._draining = false;
     let delay = this.reconnect.initialDelayMs;
     let lastPilot: PilotClient | null = null;
 
@@ -287,9 +290,8 @@ export class Caster {
             timestamp_ms: String(Date.now()),
           },
         });
-        if (this.scalePolicy) {
-          stream.write(this._buildHealthReport());
-        }
+        // Always send HealthReport regardless of scalePolicy
+        stream.write(this._buildHealthReport());
       }
     }, this.heartbeatIntervalMs);
 
@@ -303,11 +305,11 @@ export class Caster {
             clearInterval(heartbeatTimer);
             stream.end();
             reject(new Error(`Attach rejected: ${ack.reason}`));
+            return;
           }
-          if (this.scalePolicy) {
-            stream.write(this._buildHealthReport());
-          }
-          // else: attached successfully, continue
+          // Always send initial HealthReport regardless of scalePolicy
+          stream.write(this._buildHealthReport());
+          // attached successfully, continue
         } else if (payload === 'execute') {
           this._handleExecute(msg.execute, stream);
         } else if (payload === 'cancel') {
@@ -315,7 +317,42 @@ export class Caster {
         } else if (payload === 'heartbeat') {
           // Server heartbeat — acknowledged silently
         } else if (payload === 'shutdown') {
-          this.stop();
+          if (this._draining) return; // already draining — ignore duplicate shutdown
+          const graceMs = parseInt(msg.shutdown?.grace_period_ms ?? '0', 10);
+          // P0-3: Graceful shutdown — stop accepting new requests, then
+          // wait for in-flight requests to drain within grace_period_ms.
+          // eslint-disable-next-line no-console
+          console.info(
+            `shutdown requested: reason=${msg.shutdown?.reason ?? ''}, grace_period_ms=${graceMs}`,
+          );
+          this._draining = true;
+          // Immediately advertise UNHEALTHY so the runtime stops
+          // routing new work to this caster during the grace window.
+          stream.write(this._buildHealthReport());
+          const drainStart = Date.now();
+          const drainLoop = async () => {
+            while (this._activeRequests > 0) {
+              if (Date.now() - drainStart >= graceMs) {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  `grace period expired with ${this._activeRequests} active requests remaining`,
+                );
+                break;
+              }
+              await this._sleep(50);
+            }
+          };
+          drainLoop()
+            .then(() => {
+              this.stop();
+              // _draining stays true — caster is shutting down, no need to
+              // reset. run() sets _draining = false on the next reconnect.
+            })
+            .catch((err) => {
+              // eslint-disable-next-line no-console
+              console.error('drain loop error during shutdown:', err);
+              this.stop();
+            });
         }
       });
 
@@ -384,7 +421,7 @@ export class Caster {
       : computedPressure;
     return {
       health_report: {
-        status: 'HEALTH_STATUS_HEALTHY',
+        status: this._draining ? 'HEALTH_STATUS_UNHEALTHY' : 'HEALTH_STATUS_HEALTHY',
         active_requests: this._activeRequests,
         error_rate: 0,
         custom_info: '',
@@ -435,6 +472,21 @@ export class Caster {
   // -----------------------------------------------------------------------
 
   private _handleExecute(req: any, stream: grpc.ClientDuplexStream<any, any>): void {
+    // P0-3: Reject new requests while draining for graceful shutdown.
+    if (this._draining) {
+      stream.write({
+        result: {
+          request_id: req.request_id,
+          status: 'STATUS_FAILED',
+          error: {
+            code: 'SHUTTING_DOWN',
+            message: 'caster is draining, no new requests accepted',
+          },
+        },
+      });
+      return;
+    }
+
     const registered = this._runes.get(req.rune_name);
 
     if (!registered) {

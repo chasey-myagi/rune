@@ -665,6 +665,42 @@ async fn test_nf9_run_exits_after_stop() {
 }
 
 // ============================================================================
+// P1-6: HealthReport should be sent regardless of scale_policy
+// ============================================================================
+
+#[test]
+fn test_p1_6_config_supports_health_report_without_scale_policy() {
+    // build_health_report_message and the draining flag are internal to
+    // the crate, so we can only verify config-level preconditions here.
+    // The behavioral assertion (health report sent on every heartbeat,
+    // UNHEALTHY status during drain) is covered by the Python and
+    // TypeScript unit tests which have access to the internal methods.
+    let config = CasterConfig::default();
+    assert!(config.scale_policy.is_none());
+    assert_eq!(config.max_concurrent, 10);
+    assert!(config.load_report.is_none());
+}
+
+#[test]
+fn test_p1_6_config_supports_load_report_without_scale_policy() {
+    use rune_framework::LoadReport;
+    // Verify a Caster with load_report but no scale_policy has a valid
+    // config structure.  Behavioral coverage is in Python/TS tests.
+    let mut metrics = HashMap::new();
+    metrics.insert("gpu_util".into(), 0.75);
+    let config = CasterConfig {
+        load_report: Some(LoadReport {
+            pressure: Some(0.5),
+            metrics,
+        }),
+        ..Default::default()
+    };
+    assert!(config.scale_policy.is_none());
+    assert!(config.load_report.is_some());
+    assert!((config.load_report.as_ref().unwrap().pressure.unwrap() - 0.5).abs() < f64::EPSILON);
+}
+
+// ============================================================================
 // NF-16: attach rejected should return Err, not Ok(())
 // ============================================================================
 

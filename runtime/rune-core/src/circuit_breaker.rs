@@ -148,7 +148,7 @@ impl CircuitBreaker {
         let max_permits = self.config.half_open_max_permits.max(1);
         if inner.half_open_permits >= max_permits {
             return Err(RuneError::CircuitOpen {
-                rune_name: String::new(),
+                rune_name: self.caster_id.clone(),
             });
         }
         inner.half_open_permits += 1;
@@ -296,5 +296,27 @@ mod tests {
         drop(permit);
 
         assert_eq!(breaker.state(), CBState::Open);
+    }
+
+    #[test]
+    fn half_open_max_permits_reports_caster_id() {
+        let breaker = Arc::new(CircuitBreaker::new("my-caster".into(), config()));
+
+        // Trip to Open
+        breaker.record_failure();
+        breaker.record_failure();
+
+        // Wait for reset timeout, transition to HalfOpen
+        std::thread::sleep(Duration::from_millis(10));
+        let _permit = breaker.can_execute().expect("first probe should succeed");
+
+        // Second probe should be rejected — max_permits is 1
+        match breaker.can_execute() {
+            Err(RuneError::CircuitOpen { rune_name }) => {
+                assert_eq!(rune_name, "my-caster", "CircuitOpen must carry caster_id");
+            }
+            Err(other) => panic!("expected CircuitOpen, got: {:?}", other),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
     }
 }

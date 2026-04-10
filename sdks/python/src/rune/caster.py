@@ -23,6 +23,11 @@ from ._proto.rune.wire.v1 import rune_pb2, rune_pb2_grpc
 logger = logging.getLogger("rune_framework")
 
 
+class AttachRejectedError(RuntimeError):
+    """Raised when the runtime rejects CasterAttach — a permanent error
+    that must not be retried."""
+
+
 class Caster:
     """Connects to a Rune runtime server and executes registered handlers."""
 
@@ -53,6 +58,7 @@ class Caster:
         self._load_report = load_report
         self._shutdown = threading.Event()
         self._active_requests = 0
+        self._draining = False
 
     # ------------------------------------------------------------------
     # Decorator API
@@ -180,6 +186,9 @@ class Caster:
                     if self._shutdown.is_set():
                         break
                     logger.warning("gRPC error: %s, reconnecting in %.1fs", e.code(), delay)
+                except AttachRejectedError:
+                    # Permanent error — retrying won't help (e.g. invalid key).
+                    raise
                 except Exception as e:
                     if self._shutdown.is_set():
                         break
@@ -265,9 +274,14 @@ class Caster:
             if self._load_report is not None and self._load_report.pressure is not None
             else computed_pressure
         )
+        status = (
+            rune_pb2.HEALTH_STATUS_UNHEALTHY
+            if self._draining
+            else rune_pb2.HEALTH_STATUS_HEALTHY
+        )
         return rune_pb2.SessionMessage(
             health_report=rune_pb2.HealthReport(
-                status=rune_pb2.HEALTH_STATUS_HEALTHY,
+                status=status,
                 active_requests=self._active_requests,
                 error_rate=0.0,
                 custom_info="",
@@ -284,6 +298,8 @@ class Caster:
 
     async def _session(self, pilot_id: str | None = None) -> None:
         """Run one gRPC session."""
+        # Reset draining state from any previous shutdown cycle.
+        self._draining = False
         async with grpc.aio.insecure_channel(self._addr) as channel:
             stub = rune_pb2_grpc.RuneServiceStub(channel)
 
@@ -328,14 +344,18 @@ class Caster:
                                 self._addr,
                                 self._caster_id,
                             )
-                            if self._scale_policy is not None:
-                                await outbound_queue.put(self._build_health_report_message())
+                            # Always send initial HealthReport regardless of scale_policy
+                            await outbound_queue.put(self._build_health_report_message())
                         else:
-                            logger.error("attach rejected: %s", msg.attach_ack.reason)
-                            break
+                            raise AttachRejectedError(
+                                f"attach rejected: {msg.attach_ack.reason}"
+                            ) from None
 
                     elif payload == "execute":
                         req = msg.execute
+                        # Increment BEFORE spawning so the drain loop always
+                        # sees accepted-but-not-yet-started requests.
+                        self._active_requests += 1
                         asyncio.create_task(self._handle_execute(req, outbound_queue))
 
                     elif payload == "cancel":
@@ -346,7 +366,30 @@ class Caster:
                         pass  # server heartbeat received
 
                     elif payload == "shutdown":
-                        logger.info("shutdown requested: %s", msg.shutdown.reason)
+                        grace_ms = msg.shutdown.grace_period_ms
+                        logger.info(
+                            "shutdown requested: %s, grace_period_ms=%d",
+                            msg.shutdown.reason,
+                            grace_ms,
+                        )
+                        # Mark as draining to reject new Execute requests.
+                        self._draining = True
+                        # Immediately advertise UNHEALTHY so the runtime stops
+                        # routing new work to this caster during the grace window.
+                        await outbound_queue.put(self._build_health_report_message())
+                        # Graceful drain: wait for in-flight requests to complete
+                        # or until grace_period_ms expires, whichever comes first.
+                        loop = asyncio.get_running_loop()
+                        deadline = loop.time() + grace_ms / 1000.0
+                        while self._active_requests > 0:
+                            remaining = deadline - loop.time()
+                            if remaining <= 0:
+                                logger.warning(
+                                    "grace period expired with %d active requests remaining",
+                                    self._active_requests,
+                                )
+                                break
+                            await asyncio.sleep(min(0.05, remaining))
                         self.stop()
                         break
 
@@ -370,8 +413,8 @@ class Caster:
                     )
                 )
                 await queue.put(msg)
-                if self._scale_policy is not None:
-                    await queue.put(self._build_health_report_message())
+                # Always send HealthReport regardless of scale_policy
+                await queue.put(self._build_health_report_message())
         except asyncio.CancelledError:
             pass
 
@@ -384,53 +427,74 @@ class Caster:
         req: rune_pb2.ExecuteRequest,
         outbound_queue: asyncio.Queue,
     ) -> None:
-        """Execute a rune handler (once or stream)."""
-        registered = self._runes.get(req.rune_name)
-        if registered is None:
-            await outbound_queue.put(
-                rune_pb2.SessionMessage(
-                    result=rune_pb2.ExecuteResult(
-                        request_id=req.request_id,
-                        status=rune_pb2.STATUS_FAILED,
-                        error=rune_pb2.ErrorDetail(
-                            code="NOT_FOUND",
-                            message=f"rune '{req.rune_name}' not found",
-                        ),
-                    )
-                )
-            )
-            return
+        """Execute a rune handler (once or stream).
 
-        ctx = RuneContext(
-            rune_name=req.rune_name,
-            request_id=req.request_id,
-            context=dict(req.context),
-        )
-        self._active_requests += 1
-
+        The caller increments ``_active_requests`` *before* spawning this task
+        so that the drain loop never observes a false zero.  This method is
+        responsible for decrementing in *all* exit paths via the outer
+        ``finally`` block.
+        """
         try:
-            if registered.is_stream:
-                await self._execute_stream(registered, ctx, req, outbound_queue)
-            else:
-                await self._execute_once(registered, ctx, req, outbound_queue)
-        except Exception as e:
-            logger.error("handler error for %s: %s", req.rune_name, e)
-            await outbound_queue.put(
-                rune_pb2.SessionMessage(
-                    result=rune_pb2.ExecuteResult(
-                        request_id=req.request_id,
-                        status=rune_pb2.STATUS_FAILED,
-                        error=rune_pb2.ErrorDetail(
-                            code="EXECUTION_FAILED",
-                            message=str(e),
-                        ),
+            # Reject new requests while draining for graceful shutdown.
+            if self._draining:
+                await outbound_queue.put(
+                    rune_pb2.SessionMessage(
+                        result=rune_pb2.ExecuteResult(
+                            request_id=req.request_id,
+                            status=rune_pb2.STATUS_FAILED,
+                            error=rune_pb2.ErrorDetail(
+                                code="SHUTTING_DOWN",
+                                message="caster is draining, no new requests accepted",
+                            ),
+                        )
                     )
                 )
+                return
+            registered = self._runes.get(req.rune_name)
+            if registered is None:
+                await outbound_queue.put(
+                    rune_pb2.SessionMessage(
+                        result=rune_pb2.ExecuteResult(
+                            request_id=req.request_id,
+                            status=rune_pb2.STATUS_FAILED,
+                            error=rune_pb2.ErrorDetail(
+                                code="NOT_FOUND",
+                                message=f"rune '{req.rune_name}' not found",
+                            ),
+                        )
+                    )
+                )
+                return
+
+            ctx = RuneContext(
+                rune_name=req.rune_name,
+                request_id=req.request_id,
+                context=dict(req.context),
             )
+
+            try:
+                if registered.is_stream:
+                    await self._execute_stream(registered, ctx, req, outbound_queue)
+                else:
+                    await self._execute_once(registered, ctx, req, outbound_queue)
+            except Exception as e:
+                logger.error("handler error for %s: %s", req.rune_name, e)
+                await outbound_queue.put(
+                    rune_pb2.SessionMessage(
+                        result=rune_pb2.ExecuteResult(
+                            request_id=req.request_id,
+                            status=rune_pb2.STATUS_FAILED,
+                            error=rune_pb2.ErrorDetail(
+                                code="EXECUTION_FAILED",
+                                message=str(e),
+                            ),
+                        )
+                    )
+                )
         finally:
             # NF-8: Always clean up the cancelled set to prevent unbounded growth
             self._cancelled.discard(req.request_id)
-            self._active_requests = max(0, self._active_requests - 1)
+            self._active_requests -= 1
 
     async def _execute_once(
         self,

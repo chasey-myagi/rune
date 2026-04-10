@@ -651,6 +651,92 @@ describe('2.0 CasterAttach Message', () => {
 });
 
 // ===========================================================================
+// P0-3: Graceful ShutdownRequest drains in-flight requests
+// ===========================================================================
+describe('P0-3 Graceful ShutdownRequest', () => {
+  it('P0-3a: _buildHealthReport reflects UNHEALTHY when draining', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'echo' }, async (_ctx, input) => input);
+
+    // Normal state → HEALTHY
+    const healthy = (caster as any)._buildHealthReport();
+    expect(healthy.health_report.status).toBe('HEALTH_STATUS_HEALTHY');
+
+    // Simulate draining (set by shutdown handler)
+    (caster as any)._draining = true;
+    const draining = (caster as any)._buildHealthReport();
+    expect(draining.health_report.status).toBe('HEALTH_STATUS_UNHEALTHY');
+  });
+
+  it('P0-3b: _handleExecute rejects with SHUTTING_DOWN when draining', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'echo' }, async (_ctx, input) => input);
+    (caster as any)._draining = true;
+
+    // Mock a minimal grpc stream with a write() spy
+    const written: any[] = [];
+    const fakeStream = { write: (msg: any) => written.push(msg) };
+
+    (caster as any)._handleExecute(
+      { request_id: 'req-drain', rune_name: 'echo', input: '{}' },
+      fakeStream,
+    );
+
+    expect(written).toHaveLength(1);
+    expect(written[0].result.request_id).toBe('req-drain');
+    expect(written[0].result.status).toBe('STATUS_FAILED');
+    expect(written[0].result.error.code).toBe('SHUTTING_DOWN');
+  });
+});
+
+// ===========================================================================
+// P1-6: HealthReport should be sent regardless of scalePolicy
+// ===========================================================================
+describe('P1-6 HealthReport independent of scalePolicy', () => {
+  it('P1-6a: _buildHealthReport works without scalePolicy', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    // No scalePolicy set
+    expect(caster.scalePolicy).toBeUndefined();
+
+    // _buildHealthReport should still work and return valid data
+    const report = (caster as any)._buildHealthReport();
+    expect(report.health_report).toBeDefined();
+    expect(report.health_report.status).toBe('HEALTH_STATUS_HEALTHY');
+    expect(report.health_report.active_requests).toBe(0);
+    expect(report.health_report.metrics.max_concurrent).toBe(10);
+    expect(report.health_report.metrics.available_permits).toBe(10);
+  });
+
+  it('P1-6b: _buildHealthReport works with loadReport but no scalePolicy', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      loadReport: { pressure: 0.42, metrics: { gpu_util: 0.75 } },
+    });
+    expect(caster.scalePolicy).toBeUndefined();
+    expect(caster.loadReport).toBeDefined();
+
+    const report = (caster as any)._buildHealthReport();
+    expect(report.health_report.pressure).toBeCloseTo(0.42);
+    expect(report.health_report.metrics.gpu_util).toBe(0.75);
+  });
+
+  it('P1-6c: _buildHealthReport with scalePolicy still works', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      scalePolicy: {
+        group: 'gpu',
+        spawnCommand: 'python worker.py',
+      },
+    });
+    expect(caster.scalePolicy).toBeDefined();
+
+    const report = (caster as any)._buildHealthReport();
+    expect(report.health_report).toBeDefined();
+    expect(report.health_report.status).toBe('HEALTH_STATUS_HEALTHY');
+  });
+});
+
+// ===========================================================================
 // S6 Regression: Proto file bundled inside SDK package
 // ===========================================================================
 describe('S6 Proto file bundled in SDK', () => {

@@ -70,7 +70,7 @@ export class PilotClient {
     retryRuntime?: string,
     retryKey?: string,
   ): Promise<PilotClient> {
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + pilotEnsureTimeoutMs();
     let lastStart = Date.now();
     while (Date.now() < deadline) {
       let response: PilotResponse;
@@ -156,14 +156,29 @@ function startPilot(runtime: string, key?: string): void {
   child.unref();
 }
 
-const PILOT_REQUEST_TIMEOUT_MS = 5000;
+const DEFAULT_PILOT_ENSURE_TIMEOUT_MS = 5000;
+const DEFAULT_PILOT_REQUEST_TIMEOUT_MS = 5000;
+
+function pilotEnsureTimeoutMs(): number {
+  const env = process.env.RUNE_PILOT_ENSURE_TIMEOUT_SECS;
+  if (!env) return DEFAULT_PILOT_ENSURE_TIMEOUT_MS;
+  const parsed = Number(env);
+  return isNaN(parsed) ? DEFAULT_PILOT_ENSURE_TIMEOUT_MS : parsed * 1000;
+}
+
+function pilotRequestTimeoutMs(): number {
+  const env = process.env.RUNE_PILOT_REQUEST_TIMEOUT_SECS;
+  if (!env) return DEFAULT_PILOT_REQUEST_TIMEOUT_MS;
+  const parsed = Number(env);
+  return isNaN(parsed) ? DEFAULT_PILOT_REQUEST_TIMEOUT_MS : parsed * 1000;
+}
 
 function sendRequest(request: PilotRequest): Promise<PilotResponse> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath());
     const chunks: Buffer[] = [];
 
-    socket.setTimeout(PILOT_REQUEST_TIMEOUT_MS);
+    socket.setTimeout(pilotRequestTimeoutMs());
     socket.on('timeout', () => {
       socket.destroy(new Error('pilot socket timeout'));
     });

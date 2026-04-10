@@ -11,6 +11,24 @@ use crate::config::ScalePolicy;
 use crate::error::{SdkError, SdkResult};
 
 const PILOT_CONNECTING_ERROR: &str = "runtime session not attached";
+const DEFAULT_PILOT_ENSURE_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_PILOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn pilot_ensure_timeout() -> Duration {
+    std::env::var("RUNE_PILOT_ENSURE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_PILOT_ENSURE_TIMEOUT)
+}
+
+fn pilot_request_timeout() -> Duration {
+    std::env::var("RUNE_PILOT_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_PILOT_REQUEST_TIMEOUT)
+}
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -46,7 +64,7 @@ pub struct PilotClient {
 impl PilotClient {
     pub async fn ensure(runtime: &str, key: Option<&str>) -> SdkResult<Self> {
         let normalized = normalize_runtime(runtime);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + pilot_ensure_timeout();
         if let Ok(response) = send_request(&PilotRequest::Status).await {
             match Self::classify_status(response, &normalized) {
                 EnsureStatus::Ready(client) => return Ok(client),
@@ -161,10 +179,8 @@ enum EnsureStatus {
     Failed(String),
 }
 
-const PILOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-
 async fn send_request(request: &PilotRequest) -> SdkResult<PilotResponse> {
-    tokio::time::timeout(PILOT_REQUEST_TIMEOUT, send_request_inner(request))
+    tokio::time::timeout(pilot_request_timeout(), send_request_inner(request))
         .await
         .map_err(|_| SdkError::Other("pilot request timed out".into()))?
 }

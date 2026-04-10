@@ -34,6 +34,16 @@ pub struct ScalingStatusSnapshot {
     pub pilot_id: Option<String>,
 }
 
+/// Result of breach-tracker evaluation — what the evaluator *wants* to do.
+/// Computed under lock; actual candidate selection and messaging happen outside.
+enum ScaleIntent {
+    Up,
+    Down,
+    WaitUp,
+    WaitDown,
+    None,
+}
+
 #[derive(Debug, Default, Clone)]
 struct BreachTracker {
     up_since: Option<Instant>,
@@ -47,6 +57,18 @@ struct ScalingPolicy {
     sustained_secs: u64,
     min_replicas: usize,
     max_replicas: usize,
+}
+
+fn policy_eq(a: &ScalingPolicy, b: &ScalingPolicy) -> bool {
+    a.scale_up_threshold
+        .total_cmp(&b.scale_up_threshold)
+        .is_eq()
+        && a.scale_down_threshold
+            .total_cmp(&b.scale_down_threshold)
+            .is_eq()
+        && a.sustained_secs == b.sustained_secs
+        && a.min_replicas == b.min_replicas
+        && a.max_replicas == b.max_replicas
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +136,51 @@ impl ScaleEvaluator {
         self.shutdown.store(true, Ordering::Release);
     }
 
+    /// Pure decision function: inspects breach tracker timestamps and
+    /// returns what the evaluator should do.  Called under `breaches` lock;
+    /// no I/O or session_mgr access.
+    fn evaluate_breach(
+        policy: &ScalingPolicy,
+        average_pressure: Option<f64>,
+        tracker: &mut BreachTracker,
+        current_replicas: usize,
+    ) -> ScaleIntent {
+        let Some(pressure) = average_pressure else {
+            tracker.up_since = None;
+            tracker.down_since = None;
+            return ScaleIntent::None;
+        };
+        if pressure > policy.scale_up_threshold {
+            tracker.down_since = None;
+            let started = tracker.up_since.get_or_insert_with(Instant::now);
+            if started.elapsed() >= Duration::from_secs(policy.sustained_secs)
+                && current_replicas < policy.max_replicas
+            {
+                // Don't reset up_since here — caller decides whether to
+                // consume the window (has pilot) or preserve it (no pilot).
+                ScaleIntent::Up
+            } else {
+                ScaleIntent::WaitUp
+            }
+        } else if pressure < policy.scale_down_threshold {
+            tracker.up_since = None;
+            let started = tracker.down_since.get_or_insert_with(Instant::now);
+            if started.elapsed() >= Duration::from_secs(policy.sustained_secs)
+                && current_replicas > policy.min_replicas
+            {
+                // Don't reset down_since here — caller resets after
+                // successful candidate selection.
+                ScaleIntent::Down
+            } else {
+                ScaleIntent::WaitDown
+            }
+        } else {
+            tracker.up_since = None;
+            tracker.down_since = None;
+            ScaleIntent::None
+        }
+    }
+
     pub async fn evaluate_once(&self) {
         let groups = self.collect_groups();
         let mut seen: HashSet<String> = HashSet::new();
@@ -133,75 +200,73 @@ impl ScaleEvaluator {
                 // status serialization, not routing decisions.
                 pilot_id: group.pilot_ids.iter().next().cloned(),
             };
-            let action_plan = {
+            // Phase 1: Under lock — only read/write breach tracker timestamps.
+            // select_scale_down_candidate and send_message happen outside the lock.
+            let scale_intent = {
                 let mut tracker_map = self.breaches.lock();
                 let tracker = tracker_map.entry(group_id.clone()).or_default();
+                Self::evaluate_breach(&group.policy, group.average_pressure, tracker, current)
+            };
 
-                if let Some(pressure) = group.average_pressure {
-                    if pressure > group.policy.scale_up_threshold {
-                        tracker.down_since = None;
-                        let started = tracker.up_since.get_or_insert_with(Instant::now);
-                        if started.elapsed() >= Duration::from_secs(group.policy.sustained_secs)
-                            && current < group.policy.max_replicas
-                        {
-                            if group.pilot_ids.is_empty() {
-                                // No pilot to accept the scale-up — preserve the
-                                // sustained window so we don't re-wait the full
-                                // duration once a pilot registers.
-                                status.reason = "missing pilot".into();
-                                ActionPlan::None
-                            } else {
-                                status.action = "scale_up".into();
-                                status.desired_replicas = current + 1;
-                                status.reason = format!(
-                                    "pressure {:.3} exceeded threshold {:.3}",
-                                    pressure, group.policy.scale_up_threshold
-                                );
-                                tracker.up_since = Some(Instant::now());
-                                ActionPlan::ScaleUp {
-                                    pilot_ids: group.pilot_ids.clone(),
-                                }
-                            }
-                        } else {
-                            status.reason = "waiting for sustained scale-up window".into();
-                            ActionPlan::None
+            // Phase 2: Outside lock — candidate selection, status updates, action plan.
+            let action_plan = match scale_intent {
+                ScaleIntent::Up => {
+                    if group.pilot_ids.is_empty() {
+                        // No pilot — preserve sustained window (don't reset up_since).
+                        status.reason = "missing pilot".into();
+                        ActionPlan::None
+                    } else {
+                        // Re-acquire lock briefly to consume the sustained window.
+                        // This second acquisition is intentional: the first lock
+                        // only covers the pure decision; resetting the tracker is
+                        // deferred until we confirm a pilot exists.
+                        self.breaches
+                            .lock()
+                            .entry(group_id.clone())
+                            .or_default()
+                            .up_since = Some(Instant::now());
+                        status.action = "scale_up".into();
+                        status.desired_replicas = current + 1;
+                        status.reason = format!(
+                            "pressure {:.3} exceeded threshold {:.3}",
+                            group.average_pressure.unwrap_or(0.0),
+                            group.policy.scale_up_threshold
+                        );
+                        ActionPlan::ScaleUp {
+                            pilot_ids: group.pilot_ids.clone(),
                         }
-                    } else if pressure < group.policy.scale_down_threshold {
-                        tracker.up_since = None;
-                        let started = tracker.down_since.get_or_insert_with(Instant::now);
-                        if started.elapsed() >= Duration::from_secs(group.policy.sustained_secs)
-                            && current > group.policy.min_replicas
-                        {
-                            if let Some(victim_id) = self.select_scale_down_candidate(&group) {
-                                status.action = "scale_down".into();
-                                status.desired_replicas = current.saturating_sub(1);
-                                status.reason = format!("scale down {}", victim_id);
-                                tracker.down_since = Some(Instant::now());
-                                let victim_generation =
-                                    self.session_mgr.session_generation(&victim_id);
-                                ActionPlan::ScaleDown {
-                                    victim_id,
-                                    victim_generation,
-                                }
-                            } else {
-                                status.reason = "no idle caster available for scale-down".into();
-                                ActionPlan::None
-                            }
-                        } else {
-                            status.reason = "waiting for sustained scale-down window".into();
-                            ActionPlan::None
+                    }
+                }
+                ScaleIntent::Down => {
+                    if let Some(victim_id) = self.select_scale_down_candidate(&group) {
+                        // Consume the sustained window.
+                        self.breaches
+                            .lock()
+                            .entry(group_id.clone())
+                            .or_default()
+                            .down_since = Some(Instant::now());
+                        status.action = "scale_down".into();
+                        status.desired_replicas = current.saturating_sub(1);
+                        status.reason = format!("scale down {}", victim_id);
+                        let victim_generation = self.session_mgr.session_generation(&victim_id);
+                        ActionPlan::ScaleDown {
+                            victim_id,
+                            victim_generation,
                         }
                     } else {
-                        tracker.up_since = None;
-                        tracker.down_since = None;
+                        status.reason = "no idle caster available for scale-down".into();
                         ActionPlan::None
                     }
-                } else {
-                    // No pressure data reported — skip scaling decisions
-                    tracker.up_since = None;
-                    tracker.down_since = None;
+                }
+                ScaleIntent::WaitUp => {
+                    status.reason = "waiting for sustained scale-up window".into();
                     ActionPlan::None
                 }
+                ScaleIntent::WaitDown => {
+                    status.reason = "waiting for sustained scale-down window".into();
+                    ActionPlan::None
+                }
+                ScaleIntent::None => ActionPlan::None,
             };
 
             match action_plan {
@@ -312,7 +377,7 @@ impl ScaleEvaluator {
                                 .map(|(current, original)| current == original)
                                 .unwrap_or(false);
                             if still_same_session {
-                                let _ = session_mgr
+                                if let Err(e) = session_mgr
                                     .send_message(
                                         &pilot_id,
                                         SessionMessage {
@@ -327,7 +392,10 @@ impl ScaleEvaluator {
                                             )),
                                         },
                                     )
-                                    .await;
+                                    .await
+                                {
+                                    tracing::warn!(victim_id = %victim_id, pilot_id = %pilot_id, error = %e, "force_kill scale-down signal failed");
+                                }
                             }
                         });
                     }
@@ -364,6 +432,18 @@ impl ScaleEvaluator {
             groups
                 .entry(group_id.clone())
                 .and_modify(|state: &mut GroupState| {
+                    if !policy_eq(&state.policy, &policy) {
+                        // Mismatched policy — exclude this caster from the group
+                        // so the effective policy is always deterministic (first-seen
+                        // defines it).  The caster still serves traffic; it just
+                        // won't participate in scaling decisions for this cycle.
+                        tracing::warn!(
+                            group_id = %group_id,
+                            caster_id = %meta.key(),
+                            "scaling policy mismatch — caster excluded from group evaluation"
+                        );
+                        return;
+                    }
                     state.caster_ids.push(meta.key().clone());
                     if let Some(ref pid) = pilot_id {
                         state.pilot_ids.insert(pid.clone());
@@ -442,7 +522,7 @@ impl ScaleEvaluator {
             caster_id: String,
         }
 
-        let mut candidates: Vec<ScaleCandidate> = group
+        let candidates: Vec<ScaleCandidate> = group
             .caster_ids
             .iter()
             .filter_map(|caster_id| {
@@ -474,15 +554,16 @@ impl ScaleEvaluator {
 
         // Prefer candidates without reported pressure (idle), then lowest
         // pressure, then most available permits, then oldest generation.
-        candidates.sort_by(|a, b| {
-            a.has_reported_pressure
-                .cmp(&b.has_reported_pressure)
-                .then_with(|| a.pressure.total_cmp(&b.pressure))
-                .then_with(|| b.available_permits.cmp(&a.available_permits))
-                .then_with(|| b.generation.cmp(&a.generation))
-        });
-
-        candidates.into_iter().map(|c| c.caster_id).next()
+        candidates
+            .into_iter()
+            .min_by(|a, b| {
+                a.has_reported_pressure
+                    .cmp(&b.has_reported_pressure)
+                    .then_with(|| a.pressure.total_cmp(&b.pressure))
+                    .then_with(|| b.available_permits.cmp(&a.available_permits))
+                    .then_with(|| b.generation.cmp(&a.generation))
+            })
+            .map(|c| c.caster_id)
     }
 }
 

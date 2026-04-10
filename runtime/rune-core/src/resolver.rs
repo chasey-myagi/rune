@@ -71,7 +71,7 @@ impl Resolver for RandomResolver {
             return None;
         }
         use rand::Rng;
-        Some(rand::thread_rng().gen_range(0..candidates.len()))
+        Some(rand::rng().random_range(0..candidates.len()))
     }
 }
 

@@ -269,9 +269,9 @@ impl Relay {
     /// Convenience: find + pick using a resolver
     pub fn select_entry(&self, rune_name: &str, resolver: &dyn Resolver) -> Option<RuneEntry> {
         let entries = self.find(rune_name)?;
-        let candidates: Vec<RuneEntry> = entries.value().values().cloned().collect();
+        let mut candidates: Vec<RuneEntry> = entries.value().values().cloned().collect();
         let idx = resolver.pick(rune_name, &candidates)?;
-        Some(candidates[idx].clone())
+        Some(candidates.swap_remove(idx))
     }
 
     /// Select a concrete candidate with label filtering applied.
@@ -286,7 +286,7 @@ impl Relay {
         }
         let entries = self.find(rune_name)?;
 
-        let filtered: Vec<RuneEntry> = entries
+        let mut filtered: Vec<RuneEntry> = entries
             .value()
             .values()
             .filter(|e| {
@@ -301,7 +301,7 @@ impl Relay {
         }
 
         let idx = resolver.pick(rune_name, &filtered)?;
-        Some(filtered[idx].clone())
+        Some(filtered.swap_remove(idx))
     }
 
     /// Convenience: find + pick using a resolver

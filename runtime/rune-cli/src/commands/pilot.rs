@@ -21,6 +21,10 @@ use tokio_stream::wrappers::ReceiverStream;
 struct PilotRegistration {
     caster_id: String,
     pid: u32,
+    /// Process start time captured at registration.  Used together with
+    /// `pid` to form a unique identity — guards against PID reuse.
+    #[serde(default)]
+    start_time: Option<u64>,
     group: String,
     spawn_command: String,
     shutdown_signal: String,
@@ -176,7 +180,9 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
 
         loop {
             let mut registrations = reaper_registry.lock().await;
-            registrations.retain(|_, registration| process_alive(registration.pid));
+            registrations.retain(|_, registration| {
+                process_alive_strict(registration.pid, registration.start_time)
+            });
             if registrations.is_empty() {
                 let _ = reaper_shutdown.send(true);
                 break;
@@ -259,6 +265,7 @@ async fn handle_client(
                 caster_id.clone(),
                 PilotRegistration {
                     caster_id,
+                    start_time: process_start_time(pid),
                     pid,
                     group,
                     spawn_command,
@@ -426,7 +433,7 @@ async fn handle_scale_signal(
                 let registrations = registry.lock().await;
                 if let Some(registration) = registrations.get(caster_id) {
                     if let Some(safe_pid) = validate_pid(registration.pid) {
-                        if process_alive(registration.pid) {
+                        if process_alive_strict(registration.pid, registration.start_time) {
                             unsafe {
                                 libc::kill(safe_pid, libc::SIGKILL);
                             }
@@ -481,6 +488,63 @@ fn process_alive(pid: u32) -> bool {
             .raw_os_error()
             .unwrap_or_default();
         errno == libc::EPERM
+    }
+}
+
+/// Return the process start time (platform-specific).
+///
+/// Used together with PID to form a unique process identity that survives
+/// PID reuse — the OS will never assign the same `(pid, start_time)` pair
+/// to two different processes.
+#[cfg(target_os = "linux")]
+fn process_start_time(pid: u32) -> Option<u64> {
+    // Field 22 of /proc/<pid>/stat is `starttime` (clock ticks since boot).
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The comm field (field 2) is wrapped in parens and may contain spaces,
+    // so find the last ')' first, then split the remainder.
+    let after_comm = stat.get(stat.rfind(')')? + 2..)?;
+    // /proc/pid/stat fields are 1-indexed.  After stripping pid (1) and
+    // comm (2, in parens), the remainder starts at field 3 (state).
+    // starttime is field 22 → 0-based offset from field 3 = 22 - 3 = 19.
+    // See proc(5), section /proc/pid/stat.
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn process_start_time(pid: u32) -> Option<u64> {
+    use std::mem;
+    let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
+    let size = mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let ret = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if ret <= 0 {
+        return None;
+    }
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_start_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// Like [`process_alive`] but also checks the process start time to guard
+/// against PID reuse.  Falls back to plain PID check when start time is
+/// unavailable on either side.
+fn process_alive_strict(pid: u32, expected_start_time: Option<u64>) -> bool {
+    if !process_alive(pid) {
+        return false;
+    }
+    match (expected_start_time, process_start_time(pid)) {
+        (Some(expected), Some(actual)) => expected == actual,
+        _ => true, // cannot verify — fall back to PID-only check
     }
 }
 

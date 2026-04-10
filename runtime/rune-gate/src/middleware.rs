@@ -108,6 +108,13 @@ fn select_rune_entry_with_resolver(
     }
 }
 
+/// Best-effort capacity check **after** entry selection.
+///
+/// Note: this is inherently TOCTOU — between `select_entry` and this check
+/// another request may have claimed the last permit.  The actual concurrency
+/// gate is the `SessionManager::acquire_permit` semaphore at invocation time;
+/// this function only serves as an early-rejection optimisation to avoid
+/// unnecessary work further down the pipeline.
 fn caster_capacity_exhausted(
     session_mgr: &rune_core::session::SessionManager,
     selected_entry: &rune_core::relay::RuneEntry,

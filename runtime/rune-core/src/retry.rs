@@ -147,7 +147,7 @@ impl RetryInvoker {
         // Full jitter: sleep ∈ [0, cap]. Spreads retry storms across the full
         // backoff window instead of clustering at [cap, cap*1.5].
         // See: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
-        rand::thread_rng().gen_range(0..=cap)
+        rand::rng().random_range(0..=cap)
     }
 }
 

@@ -51,7 +51,7 @@ class PilotClient:
         """Poll until pilot reports ready. When *retry_runtime* is given,
         re-attempt ``_start_pilot`` on connection failure so a slow
         predecessor release doesn't doom the single initial spawn."""
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + _pilot_ensure_timeout()
         last_start = time.monotonic()
         while time.monotonic() < deadline:
             try:
@@ -100,11 +100,26 @@ class PilotClient:
 _PILOT_CONNECTING_ERROR = "runtime session not attached"
 
 
-_PILOT_REQUEST_TIMEOUT = 5.0
+_DEFAULT_PILOT_ENSURE_TIMEOUT = 5.0
+_DEFAULT_PILOT_REQUEST_TIMEOUT = 5.0
+
+
+def _pilot_ensure_timeout() -> float:
+    try:
+        return float(os.environ["RUNE_PILOT_ENSURE_TIMEOUT_SECS"])
+    except (KeyError, ValueError):
+        return _DEFAULT_PILOT_ENSURE_TIMEOUT
+
+
+def _pilot_request_timeout() -> float:
+    try:
+        return float(os.environ["RUNE_PILOT_REQUEST_TIMEOUT_SECS"])
+    except (KeyError, ValueError):
+        return _DEFAULT_PILOT_REQUEST_TIMEOUT
 
 
 async def _send_request(payload: dict) -> dict:
-    return await asyncio.wait_for(_send_request_inner(payload), timeout=_PILOT_REQUEST_TIMEOUT)
+    return await asyncio.wait_for(_send_request_inner(payload), timeout=_pilot_request_timeout())
 
 
 async def _send_request_inner(payload: dict) -> dict:
