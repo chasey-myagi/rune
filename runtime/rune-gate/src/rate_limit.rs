@@ -119,28 +119,27 @@ impl RateLimitState {
         window_secs: u64,
         now: Instant,
     ) -> Result<(), u64> {
-        let mut entry = counters.entry(key.to_string()).or_insert((0, now));
-        let (count, window_start) = entry.value_mut();
-
-        // Fixed-window rate limiter: at the boundary between two consecutive
-        // windows a client can issue up to 2× the configured limit (tail of old
-        // window + head of new window).  Acceptable for most use-cases; switch
-        // to sliding-window or token-bucket if stricter burst control is needed.
-        let elapsed = now.duration_since(*window_start).as_secs();
-        if elapsed >= window_secs {
-            // Reset window
-            *count = 1;
-            *window_start = now;
+        // Fast path: existing key — no String allocation needed.
+        if let Some(mut entry) = counters.get_mut(key) {
+            let (count, window_start) = entry.value_mut();
+            let elapsed = now.duration_since(*window_start).as_secs();
+            if elapsed >= window_secs {
+                *count = 1;
+                *window_start = now;
+                return Ok(());
+            }
+            if *count >= requests_per_window {
+                return Err((window_secs - elapsed).max(1));
+            }
+            *count += 1;
             return Ok(());
         }
 
-        // Within window — check count
-        if *count >= requests_per_window {
-            let retry_after = window_secs - elapsed;
-            return Err(retry_after.max(1));
+        // Slow path: first request for this key — check limit, then insert.
+        if requests_per_window == 0 {
+            return Err(window_secs.max(1));
         }
-
-        *count += 1;
+        counters.insert(key.to_string(), (1, now));
         Ok(())
     }
 

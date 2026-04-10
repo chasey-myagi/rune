@@ -161,7 +161,15 @@ enum EnsureStatus {
     Failed(String),
 }
 
+const PILOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn send_request(request: &PilotRequest) -> SdkResult<PilotResponse> {
+    tokio::time::timeout(PILOT_REQUEST_TIMEOUT, send_request_inner(request))
+        .await
+        .map_err(|_| SdkError::Other("pilot request timed out".into()))?
+}
+
+async fn send_request_inner(request: &PilotRequest) -> SdkResult<PilotResponse> {
     let socket_path = socket_path()?;
     let mut stream = UnixStream::connect(&socket_path)
         .await

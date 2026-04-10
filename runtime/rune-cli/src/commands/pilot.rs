@@ -241,8 +241,9 @@ async fn handle_client(
     shutdown_tx: watch::Sender<bool>,
     runtime_state: watch::Receiver<PilotRuntimeState>,
 ) -> Result<PilotResponse> {
+    const MAX_REQUEST_SIZE: u64 = 64 * 1024; // 64KB
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;
+    stream.take(MAX_REQUEST_SIZE).read_to_end(&mut buf).await?;
     let request: PilotRequest = serde_json::from_slice(&buf)?;
 
     let mut registrations = registry.lock().await;
@@ -396,16 +397,25 @@ async fn handle_scale_signal(
             {
                 for _ in 0..needed {
                     let mut child = Command::new("sh")
-                        .arg("-lc")
+                        .arg("-c")
                         .arg(&template.spawn_command)
                         .stdout(Stdio::null())
-                        .stderr(Stdio::null())
+                        .stderr(Stdio::piped())
                         .spawn()
                         .with_context(|| format!("failed to spawn '{}'", template.spawn_command))?;
-                    // Reap the child process in the background to prevent zombies.
-                    // Without this, dropped Child handles on Unix leave zombies
-                    // in the process table until the pilot daemon exits.
+                    // Reap the child process in the background and log stderr
+                    // to aid debugging spawn failures.
+                    let spawn_cmd = template.spawn_command.clone();
                     tokio::spawn(async move {
+                        if let Some(stderr) = child.stderr.take() {
+                            let mut reader = tokio::io::BufReader::new(stderr);
+                            let mut line = String::new();
+                            use tokio::io::AsyncBufReadExt;
+                            while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                                eprintln!("[pilot::spawn] {}: {}", spawn_cmd, line.trim());
+                                line.clear();
+                            }
+                        }
                         let _ = child.wait().await;
                     });
                 }

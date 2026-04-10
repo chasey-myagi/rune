@@ -156,11 +156,17 @@ function startPilot(runtime: string, key?: string): void {
   child.unref();
 }
 
+const PILOT_REQUEST_TIMEOUT_MS = 5000;
+
 function sendRequest(request: PilotRequest): Promise<PilotResponse> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath());
     const chunks: Buffer[] = [];
 
+    socket.setTimeout(PILOT_REQUEST_TIMEOUT_MS);
+    socket.on('timeout', () => {
+      socket.destroy(new Error('pilot socket timeout'));
+    });
     socket.once('connect', () => {
       socket.end(JSON.stringify(request));
     });

@@ -100,7 +100,14 @@ class PilotClient:
 _PILOT_CONNECTING_ERROR = "runtime session not attached"
 
 
+_PILOT_REQUEST_TIMEOUT = 5.0
+
+
 async def _send_request(payload: dict) -> dict:
+    return await asyncio.wait_for(_send_request_inner(payload), timeout=_PILOT_REQUEST_TIMEOUT)
+
+
+async def _send_request_inner(payload: dict) -> dict:
     reader, writer = await asyncio.open_unix_connection(_socket_path())
     writer.write(json.dumps(payload).encode("utf-8"))
     try:

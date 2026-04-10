@@ -378,7 +378,10 @@ mod tests {
             Err(RuneError::Internal(anyhow!("transient"))),
             Ok(Bytes::from("ok")),
         ]));
-        let breaker = Arc::new(CircuitBreaker::new(retry_config().circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            retry_config().circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), retry_config(), breaker);
 
         let result = invoker
@@ -395,7 +398,10 @@ mod tests {
         let inner = Arc::new(SequenceInvoker::new(vec![Err(RuneError::InvalidInput(
             "bad".into(),
         ))]));
-        let breaker = Arc::new(CircuitBreaker::new(retry_config().circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            retry_config().circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), retry_config(), breaker);
 
         let result = invoker.invoke_once(test_ctx(), Bytes::new()).await;
@@ -409,7 +415,10 @@ mod tests {
         // Timeout must NOT be retried by default: the runtime does not cancel
         // the remote caster on timeout, so retrying would create duplicate execution.
         let inner = Arc::new(SequenceInvoker::new(vec![Err(RuneError::Timeout)]));
-        let breaker = Arc::new(CircuitBreaker::new(retry_config().circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            retry_config().circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), retry_config(), breaker);
 
         let result = invoker.invoke_once(test_ctx(), Bytes::new()).await;
@@ -429,7 +438,10 @@ mod tests {
             Err(RuneError::Internal(anyhow!("boom"))),
             Ok(Bytes::from("ok")),
         ]));
-        let breaker = Arc::new(CircuitBreaker::new(retry_config().circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            retry_config().circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), retry_config(), breaker);
 
         invoker
@@ -466,7 +478,10 @@ mod tests {
             ..retry_config()
         };
         let inner = Arc::new(SequenceInvoker::new(vec![Err(RuneError::Unavailable)]));
-        let breaker = Arc::new(CircuitBreaker::new(config.circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            config.circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), config, breaker.clone());
 
         let first = invoker.invoke_once(test_ctx(), Bytes::new()).await;
@@ -501,7 +516,10 @@ mod tests {
             // so this third call must reach the inner invoker.
             Ok(Bytes::from("ok")),
         ]));
-        let breaker = Arc::new(CircuitBreaker::new(config.circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            config.circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), config, breaker.clone());
 
         // First call: InvalidInput — not retryable, should NOT count as CB failure
@@ -542,7 +560,10 @@ mod tests {
             Err(RuneError::Unavailable),
             Err(RuneError::Unavailable),
         ]));
-        let breaker = Arc::new(CircuitBreaker::new(config.circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            config.circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), config, breaker.clone());
 
         let _ = invoker.invoke_once(test_ctx(), Bytes::new()).await;
@@ -577,7 +598,10 @@ mod tests {
             Err(RuneError::Timeout),
             Err(RuneError::Timeout),
         ]));
-        let breaker = Arc::new(CircuitBreaker::new(config.circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            config.circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), config, breaker.clone());
 
         let _ = invoker.invoke_once(test_ctx(), Bytes::new()).await;
@@ -609,7 +633,10 @@ mod tests {
             },
         };
         let inner = Arc::new(SequenceInvoker::new(vec![Err(RuneError::Timeout)]));
-        let breaker = Arc::new(CircuitBreaker::new(config.circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            config.circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), config, breaker);
 
         let result = invoker.invoke_once(test_ctx(), Bytes::new()).await;
@@ -671,7 +698,10 @@ mod tests {
         let inner = Arc::new(InstantFail {
             call_count: AtomicUsize::new(0),
         });
-        let breaker = Arc::new(CircuitBreaker::new(config.circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            config.circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), config, breaker);
 
         let start = std::time::Instant::now();
@@ -740,7 +770,10 @@ mod tests {
         let inner = Arc::new(SlowFailInvoker {
             call_count: AtomicUsize::new(0),
         });
-        let breaker = Arc::new(CircuitBreaker::new(config.circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            config.circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), config, breaker);
 
         let result = invoker.invoke_once(ctx, Bytes::new()).await;
@@ -814,7 +847,10 @@ mod tests {
         let inner = Arc::new(TimedCapture {
             timeouts: Mutex::new(Vec::new()),
         });
-        let breaker = Arc::new(CircuitBreaker::new(config.circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            config.circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), config, breaker);
 
         let _ = invoker.invoke_once(ctx, Bytes::new()).await;
@@ -895,7 +931,10 @@ mod tests {
         let inner = Arc::new(TimeoutCapture {
             timeouts: Mutex::new(Vec::new()),
         });
-        let breaker = Arc::new(CircuitBreaker::new(config.circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            config.circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), config, breaker);
 
         let _ = invoker.invoke_once(ctx, Bytes::new()).await;
@@ -922,7 +961,10 @@ mod tests {
         let inner = Arc::new(FailingStreamInvoker {
             call_count: AtomicUsize::new(0),
         });
-        let breaker = Arc::new(CircuitBreaker::new(retry_config().circuit_breaker.clone()));
+        let breaker = Arc::new(CircuitBreaker::new(
+            "test-caster".into(),
+            retry_config().circuit_breaker.clone(),
+        ));
         let invoker = RetryInvoker::new(inner.clone(), "caster-1".into(), retry_config(), breaker);
 
         let result = invoker.invoke_stream(test_ctx(), Bytes::new()).await;
@@ -978,7 +1020,7 @@ mod tests {
             reset_timeout_ms: 1,
             half_open_max_permits: 1,
         };
-        let breaker = Arc::new(CircuitBreaker::new(config.clone()));
+        let breaker = Arc::new(CircuitBreaker::new("test-caster".into(), config.clone()));
         // Trip the breaker
         breaker.record_failure();
         assert_eq!(breaker.state(), CBState::Open);

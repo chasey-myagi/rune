@@ -27,6 +27,7 @@ pub struct CircuitBreakerSnapshot {
 pub struct CircuitBreaker {
     inner: Mutex<CBInner>,
     config: CircuitBreakerConfig,
+    caster_id: String,
 }
 
 struct CBInner {
@@ -38,7 +39,7 @@ struct CBInner {
 }
 
 impl CircuitBreaker {
-    pub fn new(config: CircuitBreakerConfig) -> Self {
+    pub fn new(caster_id: String, config: CircuitBreakerConfig) -> Self {
         Self {
             inner: Mutex::new(CBInner {
                 state: CBState::Closed,
@@ -48,6 +49,7 @@ impl CircuitBreaker {
                 opened_at: None,
             }),
             config,
+            caster_id,
         }
     }
 
@@ -67,7 +69,7 @@ impl CircuitBreaker {
                     .unwrap_or(true);
                 if !can_probe {
                     return Err(RuneError::CircuitOpen {
-                        rune_name: String::new(),
+                        rune_name: self.caster_id.clone(),
                     });
                 }
 
@@ -210,7 +212,12 @@ impl CircuitBreakerRegistry {
     pub fn get_or_create(&self, caster_id: &str) -> Arc<CircuitBreaker> {
         self.breakers
             .entry(caster_id.to_string())
-            .or_insert_with(|| Arc::new(CircuitBreaker::new(self.config.clone())))
+            .or_insert_with(|| {
+                Arc::new(CircuitBreaker::new(
+                    caster_id.to_string(),
+                    self.config.clone(),
+                ))
+            })
             .clone()
     }
 
@@ -245,7 +252,7 @@ mod tests {
 
     #[test]
     fn opens_after_threshold_failures() {
-        let breaker = Arc::new(CircuitBreaker::new(config()));
+        let breaker = Arc::new(CircuitBreaker::new("test-caster".into(), config()));
 
         breaker.record_failure();
         assert_eq!(breaker.state(), CBState::Closed);
@@ -257,7 +264,7 @@ mod tests {
 
     #[test]
     fn half_open_probe_can_close_breaker() {
-        let breaker = Arc::new(CircuitBreaker::new(config()));
+        let breaker = Arc::new(CircuitBreaker::new("test-caster".into(), config()));
 
         breaker.record_failure();
         breaker.record_failure();
@@ -278,7 +285,7 @@ mod tests {
 
     #[test]
     fn half_open_failure_reopens_breaker() {
-        let breaker = Arc::new(CircuitBreaker::new(config()));
+        let breaker = Arc::new(CircuitBreaker::new("test-caster".into(), config()));
 
         breaker.record_failure();
         breaker.record_failure();

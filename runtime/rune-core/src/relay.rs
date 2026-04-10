@@ -148,7 +148,10 @@ impl Relay {
             },
         );
         if let Some(caster_id) = caster_id {
-            self.caster_index.entry(caster_id).or_default().push(name);
+            let mut names = self.caster_index.entry(caster_id).or_default();
+            if !names.contains(&name) {
+                names.push(name);
+            }
         }
         self.generation.fetch_add(1, Ordering::Release);
         Ok(())

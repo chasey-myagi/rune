@@ -10,6 +10,19 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS: u32 = 30_000;
 
+enum ActionPlan {
+    None,
+    ScaleUp {
+        pilot_ids: HashSet<String>,
+    },
+    ScaleDown {
+        victim_id: String,
+        /// Captured at candidate selection time — used to verify
+        /// the victim hasn't reconnected before we send shutdown.
+        victim_generation: Option<u64>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ScalingStatusSnapshot {
     pub group_id: String,
@@ -120,19 +133,6 @@ impl ScaleEvaluator {
                 // status serialization, not routing decisions.
                 pilot_id: group.pilot_ids.iter().next().cloned(),
             };
-            enum ActionPlan {
-                None,
-                ScaleUp {
-                    pilot_ids: HashSet<String>,
-                },
-                ScaleDown {
-                    victim_id: String,
-                    /// Captured at candidate selection time — used to verify
-                    /// the victim hasn't reconnected before we send shutdown.
-                    victim_generation: Option<u64>,
-                },
-            }
-
             let action_plan = {
                 let mut tracker_map = self.breaches.lock();
                 let tracker = tracker_map.entry(group_id.clone()).or_default();
@@ -397,20 +397,52 @@ impl ScaleEvaluator {
     }
 
     fn policy_from_labels(
-        _group_id: &str,
+        group_id: &str,
         labels: &HashMap<String, String>,
     ) -> Option<ScalingPolicy> {
+        fn parse_label<T: std::str::FromStr>(
+            labels: &HashMap<String, String>,
+            key: &str,
+            group_id: &str,
+        ) -> Option<T> {
+            match labels.get(key) {
+                None => {
+                    tracing::debug!(
+                        label = key,
+                        group_id,
+                        "scaling label missing, group skipped"
+                    );
+                    None
+                }
+                Some(v) => match v.parse() {
+                    Ok(val) => Some(val),
+                    Err(_) => {
+                        tracing::warn!(label = key, value = %v, group_id, "scaling label parse failed");
+                        None
+                    }
+                },
+            }
+        }
+
         Some(ScalingPolicy {
-            scale_up_threshold: labels.get("_scale_up")?.parse().ok()?,
-            scale_down_threshold: labels.get("_scale_down")?.parse().ok()?,
-            sustained_secs: labels.get("_sustained")?.parse().ok()?,
-            min_replicas: labels.get("_min")?.parse().ok()?,
-            max_replicas: labels.get("_max")?.parse().ok()?,
+            scale_up_threshold: parse_label(labels, "_scale_up", group_id)?,
+            scale_down_threshold: parse_label(labels, "_scale_down", group_id)?,
+            sustained_secs: parse_label(labels, "_sustained", group_id)?,
+            min_replicas: parse_label(labels, "_min", group_id)?,
+            max_replicas: parse_label(labels, "_max", group_id)?,
         })
     }
 
     fn select_scale_down_candidate(&self, group: &GroupState) -> Option<String> {
-        let mut candidates = group
+        struct ScaleCandidate {
+            has_reported_pressure: bool,
+            pressure: f64,
+            available_permits: usize,
+            generation: Option<u64>,
+            caster_id: String,
+        }
+
+        let mut candidates: Vec<ScaleCandidate> = group
             .caster_ids
             .iter()
             .filter_map(|caster_id| {
@@ -430,27 +462,27 @@ impl ScaleEvaluator {
                         0.0
                     }
                 });
-                Some((
-                    reported_pressure.is_some(),
+                Some(ScaleCandidate {
+                    has_reported_pressure: reported_pressure.is_some(),
                     pressure,
                     available_permits,
-                    self.session_mgr.session_generation(caster_id),
-                    caster_id.clone(),
-                ))
+                    generation: self.session_mgr.session_generation(caster_id),
+                    caster_id: caster_id.clone(),
+                })
             })
-            .collect::<Vec<_>>();
+            .collect();
 
+        // Prefer candidates without reported pressure (idle), then lowest
+        // pressure, then most available permits, then oldest generation.
         candidates.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| a.1.total_cmp(&b.1))
-                .then_with(|| b.2.cmp(&a.2))
-                .then_with(|| b.3.cmp(&a.3))
+            a.has_reported_pressure
+                .cmp(&b.has_reported_pressure)
+                .then_with(|| a.pressure.total_cmp(&b.pressure))
+                .then_with(|| b.available_permits.cmp(&a.available_permits))
+                .then_with(|| b.generation.cmp(&a.generation))
         });
 
-        candidates
-            .into_iter()
-            .map(|(_, _, _, _, caster_id)| caster_id)
-            .next()
+        candidates.into_iter().map(|c| c.caster_id).next()
     }
 }
 
