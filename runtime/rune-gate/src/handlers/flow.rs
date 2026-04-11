@@ -345,7 +345,10 @@ pub async fn run_flow_async(
     request_id: String,
 ) -> axum::response::Response {
     let task_id = request_id.clone();
-    let input_str = String::from_utf8_lossy(&body).to_string();
+    let input_str = match std::str::from_utf8(&body) {
+        Ok(s) => s.to_string(),
+        Err(_) => format!("hex:{}", hex::encode(&body)),
+    };
 
     if let Err(e) = state
         .admin
@@ -381,7 +384,10 @@ pub async fn run_flow_async(
             .await
         {
             Ok(result) => {
-                let output_str = String::from_utf8_lossy(&result.output).to_string();
+                let output_str = match std::str::from_utf8(&result.output) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => format!("hex:{}", hex::encode(&result.output)),
+                };
                 let val = serde_json::from_str::<serde_json::Value>(&output_str)
                     .unwrap_or(serde_json::Value::Null);
                 let combined = serde_json::json!({

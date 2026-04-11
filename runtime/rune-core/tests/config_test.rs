@@ -1078,3 +1078,28 @@ fn test_full_config_roundtrip() {
     assert_eq!(loaded.log.level, "trace");
     assert_eq!(loaded.log.file.as_deref(), Some("/var/log/rune.log"));
 }
+
+#[test]
+fn test_fix_validate_rejects_zero_backoff_multiplier() {
+    let mut cfg = AppConfig::default();
+    cfg.retry.enabled = true;
+    cfg.retry.backoff_multiplier = 0.0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_fix_validate_rejects_zero_cb_failure_threshold() {
+    let mut cfg = AppConfig::default();
+    cfg.retry.circuit_breaker.enabled = true;
+    cfg.retry.circuit_breaker.failure_threshold = 0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_fix_validate_rejects_max_delay_less_than_base_delay() {
+    let mut cfg = AppConfig::default();
+    cfg.retry.enabled = true;
+    cfg.retry.base_delay_ms = 1000;
+    cfg.retry.max_delay_ms = 500;
+    assert!(cfg.validate().is_err());
+}

@@ -198,7 +198,7 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
         }
     });
 
-    let mut conn_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let mut conn_tasks = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             changed = shutdown_rx.changed() => {
@@ -221,7 +221,7 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
                 let cli_registry = Arc::clone(&registry);
                 let cli_shutdown_tx = shutdown_tx.clone();
                 let cli_runtime_state = runtime_state_rx.clone();
-                let handle = tokio::spawn(async move {
+                conn_tasks.spawn(async move {
                     let response = match handle_client(
                         &mut stream,
                         &cli_pilot_id,
@@ -240,16 +240,13 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
                         let _ = stream.write_all(&payload).await;
                     }
                 });
-                conn_tasks.push(handle);
             }
         }
     }
 
     // Drain active connection tasks so stop/deregister responses are
     // flushed before we tear down the socket and clean up paths.
-    for handle in conn_tasks {
-        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
-    }
+    while conn_tasks.join_next().await.is_some() {}
     session_task.abort();
     reaper_task.abort();
     cleanup_paths(&paths);
@@ -538,6 +535,11 @@ async fn handle_scale_signal(
                         }
                     });
                 }
+            } else {
+                eprintln!(
+                    "[pilot] scale-down signal received but no force_kill target specified — ignored (group={}, reason={})",
+                    signal.group_id, signal.reason
+                );
             }
         }
         ScaleAction::Unspecified => {}

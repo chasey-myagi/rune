@@ -424,12 +424,16 @@ export class Caster {
 
   private _buildHealthReport(): Record<string, unknown> {
     const userMetrics = this.loadReport?.metrics ?? {};
-    const metrics: Record<string, number> = {
-      ...userMetrics,
-      active_requests: this._activeRequests,
-      max_concurrent: this.maxConcurrent,
-      available_permits: Math.max(0, this.maxConcurrent - this._activeRequests),
-    };
+    const metrics: Record<string, number> = { ...userMetrics };
+    if (!('active_requests' in metrics)) {
+      metrics.active_requests = this._activeRequests;
+    }
+    if (!('max_concurrent' in metrics)) {
+      metrics.max_concurrent = this.maxConcurrent;
+    }
+    if (!('available_permits' in metrics)) {
+      metrics.available_permits = Math.max(0, this.maxConcurrent - this._activeRequests);
+    }
     const computedPressure =
       this.maxConcurrent === 0 ? 0 : this._activeRequests / this.maxConcurrent;
     const pressure = this.loadReport?.pressure != null

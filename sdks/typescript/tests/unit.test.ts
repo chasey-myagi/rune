@@ -886,3 +886,46 @@ describe('NF-17 Proto loading cache', () => {
     }
   });
 });
+
+// ===========================================================================
+// MF-2 Regression: user metrics keys are preserved over system defaults
+// ===========================================================================
+describe('MF-2 User metrics preserved over system defaults', () => {
+  it('fix: user metrics keys are preserved over system defaults', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      loadReport: {
+        pressure: 0.5,
+        metrics: {
+          active_requests: 999,
+          max_concurrent: 888,
+          available_permits: 777,
+        },
+      },
+    });
+
+    const report = (caster as any)._buildHealthReport();
+    // User-provided values must NOT be overwritten by system defaults
+    expect(report.health_report.metrics.active_requests).toBe(999);
+    expect(report.health_report.metrics.max_concurrent).toBe(888);
+    expect(report.health_report.metrics.available_permits).toBe(777);
+  });
+
+  it('fix: system defaults are used when user does not provide them', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      loadReport: {
+        pressure: 0.3,
+        metrics: { gpu_util: 0.6 },
+      },
+    });
+
+    const report = (caster as any)._buildHealthReport();
+    // System defaults should fill in missing keys
+    expect(report.health_report.metrics.active_requests).toBe(0);
+    expect(report.health_report.metrics.max_concurrent).toBe(10);
+    expect(report.health_report.metrics.available_permits).toBe(10);
+    // User key should still be present
+    expect(report.health_report.metrics.gpu_util).toBe(0.6);
+  });
+});

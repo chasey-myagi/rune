@@ -39,7 +39,10 @@ impl ConnectionPool {
     }
 
     pub fn writer(&self) -> MutexGuard<'_, Connection> {
-        self.writer.lock().unwrap_or_else(|e| e.into_inner())
+        self.writer.lock().unwrap_or_else(|e| {
+            tracing::warn!("writer mutex was poisoned — recovering connection");
+            e.into_inner()
+        })
     }
 
     pub fn reader(&self) -> MutexGuard<'_, Connection> {
@@ -49,7 +52,10 @@ impl ConnectionPool {
 
         let len = self.readers.len();
         let idx = self.next_reader.fetch_add(1, Ordering::Relaxed) % len;
-        self.readers[idx].lock().unwrap_or_else(|e| e.into_inner())
+        self.readers[idx].lock().unwrap_or_else(|e| {
+            tracing::warn!("reader mutex was poisoned — recovering connection");
+            e.into_inner()
+        })
     }
 }
 

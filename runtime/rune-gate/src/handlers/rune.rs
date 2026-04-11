@@ -653,7 +653,10 @@ pub async fn async_execute(
         // Atomically complete the task only if it has not been cancelled (CAS).
         let (status, output_size) = match result {
             Ok(ref output) => {
-                let output_str = String::from_utf8_lossy(output).to_string();
+                let output_str = match std::str::from_utf8(output) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => format!("hex:{}", hex::encode(output)),
+                };
                 let size = output.len() as i64;
                 let updated = store
                     .complete_task_if_not_cancelled(

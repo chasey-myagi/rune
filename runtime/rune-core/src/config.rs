@@ -351,6 +351,29 @@ impl AppConfig {
             self.rate_limit.window_secs > 0,
             "rate_limit.window_secs must be > 0"
         );
+
+        if self.retry.enabled {
+            anyhow::ensure!(
+                self.retry.backoff_multiplier > 0.0,
+                "retry.backoff_multiplier must be > 0"
+            );
+            anyhow::ensure!(
+                self.retry.max_delay_ms >= self.retry.base_delay_ms,
+                "retry.max_delay_ms must be >= base_delay_ms"
+            );
+        }
+
+        if self.retry.circuit_breaker.enabled {
+            anyhow::ensure!(
+                self.retry.circuit_breaker.failure_threshold > 0,
+                "circuit_breaker.failure_threshold must be > 0"
+            );
+            anyhow::ensure!(
+                self.retry.circuit_breaker.reset_timeout_ms > 0,
+                "circuit_breaker.reset_timeout_ms must be > 0"
+            );
+        }
+
         Ok(())
     }
 

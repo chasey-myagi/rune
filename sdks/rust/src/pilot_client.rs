@@ -49,7 +49,9 @@ enum PilotRequest {
 
 #[derive(Debug, Deserialize)]
 struct PilotResponse {
+    #[serde(default)]
     ok: bool,
+    #[serde(default)]
     pilot_id: String,
     #[serde(default)]
     runtime: String,
@@ -381,6 +383,27 @@ mod tests {
         assert_eq!(client.pilot_id(), "pilot-1");
 
         server.await.unwrap();
+    }
+
+    /// Regression: PilotResponse must deserialize even when `ok` and `pilot_id`
+    /// are absent (e.g. error-only responses from pilot daemon).
+    #[test]
+    fn test_fix_pilot_response_deserialize_without_pilot_id() {
+        let json = r#"{"ok": false, "error": "connection refused"}"#;
+        let resp: PilotResponse =
+            serde_json::from_str(json).expect("should deserialize error response missing pilot_id");
+        assert!(!resp.ok);
+        assert_eq!(resp.pilot_id, "");
+        assert_eq!(resp.error.as_deref(), Some("connection refused"));
+
+        // Minimal error-only payload (no ok, no pilot_id, no runtime)
+        let json_minimal = r#"{"error": "socket not found"}"#;
+        let resp2: PilotResponse = serde_json::from_str(json_minimal)
+            .expect("should deserialize minimal error-only response");
+        assert!(!resp2.ok);
+        assert_eq!(resp2.pilot_id, "");
+        assert_eq!(resp2.runtime, "");
+        assert_eq!(resp2.error.as_deref(), Some("socket not found"));
     }
 
     /// Regression: empty-string error must retry (aligned with Python/TS SDKs).

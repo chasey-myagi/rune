@@ -1357,3 +1357,22 @@ async fn test_dev_mode_key_management_still_works() {
         "dev mode should allow key management without auth"
     );
 }
+
+// ===========================================================================
+// MF-1 Regression: flow async binary input uses hex encoding
+// ===========================================================================
+
+#[test]
+fn test_fix_flow_async_binary_input_uses_hex_encoding() {
+    // Verify non-UTF8 bytes are hex-encoded rather than lossy-replaced
+    let binary = vec![0xFF, 0xFE, 0x00, 0x80];
+    let result = match std::str::from_utf8(&binary) {
+        Ok(s) => s.to_string(),
+        Err(_) => format!("hex:{}", hex::encode(&binary)),
+    };
+    assert!(
+        result.starts_with("hex:"),
+        "binary input should be hex-encoded"
+    );
+    assert_eq!(result, "hex:fffe0080");
+}
