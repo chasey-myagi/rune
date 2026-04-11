@@ -222,7 +222,6 @@ export class Caster {
    */
   async run(): Promise<void> {
     this._stopped = false;
-    this._draining = false;
     let delay = this.reconnect.initialDelayMs;
     let lastPilot: PilotClient | null = null;
 
@@ -269,6 +268,8 @@ export class Caster {
   // -----------------------------------------------------------------------
 
   private async _connectAndRun(pilotId?: string): Promise<void> {
+    // Reset draining state from any previous shutdown cycle.
+    this._draining = false;
     const { RuneServiceClient } = loadProto();
 
     // Establish gRPC channel with API key metadata
@@ -408,11 +409,12 @@ export class Caster {
   }
 
   private _buildHealthReport(): Record<string, unknown> {
+    const userMetrics = this.loadReport?.metrics ?? {};
     const metrics: Record<string, number> = {
-      ...(this.loadReport?.metrics ?? {}),
       active_requests: this._activeRequests,
       max_concurrent: this.maxConcurrent,
       available_permits: Math.max(0, this.maxConcurrent - this._activeRequests),
+      ...userMetrics,
     };
     const computedPressure =
       this.maxConcurrent === 0 ? 0 : this._activeRequests / this.maxConcurrent;

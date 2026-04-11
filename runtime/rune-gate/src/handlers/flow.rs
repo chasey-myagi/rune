@@ -72,57 +72,59 @@ pub async fn create_flow(
         );
     }
 
-    // Register in engine first (validates DAG + holds write lock for
-    // atomicity), then persist to store. If store fails, rollback engine.
-    let mut engine = state.flow.flow_engine.write().await;
+    // Phase 1: Register in engine under write lock (validates DAG + conflicts).
+    // Release lock before I/O to avoid blocking concurrent reads.
+    {
+        let mut engine = state.flow.flow_engine.write().await;
 
-    if engine.get(&flow.name).is_some() {
-        return error_response(
-            StatusCode::CONFLICT,
-            "CONFLICT",
-            &format!("flow '{}' already exists", flow.name),
-        );
-    }
-
-    // Check gate_path conflict with existing flows
-    if let Some(ref gate_path) = flow.gate_path {
-        if let Some(existing) = engine.find_by_gate_path(gate_path, &flow.name) {
-            return error_response(
-                StatusCode::CONFLICT,
-                "CONFLICT",
-                &format!(
-                    "gate_path '{}' is already used by flow '{}'",
-                    gate_path, existing
-                ),
-            );
-        }
-    }
-
-    if let Err(e) = engine.register(flow.clone()) {
-        return error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string());
-    }
-
-    match state.admin.store.create_flow(&flow).await {
-        Ok(()) => {}
-        Err(StoreError::DuplicateFlow(_)) => {
-            engine.remove(&flow.name);
+        if engine.get(&flow.name).is_some() {
             return error_response(
                 StatusCode::CONFLICT,
                 "CONFLICT",
                 &format!("flow '{}' already exists", flow.name),
             );
         }
+
+        // Check gate_path conflict with existing flows
+        if let Some(ref gate_path) = flow.gate_path {
+            if let Some(existing) = engine.find_by_gate_path(gate_path, &flow.name) {
+                return error_response(
+                    StatusCode::CONFLICT,
+                    "CONFLICT",
+                    &format!(
+                        "gate_path '{}' is already used by flow '{}'",
+                        gate_path, existing
+                    ),
+                );
+            }
+        }
+
+        if let Err(e) = engine.register(flow.clone()) {
+            return error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string());
+        }
+    } // Write lock released here — concurrent reads are no longer blocked.
+
+    // Phase 2: Persist to store without holding engine lock.
+    match state.admin.store.create_flow(&flow).await {
+        Ok(()) => (StatusCode::CREATED, Json(serde_json::json!(flow))).into_response(),
+        Err(StoreError::DuplicateFlow(_)) => {
+            // Rollback: re-acquire lock and remove from engine.
+            state.flow.flow_engine.write().await.remove(&flow.name);
+            error_response(
+                StatusCode::CONFLICT,
+                "CONFLICT",
+                &format!("flow '{}' already exists", flow.name),
+            )
+        }
         Err(e) => {
-            engine.remove(&flow.name);
-            return error_response(
+            state.flow.flow_engine.write().await.remove(&flow.name);
+            error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL",
                 &e.to_string(),
-            );
+            )
         }
     }
-
-    (StatusCode::CREATED, Json(serde_json::json!(flow))).into_response()
 }
 
 pub async fn list_flows(State(state): State<GateState>) -> impl IntoResponse {

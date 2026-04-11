@@ -34,9 +34,9 @@ impl RateLimitState {
         let mut wildcard = Vec::new();
         for (pattern, rule) in per_rune {
             if let Some(prefix) = pattern.strip_suffix('*') {
-                wildcard.push((prefix.to_string(), rule.requests_per_minute));
+                wildcard.push((prefix.to_string(), rule.max_requests));
             } else {
-                exact.insert(pattern, rule.requests_per_minute);
+                exact.insert(pattern, rule.max_requests);
             }
         }
         wildcard.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
@@ -135,11 +135,22 @@ impl RateLimitState {
             return Ok(());
         }
 
-        // Slow path: first request for this key — check limit, then insert.
+        // Slow path: use entry() API to avoid TOCTOU race with concurrent first requests.
         if requests_per_window == 0 {
             return Err(window_secs.max(1));
         }
-        counters.insert(key.to_string(), (1, now));
+        let mut entry = counters.entry(key.to_string()).or_insert((0, now));
+        let (count, window_start) = entry.value_mut();
+        let elapsed = now.duration_since(*window_start).as_secs();
+        if elapsed >= window_secs {
+            *count = 1;
+            *window_start = now;
+            return Ok(());
+        }
+        if *count >= requests_per_window {
+            return Err((window_secs - elapsed).max(1));
+        }
+        *count += 1;
         Ok(())
     }
 
@@ -170,9 +181,7 @@ mod tests {
             60,
             HashMap::from([(
                 "translate".to_string(),
-                PerRuneRateLimit {
-                    requests_per_minute: 1,
-                },
+                PerRuneRateLimit { max_requests: 1 },
             )]),
         );
 
@@ -185,12 +194,7 @@ mod tests {
         let limiter = RateLimitState::with_per_rune_limits(
             100,
             60,
-            HashMap::from([(
-                "ai.*".to_string(),
-                PerRuneRateLimit {
-                    requests_per_minute: 1,
-                },
-            )]),
+            HashMap::from([("ai.*".to_string(), PerRuneRateLimit { max_requests: 1 })]),
         );
 
         assert!(limiter.check_rune("k_1", "ai.translate").is_ok());
@@ -203,17 +207,10 @@ mod tests {
             100,
             60,
             HashMap::from([
-                (
-                    "ai.*".to_string(),
-                    PerRuneRateLimit {
-                        requests_per_minute: 5,
-                    },
-                ),
+                ("ai.*".to_string(), PerRuneRateLimit { max_requests: 5 }),
                 (
                     "ai.translate.*".to_string(),
-                    PerRuneRateLimit {
-                        requests_per_minute: 1,
-                    },
+                    PerRuneRateLimit { max_requests: 1 },
                 ),
             ]),
         );

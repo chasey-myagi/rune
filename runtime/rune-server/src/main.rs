@@ -347,7 +347,7 @@ async fn main() -> anyhow::Result<()> {
             None
         } else {
             Some(gate::RateLimitState::with_per_rune_limits(
-                config.rate_limit.requests_per_minute,
+                config.rate_limit.max_requests,
                 config.rate_limit.window_secs,
                 config.rate_limit.per_rune.clone(),
             ))

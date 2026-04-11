@@ -188,12 +188,10 @@ impl Default for RetryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RateLimitConfig {
-    /// Maximum requests allowed in `window_secs` seconds (default 60s).
-    /// When `window_secs = 60` (default), this is equivalent to requests per minute.
-    pub requests_per_minute: u32,
+    /// Maximum requests allowed per `window_secs` window.
+    #[serde(alias = "requests_per_minute")]
+    pub max_requests: u32,
     /// Sliding window size in seconds. Default 60.
-    /// Changing this alters the effective rate: e.g. `requests_per_minute = 600`
-    /// with `window_secs = 30` allows 600 requests per 30 seconds.
     pub window_secs: u64,
     pub per_rune: HashMap<String, PerRuneRateLimit>,
     pub default_caster_max_concurrent: u32,
@@ -202,21 +200,20 @@ pub struct RateLimitConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PerRuneRateLimit {
-    pub requests_per_minute: u32,
+    #[serde(alias = "requests_per_minute")]
+    pub max_requests: u32,
 }
 
 impl Default for PerRuneRateLimit {
     fn default() -> Self {
-        Self {
-            requests_per_minute: 60,
-        }
+        Self { max_requests: 60 }
     }
 }
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
-            requests_per_minute: 600,
+            max_requests: 600,
             window_secs: 60,
             per_rune: HashMap::new(),
             default_caster_max_concurrent: 1024,
@@ -493,7 +490,7 @@ impl AppConfig {
         // Rate limit
         env_override!(
             "RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE",
-            self.rate_limit.requests_per_minute,
+            self.rate_limit.max_requests,
             u32
         );
         env_override!(

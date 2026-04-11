@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -78,6 +79,7 @@ impl PilotRuntimeState {
 pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
     let paths = pilot_paths()?;
     std::fs::create_dir_all(&paths.base_dir)?;
+    std::fs::set_permissions(&paths.base_dir, std::fs::Permissions::from_mode(0o700))?;
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -99,6 +101,7 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
 
     let listener = UnixListener::bind(&paths.socket)
         .with_context(|| format!("failed to bind pilot socket at {}", paths.socket.display()))?;
+    std::fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600))?;
     std::fs::write(&paths.pid, std::process::id().to_string())?;
 
     let runtime = normalize_runtime(runtime);
@@ -210,23 +213,32 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
                         continue;
                     }
                 };
-                let response = match handle_client(
-                    &mut stream,
-                    &pilot_id,
-                    &runtime,
-                    Arc::clone(&registry),
-                    shutdown_tx.clone(),
-                    runtime_state_rx.clone(),
-                ).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("[pilot] client error: {e}");
-                        continue;
+                // Spawn each client connection as an independent task to
+                // prevent a slow/stalled client from blocking the accept loop.
+                let cli_pilot_id = pilot_id.clone();
+                let cli_runtime = runtime.clone();
+                let cli_registry = Arc::clone(&registry);
+                let cli_shutdown_tx = shutdown_tx.clone();
+                let cli_runtime_state = runtime_state_rx.clone();
+                tokio::spawn(async move {
+                    let response = match handle_client(
+                        &mut stream,
+                        &cli_pilot_id,
+                        &cli_runtime,
+                        cli_registry,
+                        cli_shutdown_tx,
+                        cli_runtime_state,
+                    ).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("[pilot] client error: {e}");
+                            return;
+                        }
+                    };
+                    if let Ok(payload) = serde_json::to_vec(&response) {
+                        let _ = stream.write_all(&payload).await;
                     }
-                };
-                if let Ok(payload) = serde_json::to_vec(&response) {
-                    let _ = stream.write_all(&payload).await;
-                }
+                });
             }
         }
     }
@@ -264,8 +276,18 @@ async fn handle_client(
     runtime_state: watch::Receiver<PilotRuntimeState>,
 ) -> Result<PilotResponse> {
     const MAX_REQUEST_SIZE: u64 = 64 * 1024; // 64KB
+    const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(5);
     let mut buf = Vec::new();
-    stream.take(MAX_REQUEST_SIZE).read_to_end(&mut buf).await?;
+    match tokio::time::timeout(
+        CLIENT_READ_TIMEOUT,
+        stream.take(MAX_REQUEST_SIZE).read_to_end(&mut buf),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_) => return Err(anyhow!("client read timeout")),
+    }
     let request: PilotRequest = serde_json::from_slice(&buf)?;
 
     let mut registrations = registry.lock().await;
@@ -348,7 +370,7 @@ async fn run_pilot_session(
     .await?;
 
     let heartbeat_tx = tx.clone();
-    tokio::spawn(async move {
+    let heartbeat_handle = tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await;
             if heartbeat_tx
@@ -365,39 +387,44 @@ async fn run_pilot_session(
         }
     });
 
-    loop {
-        tokio::select! {
-            changed = shutdown_rx.changed() => {
-                if changed.is_ok() && *shutdown_rx.borrow() {
-                    break;
+    let result = async {
+        loop {
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_ok() && *shutdown_rx.borrow() {
+                        break;
+                    }
                 }
-            }
-            message = inbound.message() => {
-                let Some(message) = message? else {
-                    break;
-                };
-                match message.payload {
-                    Some(session_message::Payload::AttachAck(ack)) => {
-                        if !ack.accepted {
-                            let error = format!("pilot attach rejected: {}", ack.reason);
-                            let _ = runtime_state_tx.send(PilotRuntimeState::Failed(error.clone()));
-                            return Err(anyhow!(error));
+                message = inbound.message() => {
+                    let Some(message) = message? else {
+                        break;
+                    };
+                    match message.payload {
+                        Some(session_message::Payload::AttachAck(ack)) => {
+                            if !ack.accepted {
+                                let error = format!("pilot attach rejected: {}", ack.reason);
+                                let _ = runtime_state_tx.send(PilotRuntimeState::Failed(error.clone()));
+                                return Err(anyhow!(error));
+                            }
+                            let _ = runtime_state_tx.send(PilotRuntimeState::Ready);
                         }
-                        let _ = runtime_state_tx.send(PilotRuntimeState::Ready);
-                    }
-                    Some(session_message::Payload::ScaleSignal(signal)) => {
-                        if let Err(e) = handle_scale_signal(signal, Arc::clone(&registry)).await {
-                            eprintln!("[pilot] scale signal error: {e}");
+                        Some(session_message::Payload::ScaleSignal(signal)) => {
+                            if let Err(e) = handle_scale_signal(signal, Arc::clone(&registry)).await {
+                                eprintln!("[pilot] scale signal error: {e}");
+                            }
                         }
+                        Some(session_message::Payload::Heartbeat(_)) => {}
+                        _ => {}
                     }
-                    Some(session_message::Payload::Heartbeat(_)) => {}
-                    _ => {}
                 }
             }
         }
+        Ok(())
     }
+    .await;
 
-    Ok(())
+    heartbeat_handle.abort();
+    result
 }
 
 fn parse_signal(name: &str) -> Option<i32> {

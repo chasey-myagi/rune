@@ -26,6 +26,17 @@ use crate::trace_headers::{
     apply_trace_response_headers, context_from_headers, request_id_from_headers,
 };
 
+pub struct ExecuteRequest<'a> {
+    pub state: &'a GateState,
+    pub rune_name: &'a str,
+    pub params: RunParams,
+    pub body: Bytes,
+    pub content_type: &'a str,
+    pub labels: &'a HashMap<String, String>,
+    pub headers: &'a HeaderMap,
+    pub selected_entry: Option<rune_core::relay::RuneEntry>,
+}
+
 pub async fn run_rune(
     State(state): State<GateState>,
     Path(name): Path<String>,
@@ -69,16 +80,16 @@ pub async fn run_rune(
         }
     };
 
-    execute_rune(
-        &state,
-        &name,
+    execute_rune(ExecuteRequest {
+        state: &state,
+        rune_name: &name,
         params,
         body,
-        &content_type,
-        &labels,
-        &headers,
+        content_type: &content_type,
+        labels: &labels,
+        headers: &headers,
         selected_entry,
-    )
+    })
     .await
 }
 
@@ -142,16 +153,16 @@ pub async fn dynamic_rune_handler(
 
     let params: RunParams = serde_urlencoded::from_str(&query).unwrap_or_default();
 
-    execute_rune(
-        &state,
-        &rune_name,
+    execute_rune(ExecuteRequest {
+        state: &state,
+        rune_name: &rune_name,
         params,
         body,
-        &content_type,
-        &labels,
-        &headers,
+        content_type: &content_type,
+        labels: &labels,
+        headers: &headers,
         selected_entry,
-    )
+    })
     .await
 }
 
@@ -173,17 +184,17 @@ pub fn parse_labels_header(
 }
 
 /// Unified rune execution logic for both debug and dynamic routes
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_rune(
-    state: &GateState,
-    rune_name: &str,
-    params: RunParams,
-    body: Bytes,
-    content_type: &str,
-    labels: &std::collections::HashMap<String, String>,
-    headers: &HeaderMap,
-    selected_entry: Option<rune_core::relay::RuneEntry>,
-) -> axum::response::Response {
+pub async fn execute_rune(req: ExecuteRequest<'_>) -> axum::response::Response {
+    let ExecuteRequest {
+        state,
+        rune_name,
+        params,
+        body,
+        content_type,
+        labels,
+        headers,
+        selected_entry,
+    } = req;
     let request_id = request_id_from_headers(headers).unwrap_or_else(unique_request_id);
     let context = context_from_headers(headers);
     let mode = if params.async_mode.unwrap_or(false) {

@@ -6006,7 +6006,7 @@ mod tests {
 
     // Helper: build a test state with auth enabled and a known gate key.
     // Returns (state, raw_key).
-    async fn rate_limit_state(requests_per_minute: u32, dev_mode: bool) -> (GateState, String) {
+    async fn rate_limit_state(max_requests: u32, dev_mode: bool) -> (GateState, String) {
         let relay = Arc::new(Relay::new());
         let resolver = Arc::new(RoundRobinResolver::new());
         let store = Arc::new(RuneStore::open_in_memory().unwrap());
@@ -6084,7 +6084,7 @@ mod tests {
             rate_limiter: if dev_mode {
                 None
             } else {
-                Some(RateLimitState::new(requests_per_minute, 1))
+                Some(RateLimitState::new(max_requests, 1))
             },
             shutdown: ShutdownCoordinator::new(),
         };
@@ -6189,7 +6189,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limit_allows_within_limit() {
-        // With requests_per_minute=5, all 5 requests should succeed (one per router)
+        // With max_requests=5, all 5 requests should succeed (one per router)
         let (state, key) = rate_limit_state(5, false).await;
 
         for i in 0..5 {
@@ -6269,7 +6269,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limit_blocks_over_limit() {
-        // With requests_per_minute=5, 6th request should return 429
+        // With max_requests=5, 6th request should return 429
         let (state, key) = rate_limit_state(5, false).await;
 
         for i in 0..6 {

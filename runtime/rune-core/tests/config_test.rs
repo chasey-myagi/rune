@@ -58,7 +58,7 @@ fn test_default_config() {
     assert_eq!(config.retry.circuit_breaker.half_open_max_permits, 1);
 
     // Rate limit defaults
-    assert_eq!(config.rate_limit.requests_per_minute, 600);
+    assert_eq!(config.rate_limit.max_requests, 600);
 
     // Log defaults
     assert_eq!(config.log.level, "info");
@@ -123,7 +123,7 @@ level = "debug"
     assert_eq!(config.server.http_port, 50060);
     assert!(config.auth.enabled);
     assert_eq!(config.session.heartbeat_interval_secs, 10);
-    assert_eq!(config.rate_limit.requests_per_minute, 600);
+    assert_eq!(config.rate_limit.max_requests, 600);
 }
 
 #[test]
@@ -665,7 +665,7 @@ fn test_multiple_env_vars_all_take_effect() {
     assert_eq!(config.store.db_path, "/tmp/custom.db");
     assert_eq!(config.log.level, "warn");
     assert_eq!(config.resolver.strategy, "random");
-    assert_eq!(config.rate_limit.requests_per_minute, 1200);
+    assert_eq!(config.rate_limit.max_requests, 1200);
     assert_eq!(config.session.heartbeat_interval_secs, 20);
     assert_eq!(config.session.heartbeat_timeout_secs, 60);
     assert_eq!(config.session.max_request_timeout_secs, 45);
@@ -873,7 +873,7 @@ requests_per_minute = 100
     std::fs::write(&path, toml_content).unwrap();
 
     let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
-    assert_eq!(config.rate_limit.requests_per_minute, 100);
+    assert_eq!(config.rate_limit.max_requests, 100);
 }
 
 #[test]
@@ -911,7 +911,7 @@ fn test_rate_limit_env_override() {
     let mut config = AppConfig::default();
     config.apply_env_overrides();
 
-    assert_eq!(config.rate_limit.requests_per_minute, 999);
+    assert_eq!(config.rate_limit.max_requests, 999);
 
     std::env::remove_var("RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE");
 }
@@ -1025,7 +1025,7 @@ fn test_full_config_roundtrip() {
     config.gate.cors_origins = vec!["http://localhost:3000".into(), "https://example.com".into()];
     config.gate.max_upload_size_mb = 50;
     config.resolver.strategy = "random".to_string();
-    config.rate_limit.requests_per_minute = 1200;
+    config.rate_limit.max_requests = 1200;
     config.log.level = "trace".to_string();
     config.log.file = Some("/var/log/rune.log".to_string());
 
@@ -1074,7 +1074,7 @@ fn test_full_config_roundtrip() {
     );
     assert_eq!(loaded.gate.max_upload_size_mb, 50);
     assert_eq!(loaded.resolver.strategy, "random");
-    assert_eq!(loaded.rate_limit.requests_per_minute, 1200);
+    assert_eq!(loaded.rate_limit.max_requests, 1200);
     assert_eq!(loaded.log.level, "trace");
     assert_eq!(loaded.log.file.as_deref(), Some("/var/log/rune.log"));
 }
