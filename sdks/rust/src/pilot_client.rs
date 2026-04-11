@@ -204,8 +204,10 @@ async fn send_request_inner(request: &PilotRequest) -> SdkResult<PilotResponse> 
         .shutdown()
         .await
         .map_err(|err| SdkError::Other(format!("failed to flush pilot request: {err}")))?;
+    const MAX_RESPONSE_SIZE: u64 = 256 * 1024; // 256KB — symmetric with daemon's 64KB request limit
     let mut response = Vec::new();
     stream
+        .take(MAX_RESPONSE_SIZE)
         .read_to_end(&mut response)
         .await
         .map_err(|err| SdkError::Other(format!("failed to read pilot response: {err}")))?;
@@ -227,6 +229,10 @@ async fn start_pilot(runtime: &str, key: Option<&str>) -> SdkResult<()> {
         command.env("RUNE_KEY", key);
     }
     #[cfg(unix)]
+    // SAFETY: `libc::setsid()` is async-signal-safe per POSIX.1-2017 §2.4.3,
+    // which is the requirement for functions called inside `pre_exec`.
+    // It detaches the child from the parent's session so the pilot daemon
+    // survives after the SDK process exits.
     unsafe {
         command.pre_exec(|| {
             libc::setsid();

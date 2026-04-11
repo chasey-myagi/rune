@@ -188,8 +188,16 @@ function sendRequest(request: PilotRequest): Promise<PilotResponse> {
     socket.once('connect', () => {
       socket.end(JSON.stringify(request));
     });
+    const MAX_RESPONSE_SIZE = 256 * 1024; // 256KB — symmetric with daemon's request limit
+    let totalSize = 0;
     socket.on('data', (chunk) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalSize += buf.length;
+      if (totalSize > MAX_RESPONSE_SIZE) {
+        socket.destroy(new Error('pilot response exceeded 256KB limit'));
+        return;
+      }
+      chunks.push(buf);
     });
     socket.once('error', reject);
     socket.once('end', () => {

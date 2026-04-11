@@ -266,15 +266,26 @@ impl Relay {
         Some(entry)
     }
 
-    /// Convenience: find + pick using a resolver
+    /// Convenience: find + pick using a resolver.
+    ///
+    /// Fast-paths the single-candidate case to avoid a Vec allocation.
+    /// For N>1, clones all candidates into a temporary Vec for the resolver
+    /// (the Resolver trait requires `&[RuneEntry]`).
     pub fn select_entry(&self, rune_name: &str, resolver: &dyn Resolver) -> Option<RuneEntry> {
         let entries = self.find(rune_name)?;
-        let mut candidates: Vec<RuneEntry> = entries.value().values().cloned().collect();
+        let map = entries.value();
+        // Fast path: single candidate — skip resolver + Vec allocation.
+        if map.len() == 1 {
+            return map.values().next().cloned();
+        }
+        let mut candidates: Vec<RuneEntry> = map.values().cloned().collect();
         let idx = resolver.pick(rune_name, &candidates)?;
         Some(candidates.swap_remove(idx))
     }
 
     /// Select a concrete candidate with label filtering applied.
+    ///
+    /// Filters with references first, only clones the matching subset.
     pub fn select_entry_with_labels(
         &self,
         rune_name: &str,
@@ -286,19 +297,29 @@ impl Relay {
         }
         let entries = self.find(rune_name)?;
 
-        let mut filtered: Vec<RuneEntry> = entries
+        // Collect matching keys first (cheap), then clone only the filtered set.
+        let matching_keys: Vec<&String> = entries
             .value()
-            .values()
-            .filter(|e| {
+            .iter()
+            .filter(|(_, e)| {
                 required_labels
                     .iter()
                     .all(|(k, v)| e.config.labels.get(k) == Some(v))
             })
-            .cloned()
+            .map(|(k, _)| k)
             .collect();
-        if filtered.is_empty() {
+        if matching_keys.is_empty() {
             return None;
         }
+        // Fast path: single match.
+        if matching_keys.len() == 1 {
+            return entries.value().get(matching_keys[0]).cloned();
+        }
+
+        let mut filtered: Vec<RuneEntry> = matching_keys
+            .iter()
+            .filter_map(|k| entries.value().get(*k).cloned())
+            .collect();
 
         let idx = resolver.pick(rune_name, &filtered)?;
         Some(filtered.swap_remove(idx))

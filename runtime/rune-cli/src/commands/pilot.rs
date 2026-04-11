@@ -156,7 +156,7 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
 
                 attempts = attempts.saturating_add(1);
                 let delay = std::cmp::min(
-                    base_delay.saturating_mul(1u32.wrapping_shl(attempts.min(6))),
+                    base_delay.saturating_mul(1u32 << attempts.min(6)),
                     max_delay,
                 );
 
@@ -522,15 +522,21 @@ async fn handle_scale_signal(
                 // Lock dropped — safe to issue signals.
                 if let Some((safe_pid, start_time, shutdown_signal)) = kill_info {
                     let sig = parse_signal(&shutdown_signal).unwrap_or(libc::SIGTERM);
-                    unsafe {
-                        libc::kill(safe_pid, sig);
+                    // SAFETY: safe_pid is validated > 0 and <= i32::MAX by validate_pid().
+                    let ret = unsafe { libc::kill(safe_pid, sig) };
+                    if ret != 0 {
+                        let err = std::io::Error::last_os_error();
+                        eprintln!("[pilot] kill(pid={}, sig={}) failed: {err}", safe_pid, sig);
                     }
                     let raw_pid = safe_pid as u32;
                     tokio::spawn(async move {
                         tokio::time::sleep(GRACEFUL_SHUTDOWN_TIMEOUT).await;
                         if process_alive_strict(raw_pid, start_time) {
-                            unsafe {
-                                libc::kill(safe_pid, libc::SIGKILL);
+                            // SAFETY: safe_pid validated at capture time above.
+                            let ret = unsafe { libc::kill(safe_pid, libc::SIGKILL) };
+                            if ret != 0 {
+                                let err = std::io::Error::last_os_error();
+                                eprintln!("[pilot] SIGKILL(pid={}) failed: {err}", safe_pid);
                             }
                         }
                     });

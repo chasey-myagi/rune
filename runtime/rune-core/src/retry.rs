@@ -8,6 +8,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// Buffer size for the wrapper channel in `invoke_stream`.
+/// Matches the default channel size used by session.rs `execute_stream`.
+const STREAM_WRAPPER_CHANNEL_SIZE: usize = 32;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuneErrorKind {
     Unavailable,
@@ -246,7 +250,7 @@ impl RuneInvoker for RetryInvoker {
                 // state the permit is held for the stream's entire lifetime,
                 // preventing additional probes until this stream completes.
                 let cb = Arc::clone(&self.circuit_breaker);
-                let (tx, rx) = mpsc::channel(32);
+                let (tx, rx) = mpsc::channel(STREAM_WRAPPER_CHANNEL_SIZE);
                 tokio::spawn(async move {
                     let _permit = permit; // hold permit until stream ends
                     let mut saw_error = false;
