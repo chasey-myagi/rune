@@ -2,9 +2,29 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
-import type { CasterOptions, RuneConfig, RuneContext, ReconnectOptions, FileAttachment } from './types.js';
+import type {
+  CasterOptions,
+  RuneConfig,
+  RuneContext,
+  ReconnectOptions,
+  FileAttachment,
+  ScalePolicy,
+  LoadReport,
+} from './types.js';
 import type { RuneHandler, RuneHandlerWithFiles, StreamRuneHandler, StreamRuneHandlerWithFiles } from './handler.js';
+import { PilotClient } from './pilot-client.js';
 import { StreamSender } from './stream.js';
+
+/**
+ * Raised when the runtime rejects CasterAttach — a permanent error
+ * that must not be retried.
+ */
+export class AttachRejectedError extends Error {
+  constructor(reason: string) {
+    super(`attach rejected: ${reason}`);
+    this.name = 'AttachRejectedError';
+  }
+}
 
 /** Default gRPC endpoint */
 const DEFAULT_RUNTIME = 'localhost:50070';
@@ -100,12 +120,17 @@ export class Caster {
   readonly heartbeatIntervalMs: number;
   readonly maxConcurrent: number;
   readonly labels: Record<string, string>;
+  readonly scalePolicy?: ScalePolicy;
+  readonly loadReport?: LoadReport;
   readonly reconnect: Required<ReconnectOptions>;
 
   private _runes: Map<string, RegisteredRune> = new Map();
   private _stopped = false;
+  // P0-3: Flag to reject new requests during graceful shutdown drain.
+  private _draining = false;
   private _abortControllers: Map<string, AbortController> = new Map();
   private _activeStream: grpc.ClientDuplexStream<any, any> | null = null;
+  private _activeRequests = 0;
 
   constructor(options: CasterOptions) {
     this.runtime = options.runtime ?? DEFAULT_RUNTIME;
@@ -114,6 +139,8 @@ export class Caster {
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS;
     this.maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
     this.labels = options.labels ?? {};
+    this.scalePolicy = options.scalePolicy;
+    this.loadReport = options.loadReport;
     this.reconnect = {
       ...DEFAULT_RECONNECT,
       ...options.reconnect,
@@ -207,19 +234,45 @@ export class Caster {
   async run(): Promise<void> {
     this._stopped = false;
     let delay = this.reconnect.initialDelayMs;
+    let lastPilot: PilotClient | null = null;
 
-    while (!this._stopped) {
-      try {
-        await this._connectAndRun();
-        // Session ended normally — don't reconnect
-        break;
-      } catch (err) {
-        if (!this.reconnect.enabled || this._stopped) {
-          throw err;
+    try {
+      while (!this._stopped) {
+        // (Re-)establish pilot registration on every connect attempt so
+        // that a pilot daemon restart is picked up automatically.
+        let pilotId: string | undefined;
+        if (this.scalePolicy) {
+          try {
+            const pilot = await PilotClient.ensure(this.runtime, this.key);
+            lastPilot = pilot;
+            await pilot.register(this.casterId, this.scalePolicy);
+            pilotId = pilot.pilotId;
+          } catch (err) {
+            // Pilot failure is non-fatal — caster can still serve traffic.
+            // eslint-disable-next-line no-console
+            console.warn(`pilot registration failed: ${err}`);
+          }
         }
-        // Exponential backoff
-        await this._sleep(delay);
-        delay = Math.min(delay * this.reconnect.backoffMultiplier, this.reconnect.maxDelayMs);
+
+        try {
+          await this._connectAndRun(pilotId);
+          // Session ended normally — don't reconnect
+          break;
+        } catch (err) {
+          if (err instanceof AttachRejectedError) {
+            throw err;
+          }
+          if (!this.reconnect.enabled || this._stopped) {
+            throw err;
+          }
+          // Exponential backoff
+          await this._sleep(delay);
+          delay = Math.min(delay * this.reconnect.backoffMultiplier, this.reconnect.maxDelayMs);
+        }
+      }
+    } finally {
+      if (lastPilot) {
+        await lastPilot.deregister(this.casterId).catch(() => {});
       }
     }
   }
@@ -228,7 +281,9 @@ export class Caster {
   // gRPC session
   // -----------------------------------------------------------------------
 
-  private async _connectAndRun(): Promise<void> {
+  private async _connectAndRun(pilotId?: string): Promise<void> {
+    // Reset draining state from any previous shutdown cycle.
+    this._draining = false;
     const { RuneServiceClient } = loadProto();
 
     // Establish gRPC channel with API key metadata
@@ -240,7 +295,7 @@ export class Caster {
     this._activeStream = stream;
 
     // Build and send CasterAttach
-    stream.write(this._buildAttachMessage());
+    stream.write(this._buildAttachMessage(pilotId));
 
     // Heartbeat timer
     const heartbeatTimer = setInterval(() => {
@@ -250,6 +305,8 @@ export class Caster {
             timestamp_ms: String(Date.now()),
           },
         });
+        // Always send HealthReport regardless of scalePolicy
+        stream.write(this._buildHealthReport());
       }
     }, this.heartbeatIntervalMs);
 
@@ -262,15 +319,55 @@ export class Caster {
           if (!ack.accepted) {
             clearInterval(heartbeatTimer);
             stream.end();
-            reject(new Error(`Attach rejected: ${ack.reason}`));
+            reject(new AttachRejectedError(ack.reason));
+            return;
           }
-          // else: attached successfully, continue
+          // Always send initial HealthReport regardless of scalePolicy
+          stream.write(this._buildHealthReport());
+          // attached successfully, continue
         } else if (payload === 'execute') {
           this._handleExecute(msg.execute, stream);
         } else if (payload === 'cancel') {
           this._handleCancel(msg.cancel);
         } else if (payload === 'heartbeat') {
           // Server heartbeat — acknowledged silently
+        } else if (payload === 'shutdown') {
+          if (this._draining) return; // already draining — ignore duplicate shutdown
+          const graceMs = parseInt(msg.shutdown?.grace_period_ms ?? '0', 10);
+          // P0-3: Graceful shutdown — stop accepting new requests, then
+          // wait for in-flight requests to drain within grace_period_ms.
+          // eslint-disable-next-line no-console
+          console.info(
+            `shutdown requested: reason=${msg.shutdown?.reason ?? ''}, grace_period_ms=${graceMs}`,
+          );
+          this._draining = true;
+          // Immediately advertise UNHEALTHY so the runtime stops
+          // routing new work to this caster during the grace window.
+          stream.write(this._buildHealthReport());
+          const drainStart = Date.now();
+          const drainLoop = async () => {
+            while (this._activeRequests > 0) {
+              if (Date.now() - drainStart >= graceMs) {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  `grace period expired with ${this._activeRequests} active requests remaining`,
+                );
+                break;
+              }
+              await this._sleep(50);
+            }
+          };
+          drainLoop()
+            .then(() => {
+              this.stop();
+              // _draining stays true — caster is shutting down, no need to
+              // reset. run() sets _draining = false on the next reconnect.
+            })
+            .catch((err) => {
+              // eslint-disable-next-line no-console
+              console.error('drain loop error during shutdown:', err);
+              this.stop();
+            });
         }
       });
 
@@ -294,14 +391,64 @@ export class Caster {
    * Build the CasterAttach message object.
    * Extracted for testability — mirrors Rust SDK's build_attach_message().
    */
-  private _buildAttachMessage(): Record<string, unknown> {
+  private _buildAttachMessage(pilotId?: string): Record<string, unknown> {
     return {
       attach: {
         caster_id: this.casterId,
         runes: this._buildDeclarations(),
-        labels: this.labels,
+        labels: this._attachLabels(pilotId),
         max_concurrent: this.maxConcurrent,
         key: this.key || '',
+        role: 'caster',
+      },
+    };
+  }
+
+  private _attachLabels(pilotId?: string): Record<string, string> {
+    const labels: Record<string, string> = { ...this.labels };
+    if (this.scalePolicy) {
+      labels.group = this.scalePolicy.group;
+      labels._scale_up = String(this.scalePolicy.scaleUpThreshold ?? 0.8);
+      labels._scale_down = String(this.scalePolicy.scaleDownThreshold ?? 0.2);
+      labels._sustained = String(this.scalePolicy.sustainedSecs ?? 30);
+      labels._min = String(this.scalePolicy.minReplicas ?? 1);
+      labels._max = String(this.scalePolicy.maxReplicas ?? 1);
+      labels._spawn_command = this.scalePolicy.spawnCommand;
+      labels._shutdown_signal = this.scalePolicy.shutdownSignal ?? 'SIGTERM';
+      if (pilotId) {
+        labels._pilot_id = pilotId;
+      }
+    }
+    return labels;
+  }
+
+  private _buildHealthReport(): Record<string, unknown> {
+    const userMetrics = this.loadReport?.metrics ?? {};
+    const metrics: Record<string, number> = { ...userMetrics };
+    if (!('active_requests' in metrics)) {
+      metrics.active_requests = this._activeRequests;
+    }
+    if (!('max_concurrent' in metrics)) {
+      metrics.max_concurrent = this.maxConcurrent;
+    }
+    if (!('available_permits' in metrics)) {
+      metrics.available_permits = Math.max(0, this.maxConcurrent - this._activeRequests);
+    }
+    const computedPressure =
+      this.maxConcurrent === 0 ? 0 : this._activeRequests / this.maxConcurrent;
+    const pressure = this.loadReport?.pressure != null
+      ? this.loadReport.pressure
+      : computedPressure;
+    return {
+      health_report: {
+        status: this._draining ? 'HEALTH_STATUS_UNHEALTHY' : 'HEALTH_STATUS_HEALTHY',
+        active_requests: this._activeRequests,
+        error_rate: 0,
+        custom_info: '',
+        timestamp_ms: String(Date.now()),
+        error_rate_window_secs: 0,
+        pressure,
+        metrics,
       },
     };
   }
@@ -345,6 +492,21 @@ export class Caster {
   // -----------------------------------------------------------------------
 
   private _handleExecute(req: any, stream: grpc.ClientDuplexStream<any, any>): void {
+    // P0-3: Reject new requests while draining for graceful shutdown.
+    if (this._draining) {
+      stream.write({
+        result: {
+          request_id: req.request_id,
+          status: 'STATUS_FAILED',
+          error: {
+            code: 'SHUTTING_DOWN',
+            message: 'caster is draining, no new requests accepted',
+          },
+        },
+      });
+      return;
+    }
+
     const registered = this._runes.get(req.rune_name);
 
     if (!registered) {
@@ -364,6 +526,7 @@ export class Caster {
     // AbortController for cancellation
     const ac = new AbortController();
     this._abortControllers.set(req.request_id, ac);
+    this._activeRequests += 1;
 
     // Build context
     const attachments: FileAttachment[] = (req.attachments ?? []).map((a: any) => ({
@@ -394,10 +557,12 @@ export class Caster {
     if (registered.isStream) {
       this._executeStream(registered, ctx, req, stream, input).finally(() => {
         this._abortControllers.delete(req.request_id);
+        this._activeRequests = Math.max(0, this._activeRequests - 1);
       });
     } else {
       this._executeOnce(registered, ctx, req, stream, input).finally(() => {
         this._abortControllers.delete(req.request_id);
+        this._activeRequests = Math.max(0, this._activeRequests - 1);
       });
     }
   }

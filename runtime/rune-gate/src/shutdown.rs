@@ -1,10 +1,16 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::Arc;
 
 /// Coordinates graceful shutdown across the gate layer.
 #[derive(Clone)]
 pub struct ShutdownCoordinator {
     draining: Arc<AtomicBool>,
+}
+
+impl Default for ShutdownCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ShutdownCoordinator {

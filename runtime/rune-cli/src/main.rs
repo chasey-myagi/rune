@@ -1,15 +1,14 @@
 use clap::Parser;
-use rune_cli::{Cli, Commands, ConfigCommands, FlowCommands, KeyCommands, TaskCommands};
+use rune_cli::{
+    Cli, Commands, ConfigCommands, FlowCommands, KeyCommands, PilotCommands, TaskCommands,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Resolve base URL
-    let base_url = cli
-        .remote
-        .as_deref()
-        .unwrap_or("http://127.0.0.1:50060");
+    let base_url = cli.remote.as_deref().unwrap_or("http://127.0.0.1:50060");
 
     let api_key = std::env::var("RUNE_KEY").ok();
     let client = rune_cli::client::RuneClient::new(base_url, api_key.as_deref());
@@ -25,18 +24,14 @@ async fn main() -> anyhow::Result<()> {
             grpc_port,
             foreground,
         } => {
-            rune_cli::commands::start::run(dev, binary, image, tag, http_port, grpc_port, foreground)
-                .await
+            rune_cli::commands::start::run(
+                dev, binary, image, tag, http_port, grpc_port, foreground,
+            )
+            .await
         }
-        Commands::Stop { force, timeout } => {
-            rune_cli::commands::stop::run(force, timeout).await
-        }
-        Commands::Status => {
-            rune_cli::commands::status::run(&client, json_mode).await
-        }
-        Commands::List => {
-            rune_cli::commands::list::run(&client, json_mode).await
-        }
+        Commands::Stop { force, timeout } => rune_cli::commands::stop::run(force, timeout).await,
+        Commands::Status => rune_cli::commands::status::run(&client, json_mode).await,
+        Commands::List => rune_cli::commands::list::run(&client, json_mode).await,
         Commands::Call {
             name,
             input,
@@ -61,7 +56,11 @@ async fn main() -> anyhow::Result<()> {
             TaskCommands::Get { id } => {
                 rune_cli::commands::task::get(&client, &id, json_mode).await
             }
-            TaskCommands::List { status, rune, limit } => {
+            TaskCommands::List {
+                status,
+                rune,
+                limit,
+            } => {
                 rune_cli::commands::task::list(
                     &client,
                     status.as_deref(),
@@ -79,6 +78,13 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Casters => rune_cli::commands::casters::run(&client, json_mode).await,
+        Commands::Pilot(cmd) => match cmd {
+            PilotCommands::Daemon { runtime } => {
+                rune_cli::commands::pilot::run_daemon(&runtime, json_mode).await
+            }
+            PilotCommands::Status => rune_cli::commands::pilot::status(json_mode).await,
+            PilotCommands::Stop => rune_cli::commands::pilot::stop(json_mode).await,
+        },
         Commands::Key(cmd) => match cmd {
             KeyCommands::Create { key_type, label } => {
                 rune_cli::commands::key::create(&client, &key_type, &label, json_mode).await
@@ -87,6 +93,11 @@ async fn main() -> anyhow::Result<()> {
             KeyCommands::Revoke { key_id } => {
                 rune_cli::commands::key::revoke(&client, &key_id, json_mode).await
             }
+            KeyCommands::Bootstrap {
+                label,
+                db_path,
+                force,
+            } => rune_cli::commands::key::bootstrap(&db_path, &label, force, json_mode).await,
         },
         Commands::Flow(cmd) => match cmd {
             FlowCommands::Register { file } => {
@@ -103,10 +114,7 @@ async fn main() -> anyhow::Result<()> {
                 rune_cli::commands::flow::delete(&client, &name, json_mode).await
             }
         },
-        Commands::Logs {
-            rune,
-            limit,
-        } => {
+        Commands::Logs { rune, limit } => {
             rune_cli::commands::logs::run(&client, rune.as_deref(), limit, json_mode).await
         }
         Commands::Stats => rune_cli::commands::logs::stats(&client, json_mode).await,

@@ -1,10 +1,11 @@
+use crate::dag::{topological_layers, validate_dag, DagError, FlowDefinition};
 use bytes::Bytes;
-use std::collections::HashMap;
-use std::sync::Arc;
-use rune_core::rune::{RuneContext, RuneError};
 use rune_core::relay::Relay;
 use rune_core::resolver::Resolver;
-use crate::dag::{FlowDefinition, DagError, validate_dag, topological_layers};
+use rune_core::rune::{RuneContext, RuneError};
+use rune_core::trace;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Step 执行状态
 #[derive(Debug, Clone)]
@@ -72,7 +73,11 @@ impl FlowEngine {
     }
 
     /// Create a FlowEngine with a custom step timeout.
-    pub fn with_timeout(relay: Arc<Relay>, resolver: Arc<dyn Resolver>, step_timeout: std::time::Duration) -> Self {
+    pub fn with_timeout(
+        relay: Arc<Relay>,
+        resolver: Arc<dyn Resolver>,
+        step_timeout: std::time::Duration,
+    ) -> Self {
         Self {
             flows: HashMap::new(),
             relay,
@@ -104,23 +109,66 @@ impl FlowEngine {
         self.flows.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Check if any existing flow (other than `exclude_name`) uses the given gate_path.
+    /// Returns the name of the conflicting flow, if any.
+    pub fn find_by_gate_path(&self, gate_path: &str, exclude_name: &str) -> Option<&str> {
+        self.flows.values().find_map(|f| {
+            if f.name != exclude_name {
+                if let Some(ref gp) = f.gate_path {
+                    if gp == gate_path {
+                        return Some(f.name.as_str());
+                    }
+                }
+            }
+            None
+        })
+    }
+
     pub fn remove(&mut self, name: &str) -> bool {
         self.flows.remove(name).is_some()
     }
 
     pub async fn execute(&self, flow_name: &str, input: Bytes) -> Result<FlowResult, FlowError> {
+        self.execute_with_context(flow_name, input, HashMap::new(), None)
+            .await
+    }
+
+    pub async fn execute_with_context(
+        &self,
+        flow_name: &str,
+        input: Bytes,
+        parent_context: HashMap<String, String>,
+        flow_request_id: Option<String>,
+    ) -> Result<FlowResult, FlowError> {
         let flow = self
             .flows
             .get(flow_name)
             .ok_or_else(|| FlowError::FlowNotFound(flow_name.to_string()))?
             .clone();
-        self.execute_flow(&flow, input).await
+        self.execute_flow_with_context(&flow, input, parent_context, flow_request_id)
+            .await
     }
 
     /// Execute a pre-fetched FlowDefinition without looking it up from the
     /// internal registry.  Delegates to [`FlowRunner::execute_flow`].
-    pub async fn execute_flow(&self, flow: &FlowDefinition, input: Bytes) -> Result<FlowResult, FlowError> {
+    pub async fn execute_flow(
+        &self,
+        flow: &FlowDefinition,
+        input: Bytes,
+    ) -> Result<FlowResult, FlowError> {
         self.runner().execute_flow(flow, input).await
+    }
+
+    pub async fn execute_flow_with_context(
+        &self,
+        flow: &FlowDefinition,
+        input: Bytes,
+        parent_context: HashMap<String, String>,
+        flow_request_id: Option<String>,
+    ) -> Result<FlowResult, FlowError> {
+        self.runner()
+            .execute_flow_with_context(flow, input, parent_context, flow_request_id)
+            .await
     }
 }
 
@@ -130,8 +178,22 @@ impl FlowRunner {
     /// This is the core execution logic.  Because `FlowRunner` only holds
     /// cheap `Arc` clones, callers can drop the engine lock before calling
     /// this method.
-    pub async fn execute_flow(&self, flow: &FlowDefinition, input: Bytes) -> Result<FlowResult, FlowError> {
+    pub async fn execute_flow(
+        &self,
+        flow: &FlowDefinition,
+        input: Bytes,
+    ) -> Result<FlowResult, FlowError> {
+        self.execute_flow_with_context(flow, input, HashMap::new(), None)
+            .await
+    }
 
+    pub async fn execute_flow_with_context(
+        &self,
+        flow: &FlowDefinition,
+        input: Bytes,
+        mut parent_context: HashMap<String, String>,
+        flow_request_id: Option<String>,
+    ) -> Result<FlowResult, FlowError> {
         // 空 flow: passthrough
         if flow.steps.is_empty() {
             return Ok(FlowResult {
@@ -141,6 +203,14 @@ impl FlowRunner {
             });
         }
 
+        trace::ensure_trace_defaults(&mut parent_context);
+        let flow_request_id =
+            flow_request_id.unwrap_or_else(rune_core::time_utils::unique_request_id);
+        let flow_span_id = parent_context
+            .get(trace::SPAN_ID_KEY)
+            .cloned()
+            .unwrap_or_else(rune_core::time_utils::generate_span_id);
+
         let layers = topological_layers(flow)?;
 
         // step name → output bytes (完成后)
@@ -149,8 +219,7 @@ impl FlowRunner {
         let mut steps_executed: usize = 0;
 
         // 解析 flow 原始输入为 JSON（用于 $input 引用和 condition 上下文）
-        let flow_input_json: Option<serde_json::Value> =
-            serde_json::from_slice(&input).ok();
+        let flow_input_json: Option<serde_json::Value> = serde_json::from_slice(&input).ok();
 
         for layer in &layers {
             // 检查该层是否有上游失败
@@ -158,7 +227,10 @@ impl FlowRunner {
             for &step_idx in layer {
                 let step_def = &flow.steps[step_idx];
                 for dep in &step_def.depends_on {
-                    if matches!(step_statuses.get(dep.as_str()), Some(StepStatus::Failed { .. })) {
+                    if matches!(
+                        step_statuses.get(dep.as_str()),
+                        Some(StepStatus::Failed { .. })
+                    ) {
                         has_failed_upstream = true;
                         break;
                     }
@@ -225,12 +297,8 @@ impl FlowRunner {
                 let step_def = &flow.steps[step_idx];
 
                 // 构造 step input
-                let step_input = Self::build_step_input(
-                    step_def,
-                    &input,
-                    &step_outputs,
-                    &flow_input_json,
-                )?;
+                let step_input =
+                    Self::build_step_input(step_def, &input, &step_outputs, &flow_input_json)?;
 
                 // Resolve rune invoker
                 let invoker = self.relay.resolve(&step_def.rune, self.resolver.as_ref());
@@ -241,11 +309,23 @@ impl FlowRunner {
                 match invoker {
                     Some(inv) => {
                         let timeout = self.step_timeout;
+                        let parent_context = parent_context.clone();
+                        let flow_request_id = flow_request_id.clone();
+                        let flow_span_id = flow_span_id.clone();
                         join_set.spawn(async move {
+                            let mut step_context = parent_context;
+                            step_context
+                                .insert(trace::PARENT_REQUEST_ID_KEY.to_string(), flow_request_id);
+                            step_context
+                                .insert(trace::PARENT_SPAN_ID_KEY.to_string(), flow_span_id);
+                            step_context.insert(
+                                trace::SPAN_ID_KEY.to_string(),
+                                rune_core::time_utils::generate_span_id(),
+                            );
                             let ctx = RuneContext {
                                 rune_name: rune_name.clone(),
                                 request_id: uuid_simple(),
-                                context: Default::default(),
+                                context: step_context,
                                 timeout,
                             };
                             match inv.invoke_once(ctx, si).await {
@@ -256,9 +336,8 @@ impl FlowRunner {
                     }
                     None => {
                         // Rune not found
-                        join_set.spawn(async move {
-                            Err((step_idx, RuneError::NotFound(rune_name)))
-                        });
+                        join_set
+                            .spawn(async move { Err((step_idx, RuneError::NotFound(rune_name))) });
                     }
                 }
             }
@@ -416,9 +495,8 @@ fn resolve_path(
 
         // 获取 step output
         let step_output = match step_outputs.get(step_name) {
-            Some(Some(bytes)) => {
-                serde_json::from_slice::<serde_json::Value>(bytes).unwrap_or(serde_json::Value::Null)
-            }
+            Some(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(bytes)
+                .unwrap_or(serde_json::Value::Null),
             Some(None) => serde_json::Value::Null, // skipped step
             None => serde_json::Value::Null,
         };
@@ -475,7 +553,8 @@ pub fn evaluate_condition(
 
     // 解析简单的比较表达式: lhs operator rhs
     // 支持: steps.X.output.field == value, steps.X.output.field > value 等
-    if let Some(result) = evaluate_comparison(trimmed, step_statuses, step_outputs, flow_input_json) {
+    if let Some(result) = evaluate_comparison(trimmed, step_statuses, step_outputs, flow_input_json)
+    {
         return result;
     }
 
@@ -530,18 +609,16 @@ fn resolve_condition_value(
         return resolve_path(path, step_outputs, flow_input_json);
     }
 
-    if path.starts_with("input.") {
+    if let Some(field_path) = path.strip_prefix("input.") {
         // "input.x" → flow 原始输入的 x 字段
-        let field_path = &path["input.".len()..];
         if let Some(input_val) = flow_input_json {
             return resolve_json_path(input_val, field_path);
         }
         return serde_json::Value::Null;
     }
 
-    if path.starts_with("steps.") {
+    if let Some(rest) = path.strip_prefix("steps.") {
         // "steps.A.output.field" → step A 的 output 的 field
-        let rest = &path["steps.".len()..];
         // rest = "A.output.field"
         let parts: Vec<&str> = rest.splitn(3, '.').collect();
         if parts.is_empty() {
@@ -549,10 +626,8 @@ fn resolve_condition_value(
         }
         let step_name = parts[0];
         let step_output = match step_outputs.get(step_name) {
-            Some(Some(bytes)) => {
-                serde_json::from_slice::<serde_json::Value>(bytes)
-                    .unwrap_or(serde_json::Value::Null)
-            }
+            Some(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(bytes)
+                .unwrap_or(serde_json::Value::Null),
             _ => serde_json::Value::Null,
         };
 
@@ -603,18 +678,15 @@ fn compare_values(lhs: &serde_json::Value, rhs: &serde_json::Value, op: &str) ->
     match op {
         "==" => lhs == rhs,
         "!=" => lhs != rhs,
-        ">" => compare_numeric(lhs, rhs).map_or(false, |ord| ord == std::cmp::Ordering::Greater),
-        "<" => compare_numeric(lhs, rhs).map_or(false, |ord| ord == std::cmp::Ordering::Less),
-        ">=" => compare_numeric(lhs, rhs).map_or(false, |ord| ord != std::cmp::Ordering::Less),
-        "<=" => compare_numeric(lhs, rhs).map_or(false, |ord| ord != std::cmp::Ordering::Greater),
+        ">" => compare_numeric(lhs, rhs).is_some_and(|ord| ord == std::cmp::Ordering::Greater),
+        "<" => compare_numeric(lhs, rhs).is_some_and(|ord| ord == std::cmp::Ordering::Less),
+        ">=" => compare_numeric(lhs, rhs).is_some_and(|ord| ord != std::cmp::Ordering::Less),
+        "<=" => compare_numeric(lhs, rhs).is_some_and(|ord| ord != std::cmp::Ordering::Greater),
         _ => false,
     }
 }
 
-fn compare_numeric(
-    lhs: &serde_json::Value,
-    rhs: &serde_json::Value,
-) -> Option<std::cmp::Ordering> {
+fn compare_numeric(lhs: &serde_json::Value, rhs: &serde_json::Value) -> Option<std::cmp::Ordering> {
     let l = as_f64(lhs)?;
     let r = as_f64(rhs)?;
     l.partial_cmp(&r)
@@ -629,11 +701,7 @@ fn as_f64(v: &serde_json::Value) -> Option<f64> {
 
 /// 生成简单的请求 ID（时间戳 + 单调计数器，保证并行 step 不重复）
 fn uuid_simple() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let ts = rune_core::time_utils::now_ms();
-    format!("req-{:x}-{:x}", ts, seq)
+    rune_core::time_utils::unique_request_id()
 }
 
 #[cfg(test)]
@@ -659,16 +727,11 @@ mod tests {
 
         let flow_input = Bytes::from(r#"{"field1": "hello", "field2": 42}"#);
         let step_outputs: HashMap<String, Option<Bytes>> = HashMap::new();
-        let flow_input_json: Option<serde_json::Value> =
-            serde_json::from_slice(&flow_input).ok();
+        let flow_input_json: Option<serde_json::Value> = serde_json::from_slice(&flow_input).ok();
 
         // 修复前这里用 unwrap()，修复后返回 Result
-        let result = FlowRunner::build_step_input(
-            &step_def,
-            &flow_input,
-            &step_outputs,
-            &flow_input_json,
-        );
+        let result =
+            FlowRunner::build_step_input(&step_def, &flow_input, &step_outputs, &flow_input_json);
         assert!(result.is_ok(), "build_step_input should return Ok");
 
         let output = result.unwrap();
@@ -690,15 +753,10 @@ mod tests {
 
         let flow_input = Bytes::from(r#"{"data": "test"}"#);
         let step_outputs: HashMap<String, Option<Bytes>> = HashMap::new();
-        let flow_input_json: Option<serde_json::Value> =
-            serde_json::from_slice(&flow_input).ok();
+        let flow_input_json: Option<serde_json::Value> = serde_json::from_slice(&flow_input).ok();
 
-        let result = FlowRunner::build_step_input(
-            &step_def,
-            &flow_input,
-            &step_outputs,
-            &flow_input_json,
-        );
+        let result =
+            FlowRunner::build_step_input(&step_def, &flow_input, &step_outputs, &flow_input_json);
         assert!(result.is_ok());
         // 无依赖无 mapping，应该 passthrough flow input
         assert_eq!(result.unwrap(), flow_input);

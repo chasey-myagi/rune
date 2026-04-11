@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaError {
@@ -31,8 +31,8 @@ fn get_or_compile(schema_str: &str) -> Result<Arc<jsonschema::Validator>, Schema
     }
 
     // Slow path: compile and insert with write lock
-    let schema_value: serde_json::Value = serde_json::from_str(schema_str)
-        .map_err(|e| SchemaError::InvalidSchema(e.to_string()))?;
+    let schema_value: serde_json::Value =
+        serde_json::from_str(schema_str).map_err(|e| SchemaError::InvalidSchema(e.to_string()))?;
     let validator = jsonschema::validator_for(&schema_value)
         .map_err(|e| SchemaError::InvalidSchema(e.to_string()))?;
     let v = Arc::new(validator);
@@ -74,8 +74,8 @@ fn do_validate(schema: Option<&str>, data: &[u8]) -> Result<(), SchemaError> {
     let validator = get_or_compile(schema_str)?;
 
     // Parse input data as JSON
-    let instance: serde_json::Value = serde_json::from_slice(data)
-        .map_err(|e| SchemaError::ValidationFailed {
+    let instance: serde_json::Value =
+        serde_json::from_slice(data).map_err(|e| SchemaError::ValidationFailed {
             message: format!("invalid JSON: {}", e),
             path: String::new(),
         })?;

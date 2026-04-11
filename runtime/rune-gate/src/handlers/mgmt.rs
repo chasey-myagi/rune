@@ -1,8 +1,8 @@
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
 };
 
 use crate::error::error_response;
@@ -56,7 +56,8 @@ pub async fn health(State(state): State<GateState>) -> axum::response::Response 
 
 pub async fn list_runes(State(state): State<GateState>) -> impl IntoResponse {
     let runes: Vec<serde_json::Value> = state
-        .rune.relay
+        .rune
+        .relay
         .list()
         .into_iter()
         .map(|(name, gate_path)| serde_json::json!({"name": name, "gate_path": gate_path}))
@@ -85,7 +86,7 @@ pub async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
         std::collections::HashMap::new();
     for (name, _) in state.rune.relay.list() {
         if let Some(entries) = state.rune.relay.find(&name) {
-            for e in entries.value() {
+            for e in entries.value().values() {
                 if let Some(ref cid) = e.caster_id {
                     caster_runes
                         .entry(cid.clone())
@@ -100,13 +101,27 @@ pub async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
         .iter()
         .map(|cid| {
             let runes = caster_runes.remove(cid.as_str()).unwrap_or_default();
-            let current_load = state.rune.session_mgr.available_permits(cid);
+            let available_permits = state.rune.session_mgr.available_permits(cid);
+            let max_concurrent = state.rune.session_mgr.max_concurrent(cid);
+            let health = state.rune.session_mgr.health_info(cid).unwrap_or_default();
+            let role = state
+                .rune
+                .session_mgr
+                .caster_role(cid)
+                .unwrap_or(rune_core::session::CasterRole::Caster);
             serde_json::json!({
                 "caster_id": cid,
                 "runes": runes,
-                "current_load": current_load,
+                "role": role.as_str(),
+                "max_concurrent": max_concurrent,
+                "available_permits": available_permits,
+                "pressure": health.pressure,
+                "metrics": health.metrics,
+                "health_status": format!("{:?}", health.status).to_uppercase(),
                 "connected_since": state.rune.session_mgr.connected_at(cid)
                     .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0),
+                "session_generation": state.rune.session_mgr.session_generation(cid)
                     .unwrap_or(0),
             })
         })
@@ -135,26 +150,54 @@ pub async fn mgmt_stats(State(state): State<GateState>) -> impl IntoResponse {
             }))
             .into_response()
         }
-        Err(e) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }
 
+pub async fn mgmt_caster_stats(State(state): State<GateState>) -> impl IntoResponse {
+    match state.admin.store.call_stats_by_caster().await {
+        Ok(stats) => Json(serde_json::json!({ "casters": stats })).into_response(),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
+    }
+}
+
+pub async fn mgmt_scaling_status(State(state): State<GateState>) -> impl IntoResponse {
+    let groups = state
+        .admin
+        .scaling
+        .as_ref()
+        .map(|scaling| scaling.snapshot_status())
+        .unwrap_or_default();
+    Json(serde_json::json!({ "groups": groups })).into_response()
+}
 
 pub async fn mgmt_logs(
     State(state): State<GateState>,
     Query(params): Query<LogQuery>,
 ) -> impl IntoResponse {
     let limit = params.limit.unwrap_or(50).min(500);
-    match state.admin.store.query_logs(params.rune.as_deref(), limit).await {
+    match state
+        .admin
+        .store
+        .query_logs(params.rune.as_deref(), limit)
+        .await
+    {
         Ok(logs) => Json(serde_json::json!({"logs": logs})).into_response(),
-        Err(e) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }
-
 
 pub async fn mgmt_create_key(
     State(state): State<GateState>,
@@ -187,9 +230,11 @@ pub async fn mgmt_create_key(
             })),
         )
             .into_response(),
-        Err(e) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }
 
@@ -203,9 +248,11 @@ pub async fn mgmt_list_keys(
 
     match state.admin.store.list_keys().await {
         Ok(keys) => Json(serde_json::json!({"keys": keys})).into_response(),
-        Err(e) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }
 
@@ -220,8 +267,10 @@ pub async fn mgmt_revoke_key(
 
     match state.admin.store.revoke_key(id).await {
         Ok(()) => Json(serde_json::json!({"status": "revoked", "id": id})).into_response(),
-        Err(e) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", &e.to_string())
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &e.to_string(),
+        ),
     }
 }

@@ -32,7 +32,7 @@ Authorization: Bearer rk_xxxxxxxxxxxxxxxx
 
 ## Rune 调用
 
-### `POST /api/v1/runes/:name/run`
+### `POST /api/v1/runes/{name}/run`
 
 通过 debug 端点调用指定 Rune。适用于没有声明 `gate.path` 的 Rune。
 
@@ -113,7 +113,7 @@ data: error message
 
 ### `{gate_path}` -- 动态业务路由
 
-Rune 声明 `gate.path` 后自动注册为真实 HTTP 路由。行为与 `/api/v1/runes/:name/run` 完全一致，支持同样的查询参数和请求头。
+Rune 声明 `gate.path` 后自动注册为真实 HTTP 路由。行为与 `/api/v1/runes/{name}/run` 完全一致，支持同样的查询参数和请求头。
 
 **示例**: Rune 声明 `gate.path = "/translate"` 后：
 ```
@@ -156,7 +156,7 @@ POST /translate?async=true   -- 异步任务
 }
 ```
 
-### `GET /api/v1/tasks/:id`
+### `GET /api/v1/tasks/{id}`
 
 查询异步任务状态。
 
@@ -184,7 +184,7 @@ POST /translate?async=true   -- 异步任务
 
 **status 取值**: `pending` | `running` | `completed` | `failed` | `cancelled`
 
-### `DELETE /api/v1/tasks/:id`
+### `DELETE /api/v1/tasks/{id}`
 
 取消运行中的异步任务。
 
@@ -247,16 +247,69 @@ POST /translate?async=true   -- 异步任务
     {
       "caster_id": "python-caster-1",
       "runes": ["translate", "summarize"],
-      "current_load": 8,
+      "role": "caster",
+      "max_concurrent": 10,
+      "available_permits": 8,
+      "pressure": 0.2,
+      "metrics": {
+        "active_requests": 2,
+        "max_concurrent": 10,
+        "available_permits": 8
+      },
+      "health_status": "HEALTHY",
       "connected_since": 3600
     }
   ]
 }
 ```
 
+`available_permits` 取代旧的 `current_load` 字段名；同时新增 `role`、`max_concurrent`、`pressure`、`metrics`、`health_status`。
+
 ### `GET /api/v1/stats`
 
 查看调用统计。
+
+### `GET /api/v1/stats/casters`
+
+查看按 Caster 聚合的调用统计。
+
+**响应**: `200 OK`
+
+```json
+{
+  "casters": [
+    {
+      "caster_id": "python-caster-1",
+      "count": 128,
+      "avg_latency_ms": 42,
+      "success_rate": 0.992,
+      "p95_latency_ms": 91.0
+    }
+  ]
+}
+```
+
+### `GET /api/v1/scaling/status`
+
+查看 Runtime 自动扩缩容评估状态。
+
+**响应**: `200 OK`
+
+```json
+{
+  "groups": [
+    {
+      "group_id": "gpu",
+      "current_replicas": 2,
+      "desired_replicas": 3,
+      "average_pressure": 0.91,
+      "action": "scale_up",
+      "reason": "pressure 0.910 exceeded threshold 0.800",
+      "pilot_id": "pilot-12345"
+    }
+  ]
+}
+```
 
 **响应**: `200 OK`
 
@@ -365,7 +418,7 @@ POST /translate?async=true   -- 异步任务
 }
 ```
 
-### `DELETE /api/v1/keys/:id`
+### `DELETE /api/v1/keys/{id}`
 
 吊销 API Key。吊销后该 Key 立即失效。**需要 admin key。**
 
@@ -394,7 +447,7 @@ POST /translate?async=true   -- 异步任务
 
 ## 文件下载
 
-### `GET /api/v1/files/:id`
+### `GET /api/v1/files/{id}`
 
 下载通过 multipart 上传的文件。
 
@@ -465,7 +518,7 @@ POST /translate?async=true   -- 异步任务
 ]
 ```
 
-### `GET /api/v1/flows/:name`
+### `GET /api/v1/flows/{name}`
 
 获取 Flow 详情。
 
@@ -473,7 +526,7 @@ POST /translate?async=true   -- 异步任务
 - `200 OK` -- 返回完整 flow 定义
 - `404 FLOW_NOT_FOUND`
 
-### `DELETE /api/v1/flows/:name`
+### `DELETE /api/v1/flows/{name}`
 
 删除 Flow。
 
@@ -481,7 +534,7 @@ POST /translate?async=true   -- 异步任务
 - `204 No Content`
 - `404 FLOW_NOT_FOUND`
 
-### `POST /api/v1/flows/:name/run`
+### `POST /api/v1/flows/{name}/run`
 
 执行 Flow。支持与 Rune 调用相同的三种模式。
 
@@ -535,25 +588,49 @@ data: [DONE]
 {
   "error": {
     "code": "NOT_FOUND",
-    "message": "rune 'xyz' not found"
+    "message": "rune 'xyz' not found",
+    "request_id": "req-abc123"
   }
 }
 ```
 
-常见错误码：
+`request_id` 在可用时返回（来自请求头 `X-Request-Id` 或自动生成），便于全链路问题追踪。
+
+### Rune 调用错误码
 
 | 状态码 | 错误码 | 说明 |
 |--------|--------|------|
 | 400 | BAD_REQUEST | 请求体读取失败或参数错误 |
+| 400 | INVALID_INPUT | 无效输入格式 |
 | 400 | STREAM_NOT_SUPPORTED | Rune 不支持流式调用 |
-| 401 | UNAUTHORIZED | 认证失败 |
+| 401 | UNAUTHORIZED | 认证失败（Key 无效或缺失） |
+| 403 | FORBIDDEN | 权限不足（Key 类型不匹配等） |
 | 404 | NOT_FOUND | Rune/Task/File 不存在 |
-| 404 | FLOW_NOT_FOUND | Flow 不存在 |
-| 409 | CONFLICT | 资源冲突（Flow 名重复、任务已完成） |
+| 409 | CONFLICT | 资源冲突（任务已完成等） |
 | 422 | VALIDATION_FAILED | 输入 schema 校验失败 |
-| 422 | INVALID_INPUT | 无效输入格式 |
 | 429 | RATE_LIMITED | 请求频率超限 |
+| 499 | CANCELLED | 请求被取消（客户端断连） |
 | 500 | INTERNAL | 内部错误 |
+| 500 | EXECUTION_FAILED | Caster 执行失败（返回错误结果） |
 | 500 | OUTPUT_VALIDATION_FAILED | 输出 schema 校验失败 |
-| 503 | NO_MATCHING_CASTER | 标签路由无匹配 Caster |
 | 503 | UNAVAILABLE | Caster 并发已满 |
+| 503 | NO_MATCHING_CASTER | 标签路由无匹配 Caster |
+| 503 | CIRCUIT_OPEN | 目标 Caster 断路器处于 Open 状态 |
+| 504 | TIMEOUT | 请求超时（Caster 执行超时） |
+
+### Flow API 错误码
+
+| 状态码 | 错误码 | 说明 |
+|--------|--------|------|
+| 400 | DAG_ERROR | DAG 拓扑错误（循环依赖、缺失步骤等） |
+| 401 | STEP_UNAUTHORIZED | Flow 步骤认证失败 |
+| 403 | STEP_FORBIDDEN | Flow 步骤权限不足 |
+| 404 | FLOW_NOT_FOUND | Flow 不存在 |
+| 409 | CONFLICT | Flow 名重复 |
+| 429 | STEP_RATE_LIMITED | Flow 步骤触发频率限制 |
+| 500 | STEP_FAILED | Flow 步骤执行失败（通用） |
+| 500 | NO_TERMINAL_STEP | Flow 无终止步骤（内部错误） |
+| 500 | SERIALIZATION_FAILED | Flow 步骤间数据序列化失败 |
+| 503 | STEP_UNAVAILABLE | Flow 步骤目标 Caster 不可用 |
+| 503 | STEP_CIRCUIT_OPEN | Flow 步骤目标断路器 Open |
+| 504 | STEP_TIMEOUT | Flow 步骤执行超时 |

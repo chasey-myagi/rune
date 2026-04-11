@@ -32,7 +32,7 @@ impl KeyType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "caster" => Some(KeyType::Caster),
             "gate" => Some(KeyType::Gate),
@@ -77,7 +77,7 @@ impl TaskStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(TaskStatus::Pending),
             "running" => Some(TaskStatus::Running),
@@ -102,6 +102,15 @@ pub struct CallLog {
     pub input_size: i64,
     pub output_size: i64,
     pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CasterCallStats {
+    pub caster_id: String,
+    pub count: i64,
+    pub avg_latency_ms: i64,
+    pub success_rate: f64,
+    pub p95_latency_ms: f64,
 }
 
 /// Rune snapshot — latest known state of a registered rune.

@@ -50,20 +50,22 @@ fn test_no_runes_empty_paths() {
     let openapi = generate_openapi(&[]);
 
     // Must have required OpenAPI 3.0 top-level fields
-    assert_eq!(openapi["openapi"].as_str().unwrap(), "3.0.0",
-        "should be OpenAPI 3.0.0");
-    assert!(openapi["info"].is_object(),
-        "must have info object");
-    assert!(openapi["info"]["title"].is_string(),
-        "info must have title");
-    assert!(openapi["info"]["version"].is_string(),
-        "info must have version");
+    assert_eq!(
+        openapi["openapi"].as_str().unwrap(),
+        "3.0.0",
+        "should be OpenAPI 3.0.0"
+    );
+    assert!(openapi["info"].is_object(), "must have info object");
+    assert!(openapi["info"]["title"].is_string(), "info must have title");
+    assert!(
+        openapi["info"]["version"].is_string(),
+        "info must have version"
+    );
 
     // paths should be empty or an empty object
     let paths = &openapi["paths"];
     assert!(paths.is_object(), "paths must be an object");
-    assert_eq!(paths.as_object().unwrap().len(), 0,
-        "no runes = no paths");
+    assert_eq!(paths.as_object().unwrap().len(), 0, "no runes = no paths");
 }
 
 #[test]
@@ -84,29 +86,32 @@ fn test_one_rune_with_schema() {
 
     // Verify path exists
     let paths = &openapi["paths"];
-    assert!(paths["/echo"].is_object(),
-        "path /echo should exist in paths");
+    assert!(
+        paths["/echo"].is_object(),
+        "path /echo should exist in paths"
+    );
 
     // Verify method
     let post = &paths["/echo"]["post"];
-    assert!(post.is_object(),
-        "/echo should have a 'post' operation");
+    assert!(post.is_object(), "/echo should have a 'post' operation");
 
     // Verify requestBody contains schema
     let request_body = &post["requestBody"];
-    assert!(request_body.is_object(),
-        "POST /echo should have requestBody");
+    assert!(
+        request_body.is_object(),
+        "POST /echo should have requestBody"
+    );
     let content = &request_body["content"]["application/json"]["schema"];
-    assert!(content.is_object(),
-        "requestBody should have application/json schema");
+    assert!(
+        content.is_object(),
+        "requestBody should have application/json schema"
+    );
 
     // Verify response schema
     let responses = &post["responses"];
-    assert!(responses["200"].is_object(),
-        "should have 200 response");
+    assert!(responses["200"].is_object(), "should have 200 response");
     let resp_schema = &responses["200"]["content"]["application/json"]["schema"];
-    assert!(resp_schema.is_object(),
-        "200 response should have schema");
+    assert!(resp_schema.is_object(), "200 response should have schema");
 
     // Verify description/summary
     assert!(
@@ -118,9 +123,30 @@ fn test_one_rune_with_schema() {
 #[test]
 fn test_multiple_runes_multiple_paths() {
     let runes = vec![
-        make_rune("echo", Some("/echo"), "POST", Some(user_schema()), None, "Echo"),
-        make_rune("translate", Some("/translate"), "POST", Some(user_schema()), Some(result_schema()), "Translate"),
-        make_rune("health-check", Some("/check"), "GET", None, Some(result_schema()), "Health"),
+        make_rune(
+            "echo",
+            Some("/echo"),
+            "POST",
+            Some(user_schema()),
+            None,
+            "Echo",
+        ),
+        make_rune(
+            "translate",
+            Some("/translate"),
+            "POST",
+            Some(user_schema()),
+            Some(result_schema()),
+            "Translate",
+        ),
+        make_rune(
+            "health-check",
+            Some("/check"),
+            "GET",
+            None,
+            Some(result_schema()),
+            "Health",
+        ),
     ];
 
     let openapi = generate_openapi(&runes);
@@ -149,7 +175,10 @@ fn test_rune_without_gate_path_excluded() {
 
     assert_eq!(paths.len(), 1, "only rune with gate_path should appear");
     assert!(paths.contains_key("/visible"), "should have /visible");
-    assert!(!paths.contains_key("/internal"), "internal should not appear");
+    assert!(
+        !paths.contains_key("/internal"),
+        "internal should not appear"
+    );
 }
 
 #[test]
@@ -158,20 +187,23 @@ fn test_rune_without_schema_has_path_but_no_request_body_schema() {
         "simple",
         Some("/simple"),
         "POST",
-        None,  // no input_schema
-        None,  // no output_schema
+        None, // no input_schema
+        None, // no output_schema
         "Simple rune",
     )];
 
     let openapi = generate_openapi(&runes);
 
     // Path should exist
-    assert!(openapi["paths"]["/simple"]["post"].is_object(),
-        "path should exist even without schema");
+    assert!(
+        openapi["paths"]["/simple"]["post"].is_object(),
+        "path should exist even without schema"
+    );
 
     // requestBody schema should be absent or empty
     let post = &openapi["paths"]["/simple"]["post"];
-    let has_request_body_schema = post["requestBody"]["content"]["application/json"]["schema"].is_object();
+    let has_request_body_schema =
+        post["requestBody"]["content"]["application/json"]["schema"].is_object();
     // When no input_schema, requestBody should either be absent or not have a specific schema
     assert!(
         !has_request_body_schema || post["requestBody"].is_null(),
@@ -190,12 +222,14 @@ fn test_rune_unregistered_removed_from_openapi() {
     assert_eq!(openapi_before["paths"].as_object().unwrap().len(), 2);
 
     // After "b" is unregistered
-    let runes_after = vec![
-        make_rune("a", Some("/a"), "POST", None, None, "Rune A"),
-    ];
+    let runes_after = vec![make_rune("a", Some("/a"), "POST", None, None, "Rune A")];
     let openapi_after = generate_openapi(&runes_after);
     let paths = openapi_after["paths"].as_object().unwrap();
-    assert_eq!(paths.len(), 1, "after unregistration, only 1 path should remain");
+    assert_eq!(
+        paths.len(),
+        1,
+        "after unregistration, only 1 path should remain"
+    );
     assert!(paths.contains_key("/a"), "rune A should still be present");
     assert!(!paths.contains_key("/b"), "rune B should be removed");
 }
@@ -215,13 +249,26 @@ fn test_valid_openapi_format() {
     let openapi = generate_openapi(&runes);
 
     // Mandatory fields per OpenAPI 3.0 spec
-    assert!(openapi["openapi"].is_string(), "must have 'openapi' version string");
+    assert!(
+        openapi["openapi"].is_string(),
+        "must have 'openapi' version string"
+    );
     let version = openapi["openapi"].as_str().unwrap();
-    assert!(version.starts_with("3."), "version should start with 3., got: {}", version);
+    assert!(
+        version.starts_with("3."),
+        "version should start with 3., got: {}",
+        version
+    );
 
     assert!(openapi["info"].is_object(), "must have 'info' object");
-    assert!(openapi["info"]["title"].is_string(), "info.title is required");
-    assert!(openapi["info"]["version"].is_string(), "info.version is required");
+    assert!(
+        openapi["info"]["title"].is_string(),
+        "info.title is required"
+    );
+    assert!(
+        openapi["info"]["version"].is_string(),
+        "info.version is required"
+    );
 
     assert!(openapi["paths"].is_object(), "must have 'paths' object");
 
@@ -238,8 +285,22 @@ fn test_valid_openapi_format() {
 fn test_same_path_different_methods() {
     // Two runes with the same path but different methods (GET vs POST)
     let runes = vec![
-        make_rune("reader", Some("/resource"), "GET", None, Some(result_schema()), "Read resource"),
-        make_rune("writer", Some("/resource"), "POST", Some(user_schema()), None, "Write resource"),
+        make_rune(
+            "reader",
+            Some("/resource"),
+            "GET",
+            None,
+            Some(result_schema()),
+            "Read resource",
+        ),
+        make_rune(
+            "writer",
+            Some("/resource"),
+            "POST",
+            Some(user_schema()),
+            None,
+            "Write resource",
+        ),
     ];
 
     let openapi = generate_openapi(&runes);
@@ -271,14 +332,16 @@ fn test_rune_description_in_operation() {
 #[test]
 fn test_many_runes_generates_many_paths() {
     let runes: Vec<RuneInfo> = (0..50)
-        .map(|i| make_rune(
-            &format!("rune_{}", i),
-            Some(&format!("/rune/{}", i)),
-            "POST",
-            None,
-            None,
-            &format!("Rune number {}", i),
-        ))
+        .map(|i| {
+            make_rune(
+                &format!("rune_{}", i),
+                Some(&format!("/rune/{}", i)),
+                "POST",
+                None,
+                None,
+                &format!("Rune number {}", i),
+            )
+        })
         .collect();
 
     let openapi = generate_openapi(&runes);

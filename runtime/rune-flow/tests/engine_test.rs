@@ -22,7 +22,8 @@ fn rune_config(name: &str) -> RuneConfig {
         gate: None,
         input_schema: None,
         output_schema: None,
-        priority: 0, labels: Default::default(),
+        priority: 0,
+        labels: Default::default(),
     }
 }
 
@@ -553,12 +554,7 @@ async fn condition_references_upstream_output() {
             "cond_ref",
             vec![
                 step("A", "step_a"),
-                step_with_condition(
-                    "B",
-                    "step_b",
-                    &["A"],
-                    "steps.A.output.a == true",
-                ),
+                step_with_condition("B", "step_b", &["A"], "steps.A.output.a == true"),
             ],
         ))
         .unwrap();
@@ -588,10 +584,7 @@ async fn single_upstream_default_passthrough() {
     engine
         .register(flow(
             "passthrough",
-            vec![
-                step("A", "step_a"),
-                step_with_deps("B", "step_b", &["A"]),
-            ],
+            vec![step("A", "step_a"), step_with_deps("B", "step_b", &["A"])],
         ))
         .unwrap();
 
@@ -753,10 +746,7 @@ async fn error_rune_not_found_in_step() {
     let mut engine = new_engine(relay);
 
     engine
-        .register(flow(
-            "bad_rune",
-            vec![step("A", "nonexistent_rune")],
-        ))
+        .register(flow("bad_rune", vec![step("A", "nonexistent_rune")]))
         .unwrap();
 
     let err = engine
@@ -1001,10 +991,7 @@ async fn boundary_empty_input() {
         .register(flow("empty_input", vec![step("A", "echo")]))
         .unwrap();
 
-    let result = engine
-        .execute("empty_input", Bytes::new())
-        .await
-        .unwrap();
+    let result = engine.execute("empty_input", Bytes::new()).await.unwrap();
 
     assert_eq!(result.steps_executed, 1);
 }
@@ -1019,10 +1006,7 @@ async fn boundary_empty_output() {
         .register(flow("empty_output", vec![step("A", "echo")]))
         .unwrap();
 
-    let result = engine
-        .execute("empty_output", Bytes::new())
-        .await
-        .unwrap();
+    let result = engine.execute("empty_output", Bytes::new()).await.unwrap();
 
     assert_eq!(result.output, Bytes::new());
 }
@@ -1040,10 +1024,7 @@ async fn result_steps_all_completed() {
     engine
         .register(flow(
             "all_completed",
-            vec![
-                step("A", "step_a"),
-                step_with_deps("B", "step_b", &["A"]),
-            ],
+            vec![step("A", "step_a"), step_with_deps("B", "step_b", &["A"])],
         ))
         .unwrap();
 
@@ -1072,10 +1053,7 @@ async fn result_terminal_step_output() {
     engine
         .register(flow(
             "terminal",
-            vec![
-                step("A", "step_a"),
-                step_with_deps("B", "step_b", &["A"]),
-            ],
+            vec![step("A", "step_a"), step_with_deps("B", "step_b", &["A"])],
         ))
         .unwrap();
 
@@ -1201,13 +1179,7 @@ async fn condition_with_mapping_combined() {
             vec![
                 step("A", "step_a"),
                 step("B", "step_b"),
-                step_with_condition_and_mapping(
-                    "C",
-                    "step_c",
-                    &["A", "B"],
-                    "true",
-                    mapping,
-                ),
+                step_with_condition_and_mapping("C", "step_c", &["A", "B"], "true", mapping),
             ],
         ))
         .unwrap();
@@ -1227,7 +1199,7 @@ async fn condition_with_mapping_combined() {
 // 条件表达式解析器回归测试
 // ============================================================
 
-use rune_flow::engine::{evaluate_condition, evaluate_comparison};
+use rune_flow::engine::{evaluate_comparison, evaluate_condition};
 
 /// Helper: 创建带 step output 的上下文来测试条件表达式
 fn eval_cond(expr: &str) -> bool {
@@ -1268,99 +1240,109 @@ fn eval_comp_with_context(
 fn test_condition_with_simple_equals() {
     // "steps.A.output.count == 5" 应正确解析：lhs=steps.A.output.count, op===, rhs=5
     let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"count":5}"#)),
-    );
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"count":5}"#)));
     let input = None;
     let result = eval_cond_with_context("steps.A.output.count == 5", &outputs, &input);
-    assert!(result, "steps.A.output.count == 5 should be true when count is 5");
+    assert!(
+        result,
+        "steps.A.output.count == 5 should be true when count is 5"
+    );
 }
 
 #[test]
 fn test_condition_with_gte() {
     // "steps.A.output.value >= 10" 正确解析
     let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"value":15}"#)),
-    );
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"value":15}"#)));
     let input = None;
-    assert!(eval_cond_with_context("steps.A.output.value >= 10", &outputs, &input));
+    assert!(eval_cond_with_context(
+        "steps.A.output.value >= 10",
+        &outputs,
+        &input
+    ));
 
     // 边界：等于
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"value":10}"#)),
-    );
-    assert!(eval_cond_with_context("steps.A.output.value >= 10", &outputs, &input));
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"value":10}"#)));
+    assert!(eval_cond_with_context(
+        "steps.A.output.value >= 10",
+        &outputs,
+        &input
+    ));
 
     // 小于时不满足
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"value":9}"#)),
-    );
-    assert!(!eval_cond_with_context("steps.A.output.value >= 10", &outputs, &input));
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"value":9}"#)));
+    assert!(!eval_cond_with_context(
+        "steps.A.output.value >= 10",
+        &outputs,
+        &input
+    ));
 }
 
 #[test]
 fn test_condition_with_lte() {
     // "steps.A.output.value <= 0" 正确解析
     let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"value":-1}"#)),
-    );
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"value":-1}"#)));
     let input = None;
-    assert!(eval_cond_with_context("steps.A.output.value <= 0", &outputs, &input));
+    assert!(eval_cond_with_context(
+        "steps.A.output.value <= 0",
+        &outputs,
+        &input
+    ));
 
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"value":0}"#)),
-    );
-    assert!(eval_cond_with_context("steps.A.output.value <= 0", &outputs, &input));
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"value":0}"#)));
+    assert!(eval_cond_with_context(
+        "steps.A.output.value <= 0",
+        &outputs,
+        &input
+    ));
 
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"value":1}"#)),
-    );
-    assert!(!eval_cond_with_context("steps.A.output.value <= 0", &outputs, &input));
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"value":1}"#)));
+    assert!(!eval_cond_with_context(
+        "steps.A.output.value <= 0",
+        &outputs,
+        &input
+    ));
 }
 
 #[test]
 fn test_condition_with_not_equals() {
     // "steps.A.output.status != error" 正确解析
     let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"status":"ok"}"#)),
-    );
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"status":"ok"}"#)));
     let input = None;
-    assert!(eval_cond_with_context("steps.A.output.status != error", &outputs, &input));
+    assert!(eval_cond_with_context(
+        "steps.A.output.status != error",
+        &outputs,
+        &input
+    ));
 
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"status":"error"}"#)),
-    );
-    assert!(!eval_cond_with_context("steps.A.output.status != error", &outputs, &input));
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"status":"error"}"#)));
+    assert!(!eval_cond_with_context(
+        "steps.A.output.status != error",
+        &outputs,
+        &input
+    ));
 }
 
 #[test]
 fn test_condition_with_string_comparison() {
     // "steps.A.output.name == hello" 正确比较字符串
     let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"name":"hello"}"#)),
-    );
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"name":"hello"}"#)));
     let input = None;
-    assert!(eval_cond_with_context("steps.A.output.name == hello", &outputs, &input));
+    assert!(eval_cond_with_context(
+        "steps.A.output.name == hello",
+        &outputs,
+        &input
+    ));
 
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"name":"world"}"#)),
-    );
-    assert!(!eval_cond_with_context("steps.A.output.name == hello", &outputs, &input));
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"name":"world"}"#)));
+    assert!(!eval_cond_with_context(
+        "steps.A.output.name == hello",
+        &outputs,
+        &input
+    ));
 }
 
 #[test]
@@ -1379,13 +1361,18 @@ fn test_condition_with_special_chars_in_path() {
 fn test_condition_with_spaces_around_operator() {
     // "steps.A.output.x  ==  5" 带多余空格
     let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
-    outputs.insert(
-        "A".to_string(),
-        Some(Bytes::from(r#"{"x":5}"#)),
-    );
+    outputs.insert("A".to_string(), Some(Bytes::from(r#"{"x":5}"#)));
     let input = None;
-    assert!(eval_cond_with_context("steps.A.output.x  ==  5", &outputs, &input));
-    assert!(eval_cond_with_context("  steps.A.output.x == 5  ", &outputs, &input));
+    assert!(eval_cond_with_context(
+        "steps.A.output.x  ==  5",
+        &outputs,
+        &input
+    ));
+    assert!(eval_cond_with_context(
+        "  steps.A.output.x == 5  ",
+        &outputs,
+        &input
+    ));
 }
 
 #[test]
@@ -1432,13 +1419,14 @@ fn test_condition_operator_in_step_name() {
     let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
     // 注意：step 名中带 > 在实际使用中不推荐，但解析器应该正确处理
     // 关键是操作符两边有空格，token 解析不会被 lhs 中的 > 干扰
-    outputs.insert(
-        "a>b".to_string(),
-        Some(Bytes::from(r#"{"val":5}"#)),
-    );
+    outputs.insert("a>b".to_string(), Some(Bytes::from(r#"{"val":5}"#)));
     let input = None;
     let result = eval_comp_with_context("steps.a>b.output.val == 5", &outputs, &input);
-    assert_eq!(result, Some(true), "should correctly parse == as operator, not > in path");
+    assert_eq!(
+        result,
+        Some(true),
+        "should correctly parse == as operator, not > in path"
+    );
 }
 
 #[test]
@@ -1446,13 +1434,14 @@ fn test_condition_gt_in_step_name_with_gt_operator() {
     // step 路径包含 > 且操作符也是 >
     // "steps.a>b.output.val > 3" — 操作符 > 是独立 token
     let mut outputs: HashMap<String, Option<Bytes>> = HashMap::new();
-    outputs.insert(
-        "a>b".to_string(),
-        Some(Bytes::from(r#"{"val":5}"#)),
-    );
+    outputs.insert("a>b".to_string(), Some(Bytes::from(r#"{"val":5}"#)));
     let input = None;
     let result = eval_comp_with_context("steps.a>b.output.val > 3", &outputs, &input);
-    assert_eq!(result, Some(true), "should find standalone > operator, not the one in path");
+    assert_eq!(
+        result,
+        Some(true),
+        "should find standalone > operator, not the one in path"
+    );
 }
 
 // ============================================================
@@ -1509,10 +1498,22 @@ async fn sf2_parallel_steps_get_unique_request_ids() {
         other => panic!("p2 should be completed, got {:?}", other),
     };
 
-    assert_ne!(id1, id2, "parallel steps must get unique request_ids: {} vs {}", id1, id2);
+    assert_ne!(
+        id1, id2,
+        "parallel steps must get unique request_ids: {} vs {}",
+        id1, id2
+    );
     // Both should now contain a counter segment (req-{ts}-{seq})
-    assert!(id1.matches('-').count() >= 2, "id should have format req-{{ts}}-{{seq}}: {}", id1);
-    assert!(id2.matches('-').count() >= 2, "id should have format req-{{ts}}-{{seq}}: {}", id2);
+    assert!(
+        id1.matches('-').count() >= 2,
+        "id should have format req-{{ts}}-{{seq}}: {}",
+        id1
+    );
+    assert!(
+        id2.matches('-').count() >= 2,
+        "id should have format req-{{ts}}-{{seq}}: {}",
+        id2
+    );
 }
 
 // ============================================================

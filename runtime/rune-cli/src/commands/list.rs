@@ -27,12 +27,22 @@ pub async fn run(client: &RuneClient, json_mode: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut table = output::new_table(&["Name", "Version", "Mode", "Gate Path", "Caster", "Status"]);
+    let mut table =
+        output::new_table(&["Name", "Version", "Mode", "Gate Path", "Caster", "Status"]);
 
     for rune in runes {
-        let name = rune.get("name").and_then(serde_json::Value::as_str).unwrap_or("-");
-        let version = rune.get("version").and_then(serde_json::Value::as_str).unwrap_or("-");
-        let mode = rune.get("mode").and_then(serde_json::Value::as_str).unwrap_or("unary");
+        let name = rune
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("-");
+        let version = rune
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("-");
+        let mode = rune
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unary");
         let gate_path = rune
             .get("gate_path")
             .or_else(|| rune.get("gate"))
@@ -58,7 +68,8 @@ mod tests {
     #[test]
     fn test_table_output_format() {
         // Verify table creation with expected headers
-        let table = output::new_table(&["Name", "Version", "Mode", "Gate Path", "Caster", "Status"]);
+        let table =
+            output::new_table(&["Name", "Version", "Mode", "Gate Path", "Caster", "Status"]);
         let output = table.to_string();
         assert!(output.contains("NAME"));
         assert!(output.contains("VERSION"));
@@ -70,8 +81,16 @@ mod tests {
 
     #[test]
     fn test_table_with_rune_data() {
-        let mut table = output::new_table(&["Name", "Version", "Mode", "Gate Path", "Caster", "Status"]);
-        table.add_row(vec!["hello", "1.0", "unary", "/api/v1/runes/hello", "caster-1", "online"]);
+        let mut table =
+            output::new_table(&["Name", "Version", "Mode", "Gate Path", "Caster", "Status"]);
+        table.add_row(vec![
+            "hello",
+            "1.0",
+            "unary",
+            "/api/v1/runes/hello",
+            "caster-1",
+            "online",
+        ]);
         let rendered = table.to_string();
         assert!(rendered.contains("hello"), "should contain rune name");
         assert!(rendered.contains("caster-1"), "should contain caster id");

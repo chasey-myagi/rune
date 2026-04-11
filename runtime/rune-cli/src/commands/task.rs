@@ -8,7 +8,10 @@ pub async fn get(client: &RuneClient, id: &str, json: bool) -> Result<()> {
         crate::output::print_json(&result);
     } else {
         let task_id = result.get("task_id").and_then(|v| v.as_str()).unwrap_or(id);
-        let rune = result.get("rune_name").and_then(|v| v.as_str()).unwrap_or("-");
+        let rune = result
+            .get("rune_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
         let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("-");
         println!("Task:     {}", task_id);
         println!("Rune:     {}", rune);

@@ -25,6 +25,9 @@ fn test_default_config() {
     // Store defaults
     assert_eq!(config.store.db_path, "rune.db");
     assert_eq!(config.store.log_retention_days, 30);
+    assert_eq!(config.store.reader_pool_size, 4);
+    assert_eq!(config.store.key_cache_ttl_secs, 60);
+    assert_eq!(config.store.key_cache_negative_ttl_secs, 30);
 
     // Session defaults
     assert_eq!(config.session.heartbeat_interval_secs, 10);
@@ -38,8 +41,24 @@ fn test_default_config() {
     // Resolver defaults
     assert_eq!(config.resolver.strategy, "round_robin");
 
+    // Retry defaults
+    assert!(config.retry.enabled);
+    assert_eq!(config.retry.max_retries, 3);
+    assert_eq!(config.retry.base_delay_ms, 100);
+    assert_eq!(config.retry.max_delay_ms, 5_000);
+    assert_eq!(config.retry.backoff_multiplier, 2.0);
+    assert_eq!(
+        config.retry.retryable_errors,
+        vec!["unavailable", "internal"]
+    );
+    assert!(config.retry.circuit_breaker.enabled);
+    assert_eq!(config.retry.circuit_breaker.failure_threshold, 5);
+    assert_eq!(config.retry.circuit_breaker.success_threshold, 2);
+    assert_eq!(config.retry.circuit_breaker.reset_timeout_ms, 30_000);
+    assert_eq!(config.retry.circuit_breaker.half_open_max_permits, 1);
+
     // Rate limit defaults
-    assert_eq!(config.rate_limit.requests_per_minute, 600);
+    assert_eq!(config.rate_limit.max_requests, 600);
 
     // Log defaults
     assert_eq!(config.log.level, "info");
@@ -104,7 +123,7 @@ level = "debug"
     assert_eq!(config.server.http_port, 50060);
     assert!(config.auth.enabled);
     assert_eq!(config.session.heartbeat_interval_secs, 10);
-    assert_eq!(config.rate_limit.requests_per_minute, 600);
+    assert_eq!(config.rate_limit.max_requests, 600);
 }
 
 #[test]
@@ -157,6 +176,11 @@ fn test_env_var_override_bool_and_ip() {
     std::env::set_var("RUNE_AUTH__ENABLED", "false");
     std::env::set_var("RUNE_SERVER__GRPC_HOST", "127.0.0.1");
     std::env::set_var("RUNE_STORE__LOG_RETENTION_DAYS", "7");
+    std::env::set_var("RUNE_STORE__READER_POOL_SIZE", "8");
+    std::env::set_var("RUNE_STORE__KEY_CACHE_TTL_SECS", "120");
+    std::env::set_var("RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS", "15");
+    std::env::set_var("RUNE_RETRY__MAX_RETRIES", "5");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD", "9");
 
     let mut config = AppConfig::default();
     config.apply_env_overrides();
@@ -164,10 +188,20 @@ fn test_env_var_override_bool_and_ip() {
     assert!(!config.auth.enabled);
     assert_eq!(config.server.grpc_host, IpAddr::V4(Ipv4Addr::LOCALHOST));
     assert_eq!(config.store.log_retention_days, 7);
+    assert_eq!(config.store.reader_pool_size, 8);
+    assert_eq!(config.store.key_cache_ttl_secs, 120);
+    assert_eq!(config.store.key_cache_negative_ttl_secs, 15);
+    assert_eq!(config.retry.max_retries, 5);
+    assert_eq!(config.retry.circuit_breaker.failure_threshold, 9);
 
     std::env::remove_var("RUNE_AUTH__ENABLED");
     std::env::remove_var("RUNE_SERVER__GRPC_HOST");
     std::env::remove_var("RUNE_STORE__LOG_RETENTION_DAYS");
+    std::env::remove_var("RUNE_STORE__READER_POOL_SIZE");
+    std::env::remove_var("RUNE_STORE__KEY_CACHE_TTL_SECS");
+    std::env::remove_var("RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS");
+    std::env::remove_var("RUNE_RETRY__MAX_RETRIES");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD");
 }
 
 #[test]
@@ -497,11 +531,17 @@ http_port = 50060
 
     // Verify grpc_addr() produces a valid IPv6 SocketAddr
     let addr = config.grpc_addr();
-    assert_eq!(addr, SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 50070));
+    assert_eq!(
+        addr,
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 50070)
+    );
     assert!(addr.is_ipv6());
 
     let http = config.http_addr();
-    assert_eq!(http, SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 50060));
+    assert_eq!(
+        http,
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 50060)
+    );
     assert!(http.is_ipv6());
 }
 
@@ -593,26 +633,58 @@ fn test_multiple_env_vars_all_take_effect() {
     std::env::set_var("RUNE_SERVER__DRAIN_TIMEOUT_SECS", "30");
     std::env::set_var("RUNE_GATE__MAX_UPLOAD_SIZE_MB", "50");
     std::env::set_var("RUNE_STORE__LOG_RETENTION_DAYS", "90");
+    std::env::set_var("RUNE_STORE__READER_POOL_SIZE", "16");
+    std::env::set_var("RUNE_STORE__KEY_CACHE_TTL_SECS", "300");
+    std::env::set_var("RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS", "45");
+    std::env::set_var("RUNE_RETRY__ENABLED", "false");
+    std::env::set_var("RUNE_RETRY__MAX_RETRIES", "6");
+    std::env::set_var("RUNE_RETRY__BASE_DELAY_MS", "250");
+    std::env::set_var("RUNE_RETRY__MAX_DELAY_MS", "8000");
+    std::env::set_var("RUNE_RETRY__BACKOFF_MULTIPLIER", "3.5");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__ENABLED", "false");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD", "7");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__SUCCESS_THRESHOLD", "4");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__RESET_TIMEOUT_MS", "120000");
+    std::env::set_var("RUNE_RETRY__CIRCUIT_BREAKER__HALF_OPEN_MAX_PERMITS", "3");
 
     let mut config = AppConfig::default();
     config.apply_env_overrides();
 
-    assert_eq!(config.server.grpc_host, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    assert_eq!(
+        config.server.grpc_host,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+    );
     assert_eq!(config.server.grpc_port, 9999);
-    assert_eq!(config.server.http_host, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    assert_eq!(
+        config.server.http_host,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+    );
     assert_eq!(config.server.http_port, 8888);
     assert!(config.server.dev_mode);
     assert!(!config.auth.enabled);
     assert_eq!(config.store.db_path, "/tmp/custom.db");
     assert_eq!(config.log.level, "warn");
     assert_eq!(config.resolver.strategy, "random");
-    assert_eq!(config.rate_limit.requests_per_minute, 1200);
+    assert_eq!(config.rate_limit.max_requests, 1200);
     assert_eq!(config.session.heartbeat_interval_secs, 20);
     assert_eq!(config.session.heartbeat_timeout_secs, 60);
     assert_eq!(config.session.max_request_timeout_secs, 45);
     assert_eq!(config.server.drain_timeout_secs, 30);
     assert_eq!(config.gate.max_upload_size_mb, 50);
     assert_eq!(config.store.log_retention_days, 90);
+    assert_eq!(config.store.reader_pool_size, 16);
+    assert_eq!(config.store.key_cache_ttl_secs, 300);
+    assert_eq!(config.store.key_cache_negative_ttl_secs, 45);
+    assert!(!config.retry.enabled);
+    assert_eq!(config.retry.max_retries, 6);
+    assert_eq!(config.retry.base_delay_ms, 250);
+    assert_eq!(config.retry.max_delay_ms, 8000);
+    assert_eq!(config.retry.backoff_multiplier, 3.5);
+    assert!(!config.retry.circuit_breaker.enabled);
+    assert_eq!(config.retry.circuit_breaker.failure_threshold, 7);
+    assert_eq!(config.retry.circuit_breaker.success_threshold, 4);
+    assert_eq!(config.retry.circuit_breaker.reset_timeout_ms, 120000);
+    assert_eq!(config.retry.circuit_breaker.half_open_max_permits, 3);
 
     // Clean up all env vars
     std::env::remove_var("RUNE_SERVER__GRPC_HOST");
@@ -631,6 +703,19 @@ fn test_multiple_env_vars_all_take_effect() {
     std::env::remove_var("RUNE_SERVER__DRAIN_TIMEOUT_SECS");
     std::env::remove_var("RUNE_GATE__MAX_UPLOAD_SIZE_MB");
     std::env::remove_var("RUNE_STORE__LOG_RETENTION_DAYS");
+    std::env::remove_var("RUNE_STORE__READER_POOL_SIZE");
+    std::env::remove_var("RUNE_STORE__KEY_CACHE_TTL_SECS");
+    std::env::remove_var("RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS");
+    std::env::remove_var("RUNE_RETRY__ENABLED");
+    std::env::remove_var("RUNE_RETRY__MAX_RETRIES");
+    std::env::remove_var("RUNE_RETRY__BASE_DELAY_MS");
+    std::env::remove_var("RUNE_RETRY__MAX_DELAY_MS");
+    std::env::remove_var("RUNE_RETRY__BACKOFF_MULTIPLIER");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__ENABLED");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__SUCCESS_THRESHOLD");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__RESET_TIMEOUT_MS");
+    std::env::remove_var("RUNE_RETRY__CIRCUIT_BREAKER__HALF_OPEN_MAX_PERMITS");
 }
 
 // ---- Long db_path value ----
@@ -788,7 +873,7 @@ requests_per_minute = 100
     std::fs::write(&path, toml_content).unwrap();
 
     let config = AppConfig::from_file(path.to_str().unwrap()).unwrap();
-    assert_eq!(config.rate_limit.requests_per_minute, 100);
+    assert_eq!(config.rate_limit.max_requests, 100);
 }
 
 #[test]
@@ -826,9 +911,46 @@ fn test_rate_limit_env_override() {
     let mut config = AppConfig::default();
     config.apply_env_overrides();
 
-    assert_eq!(config.rate_limit.requests_per_minute, 999);
+    assert_eq!(config.rate_limit.max_requests, 999);
 
     std::env::remove_var("RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE");
+}
+
+#[test]
+fn test_fix_rate_limit_window_secs_default() {
+    let config = AppConfig::default();
+    assert_eq!(config.rate_limit.window_secs, 60);
+}
+
+#[test]
+fn test_fix_rate_limit_window_secs_env_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("RUNE_RATE_LIMIT__WINDOW_SECS", "30");
+
+    let mut config = AppConfig::default();
+    config.apply_env_overrides();
+
+    assert_eq!(config.rate_limit.window_secs, 30);
+
+    std::env::remove_var("RUNE_RATE_LIMIT__WINDOW_SECS");
+}
+
+#[test]
+fn test_fix_rate_limit_window_secs_zero_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rune.toml");
+    std::fs::write(&path, "[rate_limit]\nwindow_secs = 0\n").unwrap();
+    let mut config = AppConfig::from_path(&path).unwrap();
+    config.apply_env_overrides();
+    let result = config.validate();
+    assert!(result.is_err(), "window_secs=0 should be rejected");
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("window_secs must be > 0"),
+        "error message should mention window_secs"
+    );
 }
 
 // ---- LOG__FILE env override ----
@@ -857,7 +979,10 @@ fn test_log_file_env_empty_clears_value() {
     std::env::set_var("RUNE_LOG__FILE", "");
     config.apply_env_overrides();
 
-    assert!(config.log.file.is_none(), "empty RUNE_LOG__FILE should clear the value");
+    assert!(
+        config.log.file.is_none(),
+        "empty RUNE_LOG__FILE should clear the value"
+    );
 
     std::env::remove_var("RUNE_LOG__FILE");
 }
@@ -880,13 +1005,27 @@ fn test_full_config_roundtrip() {
     config.auth.exempt_routes = vec!["/health".into(), "/metrics".into(), "/ready".into()];
     config.store.db_path = "/custom/path/rune.db".to_string();
     config.store.log_retention_days = 7;
+    config.store.reader_pool_size = 12;
+    config.store.key_cache_ttl_secs = 180;
+    config.store.key_cache_negative_ttl_secs = 25;
+    config.retry.enabled = false;
+    config.retry.max_retries = 8;
+    config.retry.base_delay_ms = 150;
+    config.retry.max_delay_ms = 12_000;
+    config.retry.backoff_multiplier = 1.5;
+    config.retry.retryable_errors = vec!["timeout".into(), "internal".into()];
+    config.retry.circuit_breaker.enabled = false;
+    config.retry.circuit_breaker.failure_threshold = 11;
+    config.retry.circuit_breaker.success_threshold = 3;
+    config.retry.circuit_breaker.reset_timeout_ms = 45_000;
+    config.retry.circuit_breaker.half_open_max_permits = 2;
     config.session.heartbeat_interval_secs = 5;
     config.session.heartbeat_timeout_secs = 20;
     config.session.max_request_timeout_secs = 60;
     config.gate.cors_origins = vec!["http://localhost:3000".into(), "https://example.com".into()];
     config.gate.max_upload_size_mb = 50;
     config.resolver.strategy = "random".to_string();
-    config.rate_limit.requests_per_minute = 1200;
+    config.rate_limit.max_requests = 1200;
     config.log.level = "trace".to_string();
     config.log.file = Some("/var/log/rune.log".to_string());
 
@@ -898,21 +1037,69 @@ fn test_full_config_roundtrip() {
     // Verify every single field survives the roundtrip
     assert_eq!(loaded.server.grpc_host, IpAddr::V6(Ipv6Addr::LOCALHOST));
     assert_eq!(loaded.server.grpc_port, 12345);
-    assert_eq!(loaded.server.http_host, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+    assert_eq!(
+        loaded.server.http_host,
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))
+    );
     assert_eq!(loaded.server.http_port, 54321);
     assert!(loaded.server.dev_mode);
     assert_eq!(loaded.server.drain_timeout_secs, 30);
     assert!(!loaded.auth.enabled);
-    assert_eq!(loaded.auth.exempt_routes, vec!["/health", "/metrics", "/ready"]);
+    assert_eq!(
+        loaded.auth.exempt_routes,
+        vec!["/health", "/metrics", "/ready"]
+    );
     assert_eq!(loaded.store.db_path, "/custom/path/rune.db");
     assert_eq!(loaded.store.log_retention_days, 7);
+    assert_eq!(loaded.store.reader_pool_size, 12);
+    assert_eq!(loaded.store.key_cache_ttl_secs, 180);
+    assert_eq!(loaded.store.key_cache_negative_ttl_secs, 25);
+    assert!(!loaded.retry.enabled);
+    assert_eq!(loaded.retry.max_retries, 8);
+    assert_eq!(loaded.retry.base_delay_ms, 150);
+    assert_eq!(loaded.retry.max_delay_ms, 12_000);
+    assert_eq!(loaded.retry.backoff_multiplier, 1.5);
+    assert_eq!(loaded.retry.retryable_errors, vec!["timeout", "internal"]);
+    assert!(!loaded.retry.circuit_breaker.enabled);
+    assert_eq!(loaded.retry.circuit_breaker.failure_threshold, 11);
+    assert_eq!(loaded.retry.circuit_breaker.success_threshold, 3);
+    assert_eq!(loaded.retry.circuit_breaker.reset_timeout_ms, 45_000);
+    assert_eq!(loaded.retry.circuit_breaker.half_open_max_permits, 2);
     assert_eq!(loaded.session.heartbeat_interval_secs, 5);
     assert_eq!(loaded.session.heartbeat_timeout_secs, 20);
     assert_eq!(loaded.session.max_request_timeout_secs, 60);
-    assert_eq!(loaded.gate.cors_origins, vec!["http://localhost:3000", "https://example.com"]);
+    assert_eq!(
+        loaded.gate.cors_origins,
+        vec!["http://localhost:3000", "https://example.com"]
+    );
     assert_eq!(loaded.gate.max_upload_size_mb, 50);
     assert_eq!(loaded.resolver.strategy, "random");
-    assert_eq!(loaded.rate_limit.requests_per_minute, 1200);
+    assert_eq!(loaded.rate_limit.max_requests, 1200);
     assert_eq!(loaded.log.level, "trace");
     assert_eq!(loaded.log.file.as_deref(), Some("/var/log/rune.log"));
+}
+
+#[test]
+fn test_fix_validate_rejects_zero_backoff_multiplier() {
+    let mut cfg = AppConfig::default();
+    cfg.retry.enabled = true;
+    cfg.retry.backoff_multiplier = 0.0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_fix_validate_rejects_zero_cb_failure_threshold() {
+    let mut cfg = AppConfig::default();
+    cfg.retry.circuit_breaker.enabled = true;
+    cfg.retry.circuit_breaker.failure_threshold = 0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_fix_validate_rejects_max_delay_less_than_base_delay() {
+    let mut cfg = AppConfig::default();
+    cfg.retry.enabled = true;
+    cfg.retry.base_delay_ms = 1000;
+    cfg.retry.max_delay_ms = 500;
+    assert!(cfg.validate().is_err());
 }

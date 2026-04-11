@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
     "test": "vitest run"
   },
   "dependencies": {

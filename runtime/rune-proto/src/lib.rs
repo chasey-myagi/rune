@@ -56,9 +56,12 @@ mod tests {
                     }),
                     priority: 5,
                 }],
-                labels: [("env".to_string(), "prod".to_string())].into_iter().collect(),
+                labels: [("env".to_string(), "prod".to_string())]
+                    .into_iter()
+                    .collect(),
                 max_concurrent: 10,
                 key: "rk_test_key".into(),
+                role: "caster".into(),
             })),
         };
 
@@ -100,7 +103,9 @@ mod tests {
             context: [
                 ("user".to_string(), "alice".to_string()),
                 ("trace".to_string(), "tr-99".to_string()),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
             timeout_ms: 60000,
             attachments: vec![
                 FileAttachment {
@@ -124,8 +129,14 @@ mod tests {
         assert_eq!(decoded.rune_name, "processor");
         assert_eq!(decoded.input, b"binary data here");
         assert_eq!(decoded.timeout_ms, 60000);
-        assert_eq!(decoded.context.get("user").map(|s| s.as_str()), Some("alice"));
-        assert_eq!(decoded.context.get("trace").map(|s| s.as_str()), Some("tr-99"));
+        assert_eq!(
+            decoded.context.get("user").map(|s| s.as_str()),
+            Some("alice")
+        );
+        assert_eq!(
+            decoded.context.get("trace").map(|s| s.as_str()),
+            Some("tr-99")
+        );
         assert_eq!(decoded.attachments.len(), 2);
         assert_eq!(decoded.attachments[0].filename, "doc.pdf");
         assert_eq!(decoded.attachments[0].data, vec![0x25, 0x50, 0x44, 0x46]);
@@ -158,7 +169,10 @@ mod tests {
         assert_eq!(decoded.name, "validator");
         assert_eq!(decoded.version, "2.1.0");
         assert_eq!(decoded.description, "validates input");
-        assert_eq!(decoded.input_schema, r#"{"type":"object","properties":{"name":{"type":"string"}}}"#);
+        assert_eq!(
+            decoded.input_schema,
+            r#"{"type":"object","properties":{"name":{"type":"string"}}}"#
+        );
         assert_eq!(decoded.output_schema, r#"{"type":"boolean"}"#);
         assert!(!decoded.supports_stream);
         assert!(decoded.gate.is_none());

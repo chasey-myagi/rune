@@ -6,6 +6,7 @@ import type {
   GateConfig,
   CasterOptions,
   FileAttachment,
+  ScalePolicy,
 } from '../src/index';
 import type {
   RuneHandler,
@@ -622,6 +623,117 @@ describe('2.0 CasterAttach Message', () => {
     const msg = (caster as any)._buildAttachMessage();
     expect(msg.attach.labels).toEqual({});
   });
+
+  it('C-03: attach message includes caster role and scaling labels', () => {
+    const scalePolicy: ScalePolicy = {
+      group: 'gpu',
+      spawnCommand: 'python worker.py',
+      scaleUpThreshold: 0.9,
+      scaleDownThreshold: 0.3,
+      sustainedSecs: 15,
+      minReplicas: 1,
+      maxReplicas: 4,
+      shutdownSignal: 'SIGTERM',
+    };
+    const caster = new Caster({
+      key: 'rk_test',
+      scalePolicy,
+      loadReport: { pressure: 0.42, metrics: { queue_depth: 7 } },
+    });
+    caster.rune({ name: 'echo' }, async (_ctx, input) => input);
+
+    const msg = (caster as any)._buildAttachMessage('pilot-123');
+    expect(msg.attach.role).toBe('caster');
+    expect(msg.attach.labels.group).toBe('gpu');
+    expect(msg.attach.labels._pilot_id).toBe('pilot-123');
+    expect(msg.attach.labels._spawn_command).toBe('python worker.py');
+  });
+});
+
+// ===========================================================================
+// P0-3: Graceful ShutdownRequest drains in-flight requests
+// ===========================================================================
+describe('P0-3 Graceful ShutdownRequest', () => {
+  it('P0-3a: _buildHealthReport reflects UNHEALTHY when draining', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'echo' }, async (_ctx, input) => input);
+
+    // Normal state → HEALTHY
+    const healthy = (caster as any)._buildHealthReport();
+    expect(healthy.health_report.status).toBe('HEALTH_STATUS_HEALTHY');
+
+    // Simulate draining (set by shutdown handler)
+    (caster as any)._draining = true;
+    const draining = (caster as any)._buildHealthReport();
+    expect(draining.health_report.status).toBe('HEALTH_STATUS_UNHEALTHY');
+  });
+
+  it('P0-3b: _handleExecute rejects with SHUTTING_DOWN when draining', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    caster.rune({ name: 'echo' }, async (_ctx, input) => input);
+    (caster as any)._draining = true;
+
+    // Mock a minimal grpc stream with a write() spy
+    const written: any[] = [];
+    const fakeStream = { write: (msg: any) => written.push(msg) };
+
+    (caster as any)._handleExecute(
+      { request_id: 'req-drain', rune_name: 'echo', input: '{}' },
+      fakeStream,
+    );
+
+    expect(written).toHaveLength(1);
+    expect(written[0].result.request_id).toBe('req-drain');
+    expect(written[0].result.status).toBe('STATUS_FAILED');
+    expect(written[0].result.error.code).toBe('SHUTTING_DOWN');
+  });
+});
+
+// ===========================================================================
+// P1-6: HealthReport should be sent regardless of scalePolicy
+// ===========================================================================
+describe('P1-6 HealthReport independent of scalePolicy', () => {
+  it('P1-6a: _buildHealthReport works without scalePolicy', () => {
+    const caster = new Caster({ key: 'rk_test' });
+    // No scalePolicy set
+    expect(caster.scalePolicy).toBeUndefined();
+
+    // _buildHealthReport should still work and return valid data
+    const report = (caster as any)._buildHealthReport();
+    expect(report.health_report).toBeDefined();
+    expect(report.health_report.status).toBe('HEALTH_STATUS_HEALTHY');
+    expect(report.health_report.active_requests).toBe(0);
+    expect(report.health_report.metrics.max_concurrent).toBe(10);
+    expect(report.health_report.metrics.available_permits).toBe(10);
+  });
+
+  it('P1-6b: _buildHealthReport works with loadReport but no scalePolicy', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      loadReport: { pressure: 0.42, metrics: { gpu_util: 0.75 } },
+    });
+    expect(caster.scalePolicy).toBeUndefined();
+    expect(caster.loadReport).toBeDefined();
+
+    const report = (caster as any)._buildHealthReport();
+    expect(report.health_report.pressure).toBeCloseTo(0.42);
+    expect(report.health_report.metrics.gpu_util).toBe(0.75);
+  });
+
+  it('P1-6c: _buildHealthReport with scalePolicy still works', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      scalePolicy: {
+        group: 'gpu',
+        spawnCommand: 'python worker.py',
+      },
+    });
+    expect(caster.scalePolicy).toBeDefined();
+
+    const report = (caster as any)._buildHealthReport();
+    expect(report.health_report).toBeDefined();
+    expect(report.health_report.status).toBe('HEALTH_STATUS_HEALTHY');
+  });
 });
 
 // ===========================================================================
@@ -772,5 +884,48 @@ describe('NF-17 Proto loading cache', () => {
       // The module should export or internally use a cached proto
       expect(true).toBe(true); // placeholder - real verification is via build/manual
     }
+  });
+});
+
+// ===========================================================================
+// MF-2 Regression: user metrics keys are preserved over system defaults
+// ===========================================================================
+describe('MF-2 User metrics preserved over system defaults', () => {
+  it('fix: user metrics keys are preserved over system defaults', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      loadReport: {
+        pressure: 0.5,
+        metrics: {
+          active_requests: 999,
+          max_concurrent: 888,
+          available_permits: 777,
+        },
+      },
+    });
+
+    const report = (caster as any)._buildHealthReport();
+    // User-provided values must NOT be overwritten by system defaults
+    expect(report.health_report.metrics.active_requests).toBe(999);
+    expect(report.health_report.metrics.max_concurrent).toBe(888);
+    expect(report.health_report.metrics.available_permits).toBe(777);
+  });
+
+  it('fix: system defaults are used when user does not provide them', () => {
+    const caster = new Caster({
+      key: 'rk_test',
+      loadReport: {
+        pressure: 0.3,
+        metrics: { gpu_util: 0.6 },
+      },
+    });
+
+    const report = (caster as any)._buildHealthReport();
+    // System defaults should fill in missing keys
+    expect(report.health_report.metrics.active_requests).toBe(0);
+    expect(report.health_report.metrics.max_concurrent).toBe(10);
+    expect(report.health_report.metrics.available_permits).toBe(10);
+    // User key should still be present
+    expect(report.health_report.metrics.gpu_util).toBe(0.6);
   });
 });

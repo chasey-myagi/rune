@@ -9,7 +9,8 @@ import json
 
 import pytest
 
-from rune import Caster, RuneConfig, RuneContext, FileAttachment, StreamSender
+from rune import Caster, FileAttachment, LoadReport, RuneConfig, RuneContext, ScalePolicy, StreamSender
+from rune._proto.rune.wire.v1 import rune_pb2
 
 
 # ============================================================
@@ -769,6 +770,127 @@ def test_c02b_attach_message_labels_defaults_empty():
 
     msg = c._build_attach_message()
     assert dict(msg.attach.labels) == {}
+
+
+def test_c03_attach_message_contains_role_and_scaling_labels():
+    """C-03: CasterAttach message includes caster role and auto-scaling labels."""
+    c = Caster(
+        "localhost:50070",
+        caster_id="test",
+        scale_policy=ScalePolicy(group="gpu", spawn_command="python worker.py", max_replicas=4),
+        load_report=LoadReport(pressure=0.5, metrics={"queue_depth": 4}),
+    )
+
+    @c.rune("echo")
+    async def echo(ctx, input):
+        return input
+
+    msg = c._build_attach_message("pilot-1")
+    assert msg.attach.role == "caster"
+    assert dict(msg.attach.labels)["group"] == "gpu"
+    assert dict(msg.attach.labels)["_pilot_id"] == "pilot-1"
+    assert dict(msg.attach.labels)["_spawn_command"] == "python worker.py"
+
+
+# ============================================================
+# P0-3: Graceful ShutdownRequest drains in-flight requests
+# ============================================================
+
+
+def test_p0_3_draining_rejects_execute():
+    """P0-3: When _draining is True, _handle_execute should return STATUS_FAILED
+    with error code SHUTTING_DOWN instead of running the handler."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    @c.rune("echo")
+    async def echo_handler(ctx, input):
+        return input
+
+    # Simulate draining state (set by shutdown handler)
+    c._draining = True
+
+    # Build a fake ExecuteRequest
+    req = rune_pb2.ExecuteRequest(
+        request_id="req-drain-test",
+        rune_name="echo",
+        input=b'{"hello":"world"}',
+    )
+
+    # Capture what _handle_execute would send via the outbound queue
+    queue = asyncio.Queue()
+
+    import asyncio as _asyncio
+
+    loop = _asyncio.new_event_loop()
+    # Manually increment active_requests as _session would
+    c._active_requests += 1
+    loop.run_until_complete(c._handle_execute(req, queue))
+    loop.close()
+
+    msg = queue.get_nowait()
+    assert msg.result.request_id == "req-drain-test"
+    assert msg.result.status == rune_pb2.STATUS_FAILED
+    assert msg.result.error.code == "SHUTTING_DOWN"
+
+
+def test_p0_3_health_report_reflects_draining():
+    """P0-3b: _build_health_report_message should return UNHEALTHY when draining."""
+    c = Caster("localhost:50070", caster_id="test")
+
+    # Normal state → HEALTHY
+    msg_healthy = c._build_health_report_message()
+    assert msg_healthy.health_report.status == rune_pb2.HEALTH_STATUS_HEALTHY
+
+    # Draining state → UNHEALTHY
+    c._draining = True
+    msg_draining = c._build_health_report_message()
+    assert msg_draining.health_report.status == rune_pb2.HEALTH_STATUS_UNHEALTHY
+
+
+# ============================================================
+# P1-6: HealthReport should be sent regardless of scale_policy
+# ============================================================
+
+
+def test_p1_6_health_report_without_scale_policy():
+    """P1-6: _build_health_report_message works without scale_policy."""
+    c = Caster("localhost:50070", caster_id="test")
+    assert c._scale_policy is None
+
+    # Should not raise, should produce valid health report
+    msg = c._build_health_report_message()
+    assert msg.health_report.status == 1  # HEALTH_STATUS_HEALTHY
+    assert msg.health_report.active_requests == 0
+    assert msg.health_report.metrics["max_concurrent"] == 10.0
+    assert msg.health_report.metrics["available_permits"] == 10.0
+
+
+def test_p1_6_health_report_with_load_report_no_scale_policy():
+    """P1-6b: _build_health_report_message with load_report but no scale_policy."""
+    c = Caster(
+        "localhost:50070",
+        caster_id="test",
+        load_report=LoadReport(pressure=0.42, metrics={"gpu_util": 0.75}),
+    )
+    assert c._scale_policy is None
+    assert c._load_report is not None
+
+    msg = c._build_health_report_message()
+    assert abs(msg.health_report.pressure - 0.42) < 1e-6
+    assert msg.health_report.metrics["gpu_util"] == 0.75
+
+
+def test_p1_6_health_report_with_scale_policy():
+    """P1-6c: _build_health_report_message still works with scale_policy."""
+    c = Caster(
+        "localhost:50070",
+        caster_id="test",
+        scale_policy=ScalePolicy(group="gpu", spawn_command="python worker.py"),
+    )
+    assert c._scale_policy is not None
+
+    msg = c._build_health_report_message()
+    assert msg.health_report.status == 1  # HEALTH_STATUS_HEALTHY
 
 
 # ============================================================

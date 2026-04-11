@@ -39,6 +39,26 @@ export interface FileAttachment {
   mimeType: string;
 }
 
+export interface ScalePolicy {
+  group: string;
+  scaleUpThreshold?: number;
+  scaleDownThreshold?: number;
+  sustainedSecs?: number;
+  minReplicas?: number;
+  maxReplicas?: number;
+  spawnCommand: string;
+  shutdownSignal?: string;
+}
+
+export interface LoadReport {
+  /**
+   * Explicit pressure override. When omitted, computed automatically
+   * from `activeRequests / maxConcurrent`.
+   */
+  pressure?: number;
+  metrics?: Record<string, number>;
+}
+
 /**
  * Context passed to every Rune handler invocation.
  */
@@ -53,6 +73,14 @@ export interface RuneContext {
   signal: AbortSignal;
   /** File attachments from the request (if any) */
   attachments?: FileAttachment[];
+}
+
+export function getTraceId(ctx: RuneContext): string | undefined {
+  return ctx.context["trace_id"];
+}
+
+export function getParentRequestId(ctx: RuneContext): string | undefined {
+  return ctx.context["parent_request_id"];
 }
 
 /**
@@ -71,6 +99,10 @@ export interface CasterOptions {
   maxConcurrent?: number;
   /** Caster labels for metadata */
   labels?: Record<string, string>;
+  /** Optional auto-scaling policy announced to the Runtime and local Pilot */
+  scalePolicy?: ScalePolicy;
+  /** Optional static load report metadata sent with health updates */
+  loadReport?: LoadReport;
   /** Reconnection options */
   reconnect?: ReconnectOptions;
 }

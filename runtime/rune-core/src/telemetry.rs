@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Telemetry configuration for OpenTelemetry tracing and Prometheus metrics.
 ///
 /// When all fields are `None`, the system falls back to plain `tracing_subscriber::fmt` logging.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetryConfig {
     /// OTLP gRPC endpoint (e.g. "http://localhost:4317").
@@ -15,15 +15,6 @@ pub struct TelemetryConfig {
     /// When set, a Prometheus metrics exporter is started on `0.0.0.0:<port>`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prometheus_port: Option<u16>,
-}
-
-impl Default for TelemetryConfig {
-    fn default() -> Self {
-        Self {
-            otlp_endpoint: None,
-            prometheus_port: None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -48,7 +39,10 @@ mod tests {
     fn telemetry_config_deserialize_with_otlp() {
         let toml_str = r#"otlp_endpoint = "http://localhost:4317""#;
         let config: TelemetryConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.otlp_endpoint.as_deref(), Some("http://localhost:4317"));
+        assert_eq!(
+            config.otlp_endpoint.as_deref(),
+            Some("http://localhost:4317")
+        );
         assert!(config.prometheus_port.is_none());
     }
 
@@ -82,10 +76,7 @@ prometheus_port = 9464
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let deserialized: TelemetryConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(
-            config.otlp_endpoint,
-            deserialized.otlp_endpoint
-        );
+        assert_eq!(config.otlp_endpoint, deserialized.otlp_endpoint);
         assert_eq!(config.prometheus_port, deserialized.prometheus_port);
     }
 

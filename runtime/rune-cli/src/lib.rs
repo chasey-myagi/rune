@@ -6,16 +6,15 @@ pub mod output;
 pub mod runtime;
 
 fn long_about() -> String {
-    format!(
-        "\x1b[33;1m  ᚱ\x1b[0m\n\
-         \x1b[36m     ____\n\
-         \x1b[36m    / __ \\__  ______  ___\n\
-         \x1b[36m   / /_/ / / / / __ \\/ _ \\\n\
-         \x1b[36m  / _, _/ /_/ / / / /  __/\n\
-         \x1b[36m /_/ |_|\\__,_/_/ /_/\\___/\x1b[0m\n\
-         \x1b[2m  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n\
-         \x1b[2m  Define functions. Get APIs + Workflows + Distributed Execution.\x1b[0m"
-    )
+    "\x1b[33;1m  ᚱ\x1b[0m\n\
+     \x1b[36m     ____\n\
+     \x1b[36m    / __ \\__  ______  ___\n\
+     \x1b[36m   / /_/ / / / / __ \\/ _ \\\n\
+     \x1b[36m  / _, _/ /_/ / / / /  __/\n\
+     \x1b[36m /_/ |_|\\__,_/_/ /_/\\___/\x1b[0m\n\
+     \x1b[2m  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n\
+     \x1b[2m  Define functions. Get APIs + Workflows + Distributed Execution.\x1b[0m"
+        .to_string()
 }
 
 #[derive(Parser, Debug)]
@@ -121,6 +120,10 @@ pub enum Commands {
     /// View connected Casters
     Casters,
 
+    /// Manage the local Pilot daemon
+    #[command(subcommand)]
+    Pilot(PilotCommands),
+
     /// API Key management
     #[command(subcommand)]
     Key(KeyCommands),
@@ -209,6 +212,21 @@ pub enum KeyCommands {
         /// Key ID to revoke
         key_id: String,
     },
+
+    /// Bootstrap the first admin key by writing directly to the local database
+    Bootstrap {
+        /// Human-readable label
+        #[arg(long, default_value = "bootstrap-admin")]
+        label: String,
+
+        /// Path to the Rune database file
+        #[arg(long, default_value = "rune.db")]
+        db_path: String,
+
+        /// Create an additional admin key even if one already exists
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -242,6 +260,22 @@ pub enum FlowCommands {
         /// Flow name
         name: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PilotCommands {
+    /// Run the Pilot daemon in the foreground
+    Daemon {
+        /// Runtime gRPC address, e.g. localhost:50070
+        #[arg(long)]
+        runtime: String,
+    },
+
+    /// Show local Pilot status
+    Status,
+
+    /// Stop the local Pilot daemon
+    Stop,
 }
 
 #[derive(Subcommand, Debug)]

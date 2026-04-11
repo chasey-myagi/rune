@@ -33,6 +33,10 @@ pub enum SdkError {
     #[error("invalid uri: {0}")]
     InvalidUri(String),
 
+    /// Attach was rejected by the runtime — permanent, do not retry.
+    #[error("attach rejected: {0}")]
+    AttachRejected(String),
+
     /// Other errors.
     #[error("{0}")]
     Other(String),

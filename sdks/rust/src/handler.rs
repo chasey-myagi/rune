@@ -30,12 +30,18 @@ pub type RuneHandlerWithFilesFn = Arc<
 >;
 
 /// A stream handler function: `(ctx, input, stream) -> Result<()>`.
-pub type StreamRuneHandlerFn =
-    Arc<dyn Fn(RuneContext, Bytes, StreamSender) -> BoxFuture<'static, SdkResult<()>> + Send + Sync>;
+pub type StreamRuneHandlerFn = Arc<
+    dyn Fn(RuneContext, Bytes, StreamSender) -> BoxFuture<'static, SdkResult<()>> + Send + Sync,
+>;
 
 /// A stream handler that also accepts files: `(ctx, input, files, stream) -> Result<()>`.
 pub type StreamRuneHandlerWithFilesFn = Arc<
-    dyn Fn(RuneContext, Bytes, Vec<FileAttachment>, StreamSender) -> BoxFuture<'static, SdkResult<()>>
+    dyn Fn(
+            RuneContext,
+            Bytes,
+            Vec<FileAttachment>,
+            StreamSender,
+        ) -> BoxFuture<'static, SdkResult<()>>
         + Send
         + Sync,
 >;

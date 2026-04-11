@@ -16,3 +16,13 @@ pub struct RuneContext {
     /// Cancellation token that fires when the request is cancelled.
     pub cancellation: CancellationToken,
 }
+
+impl RuneContext {
+    pub fn trace_id(&self) -> Option<&str> {
+        self.context.get("trace_id").map(String::as_str)
+    }
+
+    pub fn parent_request_id(&self) -> Option<&str> {
+        self.context.get("parent_request_id").map(String::as_str)
+    }
+}

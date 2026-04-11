@@ -1,6 +1,7 @@
 //! Caster — connects to Rune runtime and executes registered handlers.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -13,14 +14,15 @@ use tonic::transport::Channel;
 use rune_proto::rune_service_client::RuneServiceClient;
 use rune_proto::{
     session_message::Payload, CasterAttach, ErrorDetail, ExecuteResult,
-    GateConfig as ProtoGateConfig, Heartbeat, RuneDeclaration, SessionMessage, StreamEnd,
-    StreamEvent,
+    GateConfig as ProtoGateConfig, HealthReport, HealthStatus, Heartbeat, RuneDeclaration,
+    SessionMessage, StreamEnd, StreamEvent,
 };
 
 use crate::config::{CasterConfig, FileAttachment, RuneConfig};
 use crate::context::RuneContext;
 use crate::error::{SdkError, SdkResult};
 use crate::handler::{BoxFuture, HandlerKind, RegisteredRune};
+use crate::pilot_client::PilotClient;
 use crate::stream::StreamSender;
 
 /// Caster connects to a Rune Runtime and registers Rune handlers.
@@ -29,6 +31,9 @@ pub struct Caster {
     caster_id: String,
     runes: Arc<RwLock<HashMap<String, RegisteredRune>>>,
     shutdown_token: CancellationToken,
+    active_requests: Arc<AtomicU32>,
+    /// When true, new Execute requests are rejected with SHUTTING_DOWN.
+    draining: Arc<AtomicBool>,
 }
 
 impl Caster {
@@ -43,6 +48,8 @@ impl Caster {
             caster_id,
             runes: Arc::new(RwLock::new(HashMap::new())),
             shutdown_token: CancellationToken::new(),
+            active_requests: Arc::new(AtomicU32::new(0)),
+            draining: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -63,7 +70,11 @@ impl Caster {
 
     /// Returns the config of a registered rune by name.
     pub fn get_rune_config(&self, name: &str) -> Option<RuneConfig> {
-        self.runes.read().unwrap().get(name).map(|r| r.config.clone())
+        self.runes
+            .read()
+            .unwrap()
+            .get(name)
+            .map(|r| r.config.clone())
     }
 
     /// Check if a rune is registered as a stream handler.
@@ -122,12 +133,11 @@ impl Caster {
         F: Fn(RuneContext, Bytes, Vec<FileAttachment>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = SdkResult<Bytes>> + Send + 'static,
     {
-        let handler =
-            Arc::new(
-                move |ctx, input, files| -> BoxFuture<'static, SdkResult<Bytes>> {
-                    Box::pin(handler(ctx, input, files))
-                },
-            );
+        let handler = Arc::new(
+            move |ctx, input, files| -> BoxFuture<'static, SdkResult<Bytes>> {
+                Box::pin(handler(ctx, input, files))
+            },
+        );
         self.register_inner(config, HandlerKind::UnaryWithFiles(handler))
     }
 
@@ -139,10 +149,11 @@ impl Caster {
         F: Fn(RuneContext, Bytes, StreamSender) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = SdkResult<()>> + Send + 'static,
     {
-        let handler =
-            Arc::new(move |ctx, input, stream| -> BoxFuture<'static, SdkResult<()>> {
+        let handler = Arc::new(
+            move |ctx, input, stream| -> BoxFuture<'static, SdkResult<()>> {
                 Box::pin(handler(ctx, input, stream))
-            });
+            },
+        );
         let mut cfg = config;
         cfg.supports_stream = true;
         self.register_inner(cfg, HandlerKind::Stream(handler))
@@ -151,18 +162,14 @@ impl Caster {
     /// Register a streaming rune handler that accepts file attachments.
     pub fn stream_rune_with_files<F, Fut>(&self, config: RuneConfig, handler: F) -> SdkResult<()>
     where
-        F: Fn(RuneContext, Bytes, Vec<FileAttachment>, StreamSender) -> Fut
-            + Send
-            + Sync
-            + 'static,
+        F: Fn(RuneContext, Bytes, Vec<FileAttachment>, StreamSender) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = SdkResult<()>> + Send + 'static,
     {
-        let handler =
-            Arc::new(
-                move |ctx, input, files, stream| -> BoxFuture<'static, SdkResult<()>> {
-                    Box::pin(handler(ctx, input, files, stream))
-                },
-            );
+        let handler = Arc::new(
+            move |ctx, input, files, stream| -> BoxFuture<'static, SdkResult<()>> {
+                Box::pin(handler(ctx, input, files, stream))
+            },
+        );
         let mut cfg = config;
         cfg.supports_stream = true;
         self.register_inner(cfg, HandlerKind::StreamWithFiles(handler))
@@ -190,35 +197,72 @@ impl Caster {
     pub async fn run(&self) -> SdkResult<()> {
         let mut delay = Duration::from_secs_f64(self.config.reconnect_base_delay_secs);
         let max_delay = Duration::from_secs_f64(self.config.reconnect_max_delay_secs);
+        let mut last_pilot: Option<PilotClient> = None;
 
-        loop {
+        let result = loop {
             if self.shutdown_token.is_cancelled() {
-                return Ok(());
+                break Ok(());
             }
-            match self.connect_and_run().await {
-                Ok(()) => return Ok(()),
+
+            // (Re-)establish pilot registration on every connect attempt so
+            // that a pilot daemon restart is picked up automatically.
+            let pilot_id = if let Some(policy) = self.config.scale_policy.as_ref() {
+                match PilotClient::ensure(&self.config.runtime, self.config.key.as_deref()).await {
+                    Ok(client) => match client.register(&self.caster_id, policy).await {
+                        Ok(()) => {
+                            let id = client.pilot_id().to_string();
+                            last_pilot = Some(client);
+                            Some(id)
+                        }
+                        Err(e) => {
+                            tracing::warn!("pilot registration failed: {e}");
+                            last_pilot = Some(client);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("pilot ensure failed: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            match self.connect_and_run(pilot_id.as_deref()).await {
+                Ok(()) => break Ok(()),
+                Err(SdkError::AttachRejected(reason)) => {
+                    tracing::error!("attach permanently rejected: {reason}");
+                    break Err(SdkError::AttachRejected(reason));
+                }
                 Err(e) => {
                     if self.shutdown_token.is_cancelled() {
-                        return Ok(());
+                        break Ok(());
                     }
-                    tracing::warn!(
-                        "connection error: {}, reconnecting in {:?}",
-                        e,
-                        delay
-                    );
+                    tracing::warn!("connection error: {}, reconnecting in {:?}", e, delay);
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
                         _ = self.shutdown_token.cancelled() => {
-                            return Ok(());
+                            break Ok(());
                         }
                     }
                     delay = (delay * 2).min(max_delay);
                 }
             }
+        };
+
+        // Best-effort deregister on shutdown — reuse the cached client to
+        // avoid accidentally spawning a new pilot daemon.
+        if let Some(client) = last_pilot {
+            let _ = client.deregister(&self.caster_id).await;
         }
+
+        result
     }
 
-    async fn connect_and_run(&self) -> SdkResult<()> {
+    async fn connect_and_run(&self, pilot_id: Option<&str>) -> SdkResult<()> {
+        // Reset draining state from any previous shutdown cycle.
+        self.draining.store(false, Ordering::Relaxed);
         let endpoint = format!("http://{}", self.config.runtime);
         let channel = Channel::from_shared(endpoint)
             .map_err(|e| SdkError::InvalidUri(e.to_string()))?
@@ -233,7 +277,7 @@ impl Caster {
         let mut inbound = response.into_inner();
 
         // Send CasterAttach
-        let attach_msg = self.build_attach_message();
+        let attach_msg = self.build_attach_message(pilot_id);
         tx.send(attach_msg)
             .await
             .map_err(|e| SdkError::ChannelSend(e.to_string()))?;
@@ -241,6 +285,9 @@ impl Caster {
         // Start heartbeat
         let hb_tx = tx.clone();
         let hb_interval = Duration::from_secs_f64(self.config.heartbeat_interval_secs);
+        let config = self.config.clone();
+        let active_requests = Arc::clone(&self.active_requests);
+        let hb_draining = Arc::clone(&self.draining);
         let hb_handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(hb_interval).await;
@@ -253,6 +300,16 @@ impl Caster {
                     })),
                 };
                 if hb_tx.send(msg).await.is_err() {
+                    break;
+                }
+                // Always send HealthReport regardless of scale_policy
+                let active = active_requests.load(Ordering::Relaxed);
+                let is_draining = hb_draining.load(Ordering::Relaxed);
+                if hb_tx
+                    .send(build_health_report_message(&config, active, is_draining))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -283,16 +340,42 @@ impl Caster {
                             self.config.runtime,
                             self.caster_id
                         );
+                        // Always send initial HealthReport regardless of scale_policy
+                        tx.send(build_health_report_message(
+                            &self.config,
+                            self.active_requests.load(Ordering::Relaxed),
+                            self.draining.load(Ordering::Relaxed),
+                        ))
+                        .await
+                        .map_err(|e| SdkError::ChannelSend(e.to_string()))?;
                     } else {
                         tracing::error!("attach rejected: {}", ack.reason);
-                        return Err(SdkError::Other(format!(
-                            "attach rejected: {}",
-                            ack.reason
-                        )));
+                        return Err(SdkError::AttachRejected(ack.reason.clone()));
                     }
                 }
                 Some(Payload::Execute(req)) => {
+                    // Reject new requests while draining for graceful shutdown.
+                    if self.draining.load(Ordering::Relaxed) {
+                        let _ = tx
+                            .send(SessionMessage {
+                                payload: Some(Payload::Result(ExecuteResult {
+                                    request_id: req.request_id,
+                                    status: rune_proto::Status::Failed.into(),
+                                    output: vec![],
+                                    error: Some(ErrorDetail {
+                                        code: "SHUTTING_DOWN".into(),
+                                        message: "caster is draining, no new requests accepted"
+                                            .into(),
+                                        details: vec![],
+                                    }),
+                                    attachments: vec![],
+                                })),
+                            })
+                            .await;
+                        continue;
+                    }
                     let registered = self.runes.read().unwrap().get(&req.rune_name).cloned();
+                    self.active_requests.fetch_add(1, Ordering::Relaxed);
 
                     let token = CancellationToken::new();
                     cancel_tokens
@@ -303,21 +386,64 @@ impl Caster {
                     let tx_clone = tx.clone();
                     let cancel_tokens_clone = cancel_tokens.clone();
                     let request_id = req.request_id.clone();
+                    let active_requests = Arc::clone(&self.active_requests);
                     tokio::spawn(async move {
+                        // Decrement active_requests on exit regardless of
+                        // whether the handler completes normally or panics.
+                        struct Guard(Arc<std::sync::atomic::AtomicU32>);
+                        impl Drop for Guard {
+                            fn drop(&mut self) {
+                                self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                        let _guard = Guard(active_requests);
+
                         execute_handler(registered, req, tx_clone, token).await;
                         cancel_tokens_clone.write().await.remove(&request_id);
                     });
                 }
                 Some(Payload::Cancel(cancel)) => {
-                    if let Some(token) =
-                        cancel_tokens.read().await.get(&cancel.request_id)
-                    {
+                    if let Some(token) = cancel_tokens.read().await.get(&cancel.request_id) {
                         token.cancel();
                     }
                     tracing::info!("cancel requested: {}", cancel.request_id);
                 }
                 Some(Payload::Heartbeat(_)) => {
                     // Server heartbeat — acknowledged silently
+                }
+                Some(Payload::Shutdown(shutdown)) => {
+                    tracing::info!(
+                        "shutdown requested: {}, grace_period_ms={}",
+                        shutdown.reason,
+                        shutdown.grace_period_ms
+                    );
+                    // Mark as draining to reject new Execute requests.
+                    self.draining.store(true, Ordering::Relaxed);
+                    // Immediately advertise UNHEALTHY so the runtime stops
+                    // routing new work to this caster during the grace window.
+                    let _ = tx
+                        .send(build_health_report_message(
+                            &self.config,
+                            self.active_requests.load(Ordering::Relaxed),
+                            true,
+                        ))
+                        .await;
+                    // Graceful drain: wait for in-flight requests to complete
+                    // or until grace_period_ms expires, whichever comes first.
+                    let grace = Duration::from_millis(shutdown.grace_period_ms as u64);
+                    let drain_start = tokio::time::Instant::now();
+                    while self.active_requests.load(Ordering::Relaxed) > 0 {
+                        if drain_start.elapsed() >= grace {
+                            tracing::warn!(
+                                "grace period expired with {} active requests remaining",
+                                self.active_requests.load(Ordering::Relaxed)
+                            );
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    self.stop();
+                    break;
                 }
                 _ => {}
             }
@@ -327,7 +453,7 @@ impl Caster {
         Ok(())
     }
 
-    fn build_attach_message(&self) -> SessionMessage {
+    fn build_attach_message(&self, pilot_id: Option<&str>) -> SessionMessage {
         let runes = self.runes.read().unwrap();
         let mut declarations = Vec::new();
 
@@ -364,11 +490,86 @@ impl Caster {
             payload: Some(Payload::Attach(CasterAttach {
                 caster_id: self.caster_id.clone(),
                 runes: declarations,
-                labels: self.config.labels.clone(),
+                labels: self.attach_labels(pilot_id),
                 max_concurrent: self.config.max_concurrent,
                 key: self.config.key.clone().unwrap_or_default(),
+                role: "caster".into(),
             })),
         }
+    }
+
+    fn attach_labels(&self, pilot_id: Option<&str>) -> HashMap<String, String> {
+        let mut labels = self.config.labels.clone();
+        if let Some(policy) = self.config.scale_policy.as_ref() {
+            labels.insert("group".into(), policy.group.clone());
+            labels.insert("_scale_up".into(), policy.scale_up_threshold.to_string());
+            labels.insert(
+                "_scale_down".into(),
+                policy.scale_down_threshold.to_string(),
+            );
+            labels.insert("_sustained".into(), policy.sustained_secs.to_string());
+            labels.insert("_min".into(), policy.min_replicas.to_string());
+            labels.insert("_max".into(), policy.max_replicas.to_string());
+            labels.insert("_spawn_command".into(), policy.spawn_command.clone());
+            labels.insert("_shutdown_signal".into(), policy.shutdown_signal.clone());
+            if let Some(pilot_id) = pilot_id {
+                labels.insert("_pilot_id".into(), pilot_id.to_string());
+            }
+        }
+        labels
+    }
+}
+
+fn build_health_report_message(
+    config: &CasterConfig,
+    active_requests: u32,
+    draining: bool,
+) -> SessionMessage {
+    let mut metrics = config
+        .load_report
+        .as_ref()
+        .map(|report| report.metrics.clone())
+        .unwrap_or_default();
+    metrics
+        .entry("active_requests".into())
+        .or_insert(active_requests as f64);
+    metrics
+        .entry("max_concurrent".into())
+        .or_insert(config.max_concurrent as f64);
+    metrics
+        .entry("available_permits".into())
+        .or_insert(config.max_concurrent.saturating_sub(active_requests) as f64);
+
+    let computed_pressure = if config.max_concurrent == 0 {
+        0.0
+    } else {
+        active_requests as f64 / config.max_concurrent as f64
+    };
+    let pressure = config
+        .load_report
+        .as_ref()
+        .and_then(|lr| lr.pressure)
+        .unwrap_or(computed_pressure);
+
+    let status = if draining {
+        HealthStatus::Unhealthy
+    } else {
+        HealthStatus::Healthy
+    };
+    SessionMessage {
+        payload: Some(Payload::HealthReport(HealthReport {
+            status: status.into(),
+            active_requests,
+            error_rate: 0.0,
+            custom_info: String::new(),
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            error_rate_window_secs: 0,
+            pressure,
+            metrics,
+        })),
     }
 }
 

@@ -9,7 +9,7 @@ use rune_core::auth::{KeyVerifier, NoopVerifier};
 use rune_core::invoker::LocalInvoker;
 use rune_core::relay::Relay;
 use rune_core::resolver::{Resolver, RoundRobinResolver};
-use rune_core::rune::{GateConfig, RuneConfig, make_handler};
+use rune_core::rune::{make_handler, GateConfig, RuneConfig};
 use rune_core::session::SessionManager;
 use rune_flow::engine::FlowEngine;
 use rune_gate::gate::{self, GateState};
@@ -35,7 +35,8 @@ fn make_state(auth_enabled: bool) -> GateState {
                 }),
                 input_schema: None,
                 output_schema: None,
-                priority: 0, labels: Default::default(),
+                priority: 0,
+                labels: Default::default(),
             },
             Arc::new(LocalInvoker::new(echo_handler)),
             None,
@@ -48,9 +49,10 @@ fn make_state(auth_enabled: bool) -> GateState {
         Arc::new(NoopVerifier)
     };
 
-    let flow_engine = Arc::new(tokio::sync::RwLock::new(
-        FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-    ));
+    let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+        Arc::clone(&relay),
+        Arc::clone(&resolver) as Arc<dyn Resolver>,
+    )));
     GateState {
         auth: gate::AuthState {
             key_verifier,
@@ -68,13 +70,12 @@ fn make_state(auth_enabled: bool) -> GateState {
             max_upload_size_mb: 10,
             request_timeout: std::time::Duration::from_secs(30),
         },
-        flow: gate::FlowState {
-            flow_engine,
-        },
+        flow: gate::FlowState { flow_engine },
         admin: gate::AdminState {
             store,
             started_at: Instant::now(),
             dev_mode: !auth_enabled,
+            scaling: None,
         },
         cors_origins: Arc::new(vec![]),
         rate_limiter: None,
@@ -103,7 +104,9 @@ async fn test_full_auth_chain_reject_no_key() {
         .unwrap();
 
     assert_eq!(response.status(), 401);
-    let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["code"], "UNAUTHORIZED");
 }
@@ -111,7 +114,12 @@ async fn test_full_auth_chain_reject_no_key() {
 #[tokio::test]
 async fn test_full_auth_chain_accept_valid_key() {
     let state = make_state(true);
-    let key_result = state.admin.store.create_key(KeyType::Gate, "integration test").await.unwrap();
+    let key_result = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "integration test")
+        .await
+        .unwrap();
 
     let app = gate::build_router(state, None);
     let response = app
@@ -128,7 +136,9 @@ async fn test_full_auth_chain_accept_valid_key() {
         .unwrap();
 
     assert_eq!(response.status(), 200);
-    let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["hello"], "world");
 }
@@ -210,7 +220,9 @@ async fn test_async_task_persisted_to_sqlite() {
         .unwrap();
 
     assert_eq!(response.status(), 202);
-    let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let task_id = json["task_id"].as_str().unwrap().to_string();
 
@@ -229,10 +241,17 @@ async fn test_task_cancel_updates_sqlite_status() {
     let state = make_state(false);
 
     // Insert a task manually in running state
-    state.admin.store.insert_task("cancel-me", "echo", Some("test")).await.unwrap();
     state
-        .admin.store
-        .update_task_status("cancel-me", TaskStatus::Running, None, None).await
+        .admin
+        .store
+        .insert_task("cancel-me", "echo", Some("test"))
+        .await
+        .unwrap();
+    state
+        .admin
+        .store
+        .update_task_status("cancel-me", TaskStatus::Running, None, None)
+        .await
         .unwrap();
 
     let app = gate::build_router(state.clone(), None);
@@ -250,7 +269,13 @@ async fn test_task_cancel_updates_sqlite_status() {
     assert_eq!(response.status(), 200);
 
     // Verify SQLite reflects cancelled status
-    let task = state.admin.store.get_task("cancel-me").await.unwrap().unwrap();
+    let task = state
+        .admin
+        .store
+        .get_task("cancel-me")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(task.status, TaskStatus::Cancelled);
 }
 
@@ -263,7 +288,12 @@ async fn test_key_create_then_authenticate() {
     let state = make_state(true);
 
     // Create a key directly in store
-    let key = state.admin.store.create_key(KeyType::Gate, "lifecycle test").await.unwrap();
+    let key = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "lifecycle test")
+        .await
+        .unwrap();
 
     // Use the key to authenticate
     let app = gate::build_router(state, None);
@@ -288,7 +318,12 @@ async fn test_revoked_key_fails_auth() {
     let state = make_state(true);
 
     // Create and then revoke a key
-    let key = state.admin.store.create_key(KeyType::Gate, "revocable").await.unwrap();
+    let key = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "revocable")
+        .await
+        .unwrap();
     state.admin.store.revoke_key(key.api_key.id).await.unwrap();
 
     let app = gate::build_router(state, None);
@@ -329,7 +364,12 @@ async fn test_sync_call_recorded_in_logs() {
         .unwrap();
 
     // Check call log was recorded
-    let logs = state.admin.store.query_logs(Some("echo"), 10).await.unwrap();
+    let logs = state
+        .admin
+        .store
+        .query_logs(Some("echo"), 10)
+        .await
+        .unwrap();
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].rune_name, "echo");
     assert_eq!(logs[0].mode, "sync");
@@ -368,7 +408,9 @@ async fn test_mgmt_stats_reflects_calls() {
         .unwrap();
 
     assert_eq!(response.status(), 200);
-    let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["total_calls"], 3);
 }
@@ -403,7 +445,9 @@ async fn test_mgmt_logs_endpoint() {
         .unwrap();
 
     assert_eq!(response.status(), 200);
-    let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["logs"].as_array().unwrap().len() >= 1);
 }
@@ -419,7 +463,12 @@ async fn test_full_auth_chain_create_key_call_rune_verify_log() {
     // Step 1: create a gate key via management API (mgmt routes are behind auth
     // middleware too, so we create the key directly in the store first to
     // bootstrap, then use it)
-    let bootstrap_key = state.admin.store.create_key(KeyType::Gate, "bootstrap").await.unwrap();
+    let bootstrap_key = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "bootstrap")
+        .await
+        .unwrap();
 
     // Step 2: use the bootstrap key to call the echo rune
     let app = gate::build_router(state.clone(), None);
@@ -437,12 +486,19 @@ async fn test_full_auth_chain_create_key_call_rune_verify_log() {
         .unwrap();
 
     assert_eq!(response.status(), 200);
-    let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["chain"], "test");
 
     // Step 3: verify a call log was recorded with correct rune name and mode
-    let logs = state.admin.store.query_logs(Some("echo"), 10).await.unwrap();
+    let logs = state
+        .admin
+        .store
+        .query_logs(Some("echo"), 10)
+        .await
+        .unwrap();
     assert!(!logs.is_empty(), "call log should be recorded");
     assert_eq!(logs[0].rune_name, "echo");
     assert_eq!(logs[0].mode, "sync");
@@ -458,7 +514,12 @@ async fn test_key_immediately_usable_after_creation() {
     let state = make_state(true);
 
     // Create a key and immediately use it in the very next request (no sleep)
-    let key = state.admin.store.create_key(KeyType::Gate, "instant").await.unwrap();
+    let key = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "instant")
+        .await
+        .unwrap();
 
     let app = gate::build_router(state.clone(), None);
     let response = app
@@ -476,7 +537,9 @@ async fn test_key_immediately_usable_after_creation() {
 
     // Must succeed without any delay
     assert_eq!(response.status(), 200);
-    let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["instant"], true);
 }
@@ -490,9 +553,24 @@ async fn test_multiple_keys_independent() {
     let state = make_state(true);
 
     // Create three independent keys
-    let key_a = state.admin.store.create_key(KeyType::Gate, "key-a").await.unwrap();
-    let key_b = state.admin.store.create_key(KeyType::Gate, "key-b").await.unwrap();
-    let key_c = state.admin.store.create_key(KeyType::Gate, "key-c").await.unwrap();
+    let key_a = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "key-a")
+        .await
+        .unwrap();
+    let key_b = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "key-b")
+        .await
+        .unwrap();
+    let key_c = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "key-c")
+        .await
+        .unwrap();
 
     // All three should work
     for (label, raw_key) in [
@@ -523,7 +601,12 @@ async fn test_multiple_keys_independent() {
     }
 
     // Revoke key_b — only key_b should stop working
-    state.admin.store.revoke_key(key_b.api_key.id).await.unwrap();
+    state
+        .admin
+        .store
+        .revoke_key(key_b.api_key.id)
+        .await
+        .unwrap();
 
     // key_a still works
     let app = gate::build_router(state.clone(), None);
@@ -539,7 +622,11 @@ async fn test_multiple_keys_independent() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), 200, "key_a should still work after revoking key_b");
+    assert_eq!(
+        response.status(),
+        200,
+        "key_a should still work after revoking key_b"
+    );
 
     // key_b now rejected
     let app = gate::build_router(state.clone(), None);
@@ -554,7 +641,11 @@ async fn test_multiple_keys_independent() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), 401, "key_b should be rejected after revocation");
+    assert_eq!(
+        response.status(),
+        401,
+        "key_b should be rejected after revocation"
+    );
 
     // key_c still works
     let app = gate::build_router(state.clone(), None);
@@ -570,7 +661,11 @@ async fn test_multiple_keys_independent() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), 200, "key_c should still work after revoking key_b");
+    assert_eq!(
+        response.status(),
+        200,
+        "key_c should still work after revoking key_b"
+    );
 }
 
 // ===========================================================================
@@ -581,8 +676,10 @@ async fn test_multiple_keys_independent() {
 async fn test_concurrent_authenticated_requests() {
     let state = make_state(true);
     let key = state
-        .admin.store
-        .create_key(KeyType::Gate, "concurrent").await
+        .admin
+        .store
+        .create_key(KeyType::Gate, "concurrent")
+        .await
         .unwrap();
 
     let mut handles = Vec::new();
@@ -609,15 +706,16 @@ async fn test_concurrent_authenticated_requests() {
 
     for (idx, handle) in handles.into_iter().enumerate() {
         let status = handle.await.unwrap();
-        assert_eq!(
-            status, 200,
-            "concurrent request {} should succeed",
-            idx
-        );
+        assert_eq!(status, 200, "concurrent request {} should succeed", idx);
     }
 
     // Verify all 10 calls were logged
-    let logs = state.admin.store.query_logs(Some("echo"), 100).await.unwrap();
+    let logs = state
+        .admin
+        .store
+        .query_logs(Some("echo"), 100)
+        .await
+        .unwrap();
     assert_eq!(logs.len(), 10, "all 10 calls should be recorded");
     for log in &logs {
         assert_eq!(log.rune_name, "echo");
@@ -634,8 +732,10 @@ async fn test_concurrent_authenticated_requests() {
 async fn test_full_async_chain_with_auth() {
     let state = make_state(true);
     let key = state
-        .admin.store
-        .create_key(KeyType::Gate, "async-chain").await
+        .admin
+        .store
+        .create_key(KeyType::Gate, "async-chain")
+        .await
         .unwrap();
 
     // Step 1: Authenticated async call
@@ -686,7 +786,12 @@ async fn test_full_async_chain_with_auth() {
     assert!(json["output"].is_string());
 
     // Step 4: Verify call log
-    let logs = state.admin.store.query_logs(Some("echo"), 10).await.unwrap();
+    let logs = state
+        .admin
+        .store
+        .query_logs(Some("echo"), 10)
+        .await
+        .unwrap();
     assert!(!logs.is_empty(), "async call should be logged");
     let async_log = logs.iter().find(|l| l.mode == "async");
     assert!(async_log.is_some(), "should have an async mode log entry");
@@ -700,8 +805,10 @@ async fn test_full_async_chain_with_auth() {
 async fn test_revoked_key_rejects_pending_request() {
     let state = make_state(true);
     let key = state
-        .admin.store
-        .create_key(KeyType::Gate, "to-revoke").await
+        .admin
+        .store
+        .create_key(KeyType::Gate, "to-revoke")
+        .await
         .unwrap();
 
     // First request succeeds
@@ -765,7 +872,8 @@ async fn test_mixed_sync_and_stream_runes() {
                 }),
                 input_schema: None,
                 output_schema: None,
-                priority: 0, labels: Default::default(),
+                priority: 0,
+                labels: Default::default(),
             },
             Arc::new(LocalInvoker::new(sync_handler)),
             None,
@@ -787,16 +895,18 @@ async fn test_mixed_sync_and_stream_runes() {
                 }),
                 input_schema: None,
                 output_schema: None,
-                priority: 0, labels: Default::default(),
+                priority: 0,
+                labels: Default::default(),
             },
             Arc::new(LocalInvoker::new(stream_handler)),
             None,
         )
         .unwrap();
 
-    let flow_engine = Arc::new(tokio::sync::RwLock::new(
-        FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-    ));
+    let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+        Arc::clone(&relay),
+        Arc::clone(&resolver) as Arc<dyn Resolver>,
+    )));
     let state = GateState {
         auth: gate::AuthState {
             key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
@@ -814,13 +924,12 @@ async fn test_mixed_sync_and_stream_runes() {
             max_upload_size_mb: 10,
             request_timeout: std::time::Duration::from_secs(30),
         },
-        flow: gate::FlowState {
-            flow_engine,
-        },
+        flow: gate::FlowState { flow_engine },
         admin: gate::AdminState {
             store,
             started_at: std::time::Instant::now(),
             dev_mode: true,
+            scaling: None,
         },
         cors_origins: Arc::new(vec![]),
         rate_limiter: None,
@@ -855,7 +964,11 @@ async fn test_mixed_sync_and_stream_runes() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), 400, "stream on sync-only rune should fail");
+    assert_eq!(
+        response.status(),
+        400,
+        "stream on sync-only rune should fail"
+    );
 
     // Stream rune: normal sync call also works (fallback)
     let app = gate::build_router(state.clone(), None);
@@ -870,7 +983,11 @@ async fn test_mixed_sync_and_stream_runes() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), 200, "sync call on stream rune should work");
+    assert_eq!(
+        response.status(),
+        200,
+        "sync call on stream rune should work"
+    );
 
     // Stream rune: stream request should succeed (returns SSE)
     let app = gate::build_router(state.clone(), None);
@@ -885,7 +1002,11 @@ async fn test_mixed_sync_and_stream_runes() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), 200, "stream on stream rune should succeed");
+    assert_eq!(
+        response.status(),
+        200,
+        "stream on stream rune should succeed"
+    );
     // Verify it's SSE content type
     let ct = response
         .headers()
@@ -898,6 +1019,91 @@ async fn test_mixed_sync_and_stream_runes() {
         "stream response should be SSE, got: {}",
         ct
     );
+}
+
+#[tokio::test]
+async fn test_stream_not_supported_error_includes_request_id() {
+    let state = make_state(false);
+    let app = gate::build_router(state, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/runes/echo/run?stream=true")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"hello":"world"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 400);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "STREAM_NOT_SUPPORTED");
+    assert!(json["error"]["request_id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_flow_create_and_delete_write_through_to_store() {
+    let state = make_state(false);
+    let app = gate::build_router(state.clone(), None);
+    let flow_json = serde_json::json!({
+        "name": "persisted-flow",
+        "steps": [
+            {
+                "name": "step-a",
+                "rune": "echo",
+                "depends_on": [],
+                "condition": null,
+                "input_mapping": null
+            }
+        ],
+        "gate_path": null
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/flows")
+                .header("content-type", "application/json")
+                .body(Body::from(flow_json.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    assert!(state
+        .admin
+        .store
+        .get_flow("persisted-flow")
+        .await
+        .unwrap()
+        .is_some());
+
+    let app = gate::build_router(state.clone(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/flows/persisted-flow")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 204);
+    assert!(state
+        .admin
+        .store
+        .get_flow("persisted-flow")
+        .await
+        .unwrap()
+        .is_none());
 }
 
 // ===========================================================================
@@ -926,7 +1132,8 @@ async fn test_stats_accumulate_across_runes() {
                     }),
                     input_schema: None,
                     output_schema: None,
-                    priority: 0, labels: Default::default(),
+                    priority: 0,
+                    labels: Default::default(),
                 },
                 Arc::new(LocalInvoker::new(handler)),
                 None,
@@ -934,9 +1141,10 @@ async fn test_stats_accumulate_across_runes() {
             .unwrap();
     }
 
-    let flow_engine = Arc::new(tokio::sync::RwLock::new(
-        FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver) as Arc<dyn Resolver>),
-    ));
+    let flow_engine = Arc::new(tokio::sync::RwLock::new(FlowEngine::new(
+        Arc::clone(&relay),
+        Arc::clone(&resolver) as Arc<dyn Resolver>,
+    )));
     let state = GateState {
         auth: gate::AuthState {
             key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
@@ -954,13 +1162,12 @@ async fn test_stats_accumulate_across_runes() {
             max_upload_size_mb: 10,
             request_timeout: std::time::Duration::from_secs(30),
         },
-        flow: gate::FlowState {
-            flow_engine,
-        },
+        flow: gate::FlowState { flow_engine },
         admin: gate::AdminState {
             store,
             started_at: std::time::Instant::now(),
             dev_mode: true,
+            scaling: None,
         },
         cors_origins: Arc::new(vec![]),
         rate_limiter: None,
@@ -1000,11 +1207,7 @@ async fn test_stats_accumulate_across_runes() {
     // Query stats
     let app = gate::build_router(state, None);
     let response = app
-        .oneshot(
-            Request::get("/api/v1/stats")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::get("/api/v1/stats").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -1037,7 +1240,12 @@ async fn test_stats_accumulate_across_runes() {
 #[tokio::test]
 async fn test_gate_key_cannot_create_keys() {
     let state = make_state(true); // auth enabled, dev_mode=false
-    let gate_key = state.admin.store.create_key(KeyType::Gate, "normal user").await.unwrap();
+    let gate_key = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "normal user")
+        .await
+        .unwrap();
 
     let app = gate::build_router(state, None);
     let response = app
@@ -1063,8 +1271,18 @@ async fn test_gate_key_cannot_create_keys() {
 #[tokio::test]
 async fn test_gate_key_cannot_revoke_keys() {
     let state = make_state(true);
-    let gate_key = state.admin.store.create_key(KeyType::Gate, "normal user").await.unwrap();
-    let target_key = state.admin.store.create_key(KeyType::Gate, "target").await.unwrap();
+    let gate_key = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "normal user")
+        .await
+        .unwrap();
+    let target_key = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "target")
+        .await
+        .unwrap();
 
     let app = gate::build_router(state, None);
     let response = app
@@ -1089,7 +1307,12 @@ async fn test_gate_key_cannot_revoke_keys() {
 #[tokio::test]
 async fn test_gate_key_cannot_list_keys() {
     let state = make_state(true);
-    let gate_key = state.admin.store.create_key(KeyType::Gate, "normal user").await.unwrap();
+    let gate_key = state
+        .admin
+        .store
+        .create_key(KeyType::Gate, "normal user")
+        .await
+        .unwrap();
 
     let app = gate::build_router(state, None);
     let response = app
@@ -1133,4 +1356,23 @@ async fn test_dev_mode_key_management_still_works() {
         201,
         "dev mode should allow key management without auth"
     );
+}
+
+// ===========================================================================
+// MF-1 Regression: flow async binary input uses hex encoding
+// ===========================================================================
+
+#[test]
+fn test_fix_flow_async_binary_input_uses_hex_encoding() {
+    // Verify non-UTF8 bytes are hex-encoded rather than lossy-replaced
+    let binary = vec![0xFF, 0xFE, 0x00, 0x80];
+    let result = match std::str::from_utf8(&binary) {
+        Ok(s) => s.to_string(),
+        Err(_) => format!("hex:{}", hex::encode(&binary)),
+    };
+    assert!(
+        result.starts_with("hex:"),
+        "binary input should be hex-encoded"
+    );
+    assert_eq!(result, "hex:fffe0080");
 }

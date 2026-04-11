@@ -1,5 +1,5 @@
-use anyhow::Result;
 use crate::runtime::{self, binary, docker, state};
+use anyhow::Result;
 
 pub async fn run(force: bool, timeout: u64) -> Result<()> {
     let current = match state::read_state()? {
@@ -34,7 +34,9 @@ pub async fn run(force: bool, timeout: u64) -> Result<()> {
             }
         }
         state::RuntimeMode::Binary => {
-            let pid = current.pid.ok_or_else(|| anyhow::anyhow!("Binary mode state has no PID"))?;
+            let pid = current
+                .pid
+                .ok_or_else(|| anyhow::anyhow!("Binary mode state has no PID"))?;
             if force {
                 eprintln!("Force-stopping Runtime (PID {})...", pid);
                 binary::send_sigkill(pid)?;

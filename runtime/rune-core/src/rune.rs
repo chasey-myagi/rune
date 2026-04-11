@@ -21,9 +21,9 @@ pub struct RuneConfig {
     pub description: String,
     pub supports_stream: bool,
     pub gate: Option<GateConfig>,
-    pub input_schema: Option<String>,   // JSON Schema string
-    pub output_schema: Option<String>,  // JSON Schema string
-    pub priority: i32,                  // Caster 优先级（高值优先）
+    pub input_schema: Option<String>,  // JSON Schema string
+    pub output_schema: Option<String>, // JSON Schema string
+    pub priority: i32,                 // Caster 优先级（高值优先）
     pub labels: std::collections::HashMap<String, String>,
 }
 
@@ -35,7 +35,10 @@ pub struct GateConfig {
 
 impl Default for GateConfig {
     fn default() -> Self {
-        Self { path: String::new(), method: "POST".to_string() }
+        Self {
+            path: String::new(),
+            method: "POST".to_string(),
+        }
     }
 }
 
@@ -54,6 +57,14 @@ pub enum RuneError {
     Timeout,
     #[error("cancelled")]
     Cancelled,
+    #[error("rate limited: retry after {retry_after_secs}s")]
+    RateLimited { retry_after_secs: u64 },
+    #[error("circuit open for rune '{rune_name}'")]
+    CircuitOpen { rune_name: String },
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -77,7 +88,12 @@ where
 /// 流式 Rune handler
 #[async_trait::async_trait]
 pub trait StreamRuneHandler: Send + Sync + 'static {
-    async fn execute(&self, ctx: RuneContext, input: Bytes, tx: StreamSender) -> Result<(), RuneError>;
+    async fn execute(
+        &self,
+        ctx: RuneContext,
+        input: Bytes,
+        tx: StreamSender,
+    ) -> Result<(), RuneError>;
 }
 
 /// StreamSender — handler pushes stream events through this
@@ -91,12 +107,35 @@ impl StreamSender {
     }
 
     pub async fn emit(&self, data: Bytes) -> Result<(), RuneError> {
-        self.tx.send(Ok(data)).await
+        self.tx
+            .send(Ok(data))
+            .await
             .map_err(|_| RuneError::Internal(anyhow::anyhow!("stream receiver dropped")))
     }
 
     pub async fn end(self) -> Result<(), RuneError> {
         // Drop self, closing the channel
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuneError;
+
+    #[test]
+    fn rate_limited_error_formats_retry_after() {
+        let err = RuneError::RateLimited {
+            retry_after_secs: 12,
+        };
+        assert_eq!(err.to_string(), "rate limited: retry after 12s");
+    }
+
+    #[test]
+    fn circuit_open_error_mentions_rune_name() {
+        let err = RuneError::CircuitOpen {
+            rune_name: "echo".to_string(),
+        };
+        assert_eq!(err.to_string(), "circuit open for rune 'echo'");
     }
 }

@@ -1,19 +1,20 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use clap::Parser;
-use rune_proto::rune_service_server::RuneServiceServer;
 use rune_core::app::App;
 use rune_core::auth::{KeyVerifier, NoopVerifier};
 use rune_core::config::AppConfig;
 use rune_core::grpc_service::RuneGrpcService;
-use rune_core::rune::{RuneConfig, RuneError, GateConfig, make_handler};
+use rune_core::rune::{make_handler, GateConfig, RuneConfig, RuneError};
+use rune_core::scaling::ScaleEvaluator;
 use rune_core::telemetry::TelemetryConfig;
 use rune_flow::dag::{FlowDefinition, StepDefinition};
 use rune_flow::engine::FlowEngine;
 use rune_gate::gate;
-use rune_store::{RuneSnapshot, RuneStore, StoreKeyVerifier};
-use bytes::Bytes;
+use rune_proto::rune_service_server::RuneServiceServer;
+use rune_store::{RuneSnapshot, RuneStore, StoreKeyVerifier, StorePoolConfig};
 
 #[derive(Parser)]
 #[command(name = "rune-server", about = "Rune runtime server")]
@@ -36,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
         config.apply_dev_mode();
     }
     config.apply_env_overrides();
+    config.validate()?;
 
     // ── Telemetry (tracing + metrics) ──
     let _tracer_provider = init_telemetry(&config.telemetry);
@@ -51,13 +53,61 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(dev_mode = config.server.dev_mode, "loading configuration");
 
     // ── Store ──
+    let store_pool_config = StorePoolConfig {
+        reader_count: config.store.reader_pool_size,
+        key_cache_ttl: std::time::Duration::from_secs(config.store.key_cache_ttl_secs),
+        key_cache_negative_ttl: std::time::Duration::from_secs(
+            config.store.key_cache_negative_ttl_secs,
+        ),
+    };
     let store = if config.server.dev_mode && config.store.db_path == "rune.db" {
         // In dev mode with default path, use in-memory database
-        Arc::new(RuneStore::open_in_memory()?)
+        Arc::new(RuneStore::open_in_memory_with_config(
+            store_pool_config.clone(),
+        )?)
     } else {
-        Arc::new(RuneStore::open(&config.store.db_path)?)
+        Arc::new(RuneStore::open_with_config(
+            &config.store.db_path,
+            store_pool_config,
+        )?)
     };
     tracing::info!(db_path = %config.store.db_path, "store initialized");
+
+    if config.auth.enabled && !config.server.dev_mode {
+        if let Some(initial_admin_key) = config.auth.initial_admin_key.as_deref() {
+            match store.has_admin_key().await {
+                Ok(true) => {
+                    tracing::debug!(
+                        "admin key already exists; skipping RUNE_AUTH__INITIAL_ADMIN_KEY bootstrap"
+                    );
+                }
+                Ok(false) => match store
+                    .import_admin_key(initial_admin_key, "initial-admin-from-env")
+                    .await
+                {
+                    Ok(api_key) => {
+                        tracing::info!(
+                            key_prefix = %api_key.key_prefix,
+                            "bootstrapped admin key from RUNE_AUTH__INITIAL_ADMIN_KEY"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "failed to bootstrap admin key from RUNE_AUTH__INITIAL_ADMIN_KEY — aborting"
+                        );
+                        std::process::exit(1);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to check existing admin keys before bootstrap; skipping env bootstrap"
+                    );
+                }
+            }
+        }
+    }
 
     // ── Key Verifier ──
     let key_verifier: Arc<dyn KeyVerifier> = if config.auth.enabled {
@@ -101,7 +151,8 @@ async fn main() -> anyhow::Result<()> {
                 }),
                 input_schema: None,
                 output_schema: None,
-                priority: 0, labels: Default::default(),
+                priority: 0,
+                labels: Default::default(),
             },
             make_handler(|_ctx, _input| async {
                 Ok(Bytes::from(r#"{"message":"hello from local rune!"}"#))
@@ -118,11 +169,12 @@ async fn main() -> anyhow::Result<()> {
                 gate: None,
                 input_schema: None,
                 output_schema: None,
-                priority: 0, labels: Default::default(),
+                priority: 0,
+                labels: Default::default(),
             },
             make_handler(|_ctx, input| async move {
-                let mut v: serde_json::Value =
-                    serde_json::from_slice(&input).map_err(|e| RuneError::InvalidInput(e.to_string()))?;
+                let mut v: serde_json::Value = serde_json::from_slice(&input)
+                    .map_err(|e| RuneError::InvalidInput(e.to_string()))?;
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("step_b".into(), true.into());
                 } else {
@@ -144,26 +196,36 @@ async fn main() -> anyhow::Result<()> {
     // Issue #7 fix: use tokio::spawn instead of block_in_place + block_on
     // to avoid panics on current-thread runtime and improve scheduling efficiency.
     let store_for_attach = store.clone();
-    running.session_mgr.set_on_caster_attach(Arc::new(move |_caster_id, configs| {
-        for config in configs {
-            let store = store_for_attach.clone();
-            let snapshot = RuneSnapshot {
-                rune_name: config.name.clone(),
-                version: config.version.clone(),
-                description: config.description.clone(),
-                supports_stream: config.supports_stream,
-                gate_path: config.gate.as_ref().map(|g| g.path.clone()).unwrap_or_default(),
-                gate_method: config.gate.as_ref().map(|g| g.method.clone()).unwrap_or("POST".into()),
-                last_seen: String::new(), // filled by upsert_snapshot
-            };
-            let rune_name = config.name.clone();
-            tokio::spawn(async move {
-                if let Err(e) = store.upsert_snapshot(&snapshot).await {
-                    tracing::warn!(rune = %rune_name, error = %e, "failed to record snapshot");
-                }
-            });
-        }
-    }));
+    running
+        .session_mgr
+        .set_on_caster_attach(Arc::new(move |_caster_id, configs| {
+            for config in configs {
+                let store = store_for_attach.clone();
+                let snapshot = RuneSnapshot {
+                    rune_name: config.name.clone(),
+                    version: config.version.clone(),
+                    description: config.description.clone(),
+                    supports_stream: config.supports_stream,
+                    gate_path: config
+                        .gate
+                        .as_ref()
+                        .map(|g| g.path.clone())
+                        .unwrap_or_default(),
+                    gate_method: config
+                        .gate
+                        .as_ref()
+                        .map(|g| g.method.clone())
+                        .unwrap_or("POST".into()),
+                    last_seen: String::new(), // filled by upsert_snapshot
+                };
+                let rune_name = config.name.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = store.upsert_snapshot(&snapshot).await {
+                        tracing::warn!(rune = %rune_name, error = %e, "failed to record snapshot");
+                    }
+                });
+            }
+        }));
 
     // ── Flow Engine ──
     let mut flow_engine = FlowEngine::with_timeout(
@@ -172,23 +234,65 @@ async fn main() -> anyhow::Result<()> {
         config.default_timeout(),
     );
 
+    match store.list_flows().await {
+        Ok(flows) => {
+            let flow_count = flows.len();
+            for flow in flows {
+                let flow_name = flow.name.clone();
+                if let Err(e) = flow_engine.register(flow) {
+                    tracing::warn!(
+                        flow = %flow_name,
+                        error = %e,
+                        "failed to restore persisted flow"
+                    );
+                }
+            }
+            tracing::info!(flow_count, "loaded persisted flows");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load persisted flows");
+        }
+    }
+
     // Demo flows — only registered in dev mode
     if config.server.dev_mode {
         let _ = flow_engine.register(FlowDefinition {
             name: "pipeline".to_string(),
             steps: vec![
-                StepDefinition { name: "s_a".into(), rune: "step_a".into(), depends_on: vec![], condition: None, input_mapping: None },
-                StepDefinition { name: "s_b".into(), rune: "step_b".into(), depends_on: vec!["s_a".into()], condition: None, input_mapping: None },
-                StepDefinition { name: "s_c".into(), rune: "step_c".into(), depends_on: vec!["s_b".into()], condition: None, input_mapping: None },
+                StepDefinition {
+                    name: "s_a".into(),
+                    rune: "step_a".into(),
+                    depends_on: vec![],
+                    condition: None,
+                    input_mapping: None,
+                },
+                StepDefinition {
+                    name: "s_b".into(),
+                    rune: "step_b".into(),
+                    depends_on: vec!["s_a".into()],
+                    condition: None,
+                    input_mapping: None,
+                },
+                StepDefinition {
+                    name: "s_c".into(),
+                    rune: "step_c".into(),
+                    depends_on: vec!["s_b".into()],
+                    condition: None,
+                    input_mapping: None,
+                },
             ],
             gate_path: None,
         });
 
         let _ = flow_engine.register(FlowDefinition {
             name: "single".to_string(),
-            steps: vec![
-                StepDefinition { name: "s_a".into(), rune: "step_a".into(), depends_on: vec![], condition: None, input_mapping: None },
-            ],
+            steps: vec![StepDefinition {
+                name: "s_a".into(),
+                rune: "step_a".into(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+            }],
             gate_path: None,
         });
         let _ = flow_engine.register(FlowDefinition {
@@ -204,6 +308,16 @@ async fn main() -> anyhow::Result<()> {
     let flow_engine = Arc::new(tokio::sync::RwLock::new(flow_engine));
     let shutdown = gate::ShutdownCoordinator::new();
     let drain_timeout_secs = config.server.drain_timeout_secs;
+    let scaling = if config.scaling.enabled {
+        let evaluator = Arc::new(ScaleEvaluator::new(
+            Arc::clone(&running.session_mgr),
+            Duration::from_secs(config.scaling.eval_interval_secs),
+        ));
+        Arc::clone(&evaluator).start();
+        Some(evaluator)
+    } else {
+        None
+    };
 
     let gate_state = gate::GateState {
         auth: gate::AuthState {
@@ -226,12 +340,17 @@ async fn main() -> anyhow::Result<()> {
             store: store.clone(),
             started_at: Instant::now(),
             dev_mode: config.server.dev_mode,
+            scaling: scaling.clone(),
         },
         cors_origins: Arc::new(config.gate.cors_origins.clone()),
         rate_limiter: if config.server.dev_mode {
             None
         } else {
-            Some(gate::RateLimitState::new(config.rate_limit.requests_per_minute, 60))
+            Some(gate::RateLimitState::with_per_rune_limits(
+                config.rate_limit.max_requests,
+                config.rate_limit.window_secs,
+                config.rate_limit.per_rune.clone(),
+            ))
         },
         shutdown: shutdown.clone(),
     };
@@ -239,9 +358,8 @@ async fn main() -> anyhow::Result<()> {
     let http_router = gate::build_router(gate_state, None);
 
     // Determine whether TLS is active (disabled in dev mode even if configured)
-    let tls_enabled = !config.server.dev_mode
-        && config.tls.cert_path.is_some()
-        && config.tls.key_path.is_some();
+    let tls_enabled =
+        !config.server.dev_mode && config.tls.cert_path.is_some() && config.tls.key_path.is_some();
 
     if tls_enabled {
         tracing::info!("TLS enabled for HTTP and gRPC servers");
@@ -372,6 +490,11 @@ async fn main() -> anyhow::Result<()> {
     tokio::signal::ctrl_c().await?;
     tracing::info!("received SIGINT, starting graceful shutdown");
 
+    // 0. Stop the scale evaluator so no new grace-period force_kill spawns fire
+    if let Some(ref evaluator) = scaling {
+        evaluator.shutdown();
+    }
+
     // 1. Signal drain mode — new requests will be rejected with 503
     shutdown.start_drain();
     tracing::info!(drain_timeout_secs, "draining in-flight requests");
@@ -385,7 +508,8 @@ async fn main() -> anyhow::Result<()> {
     let _ = tokio::time::timeout(deadline, async {
         let _ = http_handle.await;
         let _ = grpc_handle.await;
-    }).await;
+    })
+    .await;
 
     tracing::info!("drain complete, shutting down");
 
@@ -411,15 +535,12 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// Returns the `SdkTracerProvider` (if created) so the caller can flush spans
 /// on shutdown via `provider.shutdown()`.
-fn init_telemetry(
-    config: &TelemetryConfig,
-) -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
+fn init_telemetry(config: &TelemetryConfig) -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_otlp::WithExportConfig as _;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer();
 
     let provider = if let Some(ref endpoint) = config.otlp_endpoint {

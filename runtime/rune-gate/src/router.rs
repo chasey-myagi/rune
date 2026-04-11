@@ -1,12 +1,12 @@
 use axum::{
-    Router,
     middleware,
     routing::{delete, get, post},
+    Router,
 };
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::handlers;
-use crate::middleware::{auth_middleware, shutdown_middleware, rate_limit_middleware};
+use crate::middleware::{auth_middleware, rate_limit_middleware, shutdown_middleware};
 use crate::state::GateState;
 
 /// Build the Gate Router with auth middleware, CORS, and management API.
@@ -14,22 +14,45 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
     let mut router = Router::new()
         .route("/health", get(handlers::mgmt::health))
         .route("/api/v1/runes", get(handlers::mgmt::list_runes))
-        .route("/api/v1/runes/:name/run", post(handlers::rune::run_rune))
+        .route("/api/v1/runes/{name}/run", post(handlers::rune::run_rune))
         .route("/api/v1/tasks", get(handlers::task::list_tasks))
-        .route("/api/v1/tasks/:id", get(handlers::task::get_task).delete(handlers::task::delete_task))
+        .route(
+            "/api/v1/tasks/{id}",
+            get(handlers::task::get_task).delete(handlers::task::delete_task),
+        )
         // Management API
         .route("/api/v1/status", get(handlers::mgmt::mgmt_status))
         .route("/api/v1/casters", get(handlers::mgmt::mgmt_casters))
         .route("/api/v1/stats", get(handlers::mgmt::mgmt_stats))
+        .route(
+            "/api/v1/stats/casters",
+            get(handlers::mgmt::mgmt_caster_stats),
+        )
         .route("/api/v1/logs", get(handlers::mgmt::mgmt_logs))
-        .route("/api/v1/keys", get(handlers::mgmt::mgmt_list_keys).post(handlers::mgmt::mgmt_create_key))
-        .route("/api/v1/keys/:id", delete(handlers::mgmt::mgmt_revoke_key))
-        .route("/api/v1/openapi.json", get(handlers::openapi::openapi_handler))
-        .route("/api/v1/files/:id", get(handlers::file::download_file))
+        .route(
+            "/api/v1/scaling/status",
+            get(handlers::mgmt::mgmt_scaling_status),
+        )
+        .route(
+            "/api/v1/keys",
+            get(handlers::mgmt::mgmt_list_keys).post(handlers::mgmt::mgmt_create_key),
+        )
+        .route("/api/v1/keys/{id}", delete(handlers::mgmt::mgmt_revoke_key))
+        .route(
+            "/api/v1/openapi.json",
+            get(handlers::openapi::openapi_handler),
+        )
+        .route("/api/v1/files/{id}", get(handlers::file::download_file))
         // Flow API
-        .route("/api/v1/flows", post(handlers::flow::create_flow).get(handlers::flow::list_flows))
-        .route("/api/v1/flows/:name", get(handlers::flow::get_flow).delete(handlers::flow::delete_flow))
-        .route("/api/v1/flows/:name/run", post(handlers::flow::run_flow));
+        .route(
+            "/api/v1/flows",
+            post(handlers::flow::create_flow).get(handlers::flow::list_flows),
+        )
+        .route(
+            "/api/v1/flows/{name}",
+            get(handlers::flow::get_flow).delete(handlers::flow::delete_flow),
+        )
+        .route("/api/v1/flows/{name}/run", post(handlers::flow::run_flow));
 
     if let Some(extra) = extra_routes {
         router = router.merge(extra);
@@ -56,8 +79,14 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
     router
         .fallback(handlers::rune::dynamic_rune_handler)
         .with_state(state.clone())
-        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .layer(middleware::from_fn_with_state(state, shutdown_middleware))
         .layer(cors)
 }

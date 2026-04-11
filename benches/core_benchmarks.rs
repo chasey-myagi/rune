@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use bytes::Bytes;
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ fn relay_benchmarks(c: &mut Criterion) {
     use rune_core::invoker::LocalInvoker;
     use rune_core::relay::Relay;
     use rune_core::resolver::RoundRobinResolver;
-    use rune_core::rune::{make_handler, RuneConfig, GateConfig};
+    use rune_core::rune::{make_handler, GateConfig, RuneConfig};
 
     let mut group = c.benchmark_group("relay");
 
@@ -36,42 +36,42 @@ fn relay_benchmarks(c: &mut Criterion) {
                 priority: 0,
                 labels: Default::default(),
             };
-            relay.register(config, Arc::new(LocalInvoker::new(handler)), None).unwrap();
+            relay
+                .register(config, Arc::new(LocalInvoker::new(handler)), None)
+                .unwrap();
         });
     });
 
     // --- relay_resolve with varying candidate counts ---
     for count in [1, 10, 100] {
-        group.bench_with_input(
-            BenchmarkId::new("resolve", count),
-            &count,
-            |b, &count| {
-                let relay = Relay::new();
-                let resolver = RoundRobinResolver::new();
-                for i in 0..count {
-                    let handler = make_handler(|_ctx, input| async move { Ok(input) });
-                    let config = RuneConfig {
-                        name: "bench_rune".into(),
-                        version: "1.0.0".into(),
-                        description: format!("handler {}", i),
-                        supports_stream: false,
-                        gate: None,
-                        input_schema: None,
-                        output_schema: None,
-                        priority: 0,
-                        labels: Default::default(),
-                    };
-                    relay.register(
+        group.bench_with_input(BenchmarkId::new("resolve", count), &count, |b, &count| {
+            let relay = Relay::new();
+            let resolver = RoundRobinResolver::new();
+            for i in 0..count {
+                let handler = make_handler(|_ctx, input| async move { Ok(input) });
+                let config = RuneConfig {
+                    name: "bench_rune".into(),
+                    version: "1.0.0".into(),
+                    description: format!("handler {}", i),
+                    supports_stream: false,
+                    gate: None,
+                    input_schema: None,
+                    output_schema: None,
+                    priority: 0,
+                    labels: Default::default(),
+                };
+                relay
+                    .register(
                         config,
                         Arc::new(LocalInvoker::new(handler)),
                         Some(format!("caster-{}", i)),
-                    ).unwrap();
-                }
-                b.iter(|| {
-                    relay.resolve("bench_rune", &resolver);
-                });
-            },
-        );
+                    )
+                    .unwrap();
+            }
+            b.iter(|| {
+                relay.resolve("bench_rune", &resolver);
+            });
+        });
     }
 
     // --- relay_resolve_with_labels ---
@@ -81,7 +81,14 @@ fn relay_benchmarks(c: &mut Criterion) {
         for i in 0..10 {
             let handler = make_handler(|_ctx, input| async move { Ok(input) });
             let mut labels = HashMap::new();
-            labels.insert("region".to_string(), if i % 2 == 0 { "us".to_string() } else { "eu".to_string() });
+            labels.insert(
+                "region".to_string(),
+                if i % 2 == 0 {
+                    "us".to_string()
+                } else {
+                    "eu".to_string()
+                },
+            );
             labels.insert("tier".to_string(), format!("t{}", i % 3));
             let config = RuneConfig {
                 name: "labeled_rune".into(),
@@ -94,11 +101,13 @@ fn relay_benchmarks(c: &mut Criterion) {
                 priority: 0,
                 labels,
             };
-            relay.register(
-                config,
-                Arc::new(LocalInvoker::new(handler)),
-                Some(format!("caster-{}", i)),
-            ).unwrap();
+            relay
+                .register(
+                    config,
+                    Arc::new(LocalInvoker::new(handler)),
+                    Some(format!("caster-{}", i)),
+                )
+                .unwrap();
         }
         let mut required = HashMap::new();
         required.insert("region".to_string(), "us".to_string());
@@ -126,12 +135,56 @@ fn relay_benchmarks(c: &mut Criterion) {
                 priority: 0,
                 labels: Default::default(),
             };
-            relay.register(config, Arc::new(LocalInvoker::new(handler)), None).unwrap();
+            relay
+                .register(config, Arc::new(LocalInvoker::new(handler)), None)
+                .unwrap();
         }
         b.iter(|| {
             relay.list();
         });
     });
+
+    // --- relay_remove_caster with varying total caster counts ---
+    // Verifies that remove_caster for a single-rune caster is ~constant
+    // regardless of how many other casters are registered (O(R_this_caster)
+    // rather than O(R_total * C_max)).
+    for count in [100, 1000, 10000] {
+        group.bench_with_input(
+            BenchmarkId::new("remove_caster", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        let relay = Relay::new();
+                        for i in 0..count {
+                            let handler = make_handler(|_ctx, input| async move { Ok(input) });
+                            let config = RuneConfig {
+                                name: "bench_rune".into(),
+                                version: "1.0.0".into(),
+                                description: format!("handler {}", i),
+                                supports_stream: false,
+                                gate: None,
+                                input_schema: None,
+                                output_schema: None,
+                                priority: 0,
+                                labels: Default::default(),
+                            };
+                            relay
+                                .register(
+                                    config,
+                                    Arc::new(LocalInvoker::new(handler)),
+                                    Some(format!("caster-{}", i)),
+                                )
+                                .unwrap();
+                        }
+                        relay
+                    },
+                    |relay| relay.remove_caster("caster-0"),
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
 
     group.finish();
 }
@@ -162,7 +215,8 @@ fn invoker_benchmarks(c: &mut Criterion) {
                 context: Default::default(),
                 timeout: Duration::from_secs(30),
             };
-            rt.block_on(invoker.invoke_once(ctx, Bytes::from("hello"))).unwrap();
+            rt.block_on(invoker.invoke_once(ctx, Bytes::from("hello")))
+                .unwrap();
         });
     });
 
@@ -171,7 +225,12 @@ fn invoker_benchmarks(c: &mut Criterion) {
 
     #[async_trait::async_trait]
     impl StreamRuneHandler for TenChunkHandler {
-        async fn execute(&self, _ctx: RuneContext, _input: Bytes, tx: StreamSender) -> Result<(), RuneError> {
+        async fn execute(
+            &self,
+            _ctx: RuneContext,
+            _input: Bytes,
+            tx: StreamSender,
+        ) -> Result<(), RuneError> {
             for i in 0..10 {
                 tx.emit(Bytes::from(format!("chunk-{}", i))).await?;
             }
@@ -190,7 +249,10 @@ fn invoker_benchmarks(c: &mut Criterion) {
                 timeout: Duration::from_secs(30),
             };
             rt.block_on(async {
-                let mut rx = invoker.invoke_stream(ctx, Bytes::from("data")).await.unwrap();
+                let mut rx = invoker
+                    .invoke_stream(ctx, Bytes::from("data"))
+                    .await
+                    .unwrap();
                 while let Some(chunk) = rx.recv().await {
                     let _ = chunk.unwrap();
                 }
@@ -206,12 +268,12 @@ fn invoker_benchmarks(c: &mut Criterion) {
 // ============================================================================
 
 fn dag_benchmarks(c: &mut Criterion) {
-    use rune_flow::dag::{FlowDefinition, StepDefinition, validate_dag, topological_layers};
-    use rune_flow::engine::FlowEngine;
+    use rune_core::invoker::LocalInvoker;
     use rune_core::relay::Relay;
     use rune_core::resolver::RoundRobinResolver;
-    use rune_core::invoker::LocalInvoker;
     use rune_core::rune::{make_handler, RuneConfig};
+    use rune_flow::dag::{topological_layers, validate_dag, FlowDefinition, StepDefinition};
+    use rune_flow::engine::FlowEngine;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("dag");
@@ -223,7 +285,11 @@ fn dag_benchmarks(c: &mut Criterion) {
             .map(|i| StepDefinition {
                 name: format!("step_{}", i),
                 rune: format!("rune_{}", i),
-                depends_on: if i == 0 { vec![] } else { vec![format!("step_{}", i - 1)] },
+                depends_on: if i == 0 {
+                    vec![]
+                } else {
+                    vec![format!("step_{}", i - 1)]
+                },
                 condition: None,
                 input_mapping: None,
             })
@@ -263,7 +329,9 @@ fn dag_benchmarks(c: &mut Criterion) {
                 priority: 0,
                 labels: Default::default(),
             };
-            relay.register(config, Arc::new(LocalInvoker::new(handler)), None).unwrap();
+            relay
+                .register(config, Arc::new(LocalInvoker::new(handler)), None)
+                .unwrap();
         }
 
         let mut engine = FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver));
@@ -273,7 +341,11 @@ fn dag_benchmarks(c: &mut Criterion) {
                 .map(|i| StepDefinition {
                     name: format!("step_{}", i),
                     rune: format!("step_{}", i),
-                    depends_on: if i == 0 { vec![] } else { vec![format!("step_{}", i - 1)] },
+                    depends_on: if i == 0 {
+                        vec![]
+                    } else {
+                        vec![format!("step_{}", i - 1)]
+                    },
                     condition: None,
                     input_mapping: None,
                 })
@@ -283,7 +355,8 @@ fn dag_benchmarks(c: &mut Criterion) {
         engine.register(flow).unwrap();
 
         b.iter(|| {
-            rt.block_on(engine.execute("linear_3", Bytes::from(r#"{"msg":"hello"}"#))).unwrap();
+            rt.block_on(engine.execute("linear_3", Bytes::from(r#"{"msg":"hello"}"#)))
+                .unwrap();
         });
     });
 
@@ -305,7 +378,9 @@ fn dag_benchmarks(c: &mut Criterion) {
                 priority: 0,
                 labels: Default::default(),
             };
-            relay.register(config, Arc::new(LocalInvoker::new(handler)), None).unwrap();
+            relay
+                .register(config, Arc::new(LocalInvoker::new(handler)), None)
+                .unwrap();
         }
 
         let mut engine = FlowEngine::new(Arc::clone(&relay), Arc::clone(&resolver));
@@ -351,7 +426,8 @@ fn dag_benchmarks(c: &mut Criterion) {
         engine.register(flow).unwrap();
 
         b.iter(|| {
-            rt.block_on(engine.execute("diamond", Bytes::from(r#"{"msg":"test"}"#))).unwrap();
+            rt.block_on(engine.execute("diamond", Bytes::from(r#"{"msg":"test"}"#)))
+                .unwrap();
         });
     });
 
@@ -363,8 +439,8 @@ fn dag_benchmarks(c: &mut Criterion) {
 // ============================================================================
 
 fn schema_benchmarks(c: &mut Criterion) {
-    use rune_schema::validator::{validate_input, clear_validator_cache};
     use rune_schema::openapi::{generate_openapi, RuneInfo};
+    use rune_schema::validator::{clear_validator_cache, validate_input};
 
     let mut group = c.benchmark_group("schema");
 
@@ -413,7 +489,9 @@ fn schema_benchmarks(c: &mut Criterion) {
                 gate_path: Some(format!("/api/rune/{}", i)),
                 gate_method: "POST".to_string(),
                 input_schema: Some(schema.to_string()),
-                output_schema: Some(r#"{"type":"object","properties":{"result":{"type":"string"}}}"#.to_string()),
+                output_schema: Some(
+                    r#"{"type":"object","properties":{"result":{"type":"string"}}}"#.to_string(),
+                ),
                 description: format!("Rune {} description", i),
             })
             .collect();
@@ -430,7 +508,7 @@ fn schema_benchmarks(c: &mut Criterion) {
 // ============================================================================
 
 fn store_benchmarks(c: &mut Criterion) {
-    use rune_store::{RuneStore, CallLog};
+    use rune_store::{CallLog, RuneStore};
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("store");
@@ -465,7 +543,11 @@ fn store_benchmarks(c: &mut Criterion) {
             let log = CallLog {
                 id: 0,
                 request_id: format!("req-{}", i),
-                rune_name: if i % 2 == 0 { "echo".into() } else { "transform".into() },
+                rune_name: if i % 2 == 0 {
+                    "echo".into()
+                } else {
+                    "transform".into()
+                },
                 mode: "sync".into(),
                 caster_id: None,
                 latency_ms: (i * 10) as i64,

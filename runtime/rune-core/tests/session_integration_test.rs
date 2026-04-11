@@ -17,10 +17,12 @@ use rune_proto::rune_service_client::RuneServiceClient;
 use rune_proto::rune_service_server::RuneServiceServer;
 use rune_proto::*;
 
-use rune_core::config::AppConfig;
+use rune_core::circuit_breaker::CBState;
+use rune_core::config::{AppConfig, CircuitBreakerConfig, RetryConfig};
 use rune_core::grpc_service::RuneGrpcService;
 use rune_core::relay::Relay;
-use rune_core::rune::RuneError;
+use rune_core::resolver::RoundRobinResolver;
+use rune_core::rune::{RuneContext, RuneError};
 use rune_core::session::SessionManager;
 
 // ---------------------------------------------------------------------------
@@ -36,16 +38,15 @@ async fn start_server(
     let addr = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let grpc_service = RuneGrpcService {
-        relay,
-        session_mgr,
-    };
+    let grpc_service = RuneGrpcService { relay, session_mgr };
 
     tokio::spawn(async move {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
         Server::builder()
             .add_service(RuneServiceServer::new(grpc_service))
-            .serve_with_incoming_shutdown(incoming, async { shutdown_rx.await.ok(); })
+            .serve_with_incoming_shutdown(incoming, async {
+                shutdown_rx.await.ok();
+            })
             .await
             .unwrap();
     });
@@ -62,11 +63,20 @@ async fn connect_client(addr: SocketAddr) -> RuneServiceClient<Channel> {
         .unwrap()
 }
 
-fn make_attach_msg(caster_id: &str, runes: Vec<RuneDeclaration>, max_concurrent: u32) -> SessionMessage {
+fn make_attach_msg(
+    caster_id: &str,
+    runes: Vec<RuneDeclaration>,
+    max_concurrent: u32,
+) -> SessionMessage {
     make_attach_msg_with_key(caster_id, runes, max_concurrent, "")
 }
 
-fn make_attach_msg_with_key(caster_id: &str, runes: Vec<RuneDeclaration>, max_concurrent: u32, key: &str) -> SessionMessage {
+fn make_attach_msg_with_key(
+    caster_id: &str,
+    runes: Vec<RuneDeclaration>,
+    max_concurrent: u32,
+    key: &str,
+) -> SessionMessage {
     SessionMessage {
         payload: Some(session_message::Payload::Attach(CasterAttach {
             caster_id: caster_id.into(),
@@ -74,6 +84,7 @@ fn make_attach_msg_with_key(caster_id: &str, runes: Vec<RuneDeclaration>, max_co
             labels: Default::default(),
             max_concurrent,
             key: key.into(),
+            role: "caster".into(),
         })),
     }
 }
@@ -198,9 +209,13 @@ async fn attach_success_returns_ack_accepted() {
         .into_inner();
 
     // Send attach
-    tx.send(make_attach_msg("caster-1", vec![make_echo_rune_decl("echo")], 5))
-        .await
-        .unwrap();
+    tx.send(make_attach_msg(
+        "caster-1",
+        vec![make_echo_rune_decl("echo")],
+        5,
+    ))
+    .await
+    .unwrap();
 
     // Read AttachAck
     let msg = response_stream.message().await.unwrap().unwrap();
@@ -214,7 +229,9 @@ async fn attach_success_returns_ack_accepted() {
 
     // Session should be registered
     assert_eq!(session_mgr.caster_count(), 1);
-    assert!(session_mgr.list_caster_ids().contains(&"caster-1".to_string()));
+    assert!(session_mgr
+        .list_caster_ids()
+        .contains(&"caster-1".to_string()));
 
     // Rune should be registered in relay
     let list = relay.list();
@@ -247,9 +264,13 @@ async fn attach_then_execute_unary_returns_result() {
         .into_inner();
 
     // Attach with echo rune
-    tx.send(make_attach_msg("caster-exec", vec![make_echo_rune_decl("exec_echo")], 5))
-        .await
-        .unwrap();
+    tx.send(make_attach_msg(
+        "caster-exec",
+        vec![make_echo_rune_decl("exec_echo")],
+        5,
+    ))
+    .await
+    .unwrap();
 
     // Wait for AttachAck
     let ack = response_stream.message().await.unwrap().unwrap();
@@ -356,9 +377,7 @@ async fn attach_then_stream_execute_returns_chunks() {
     tx.send(make_stream_event_msg("req-stream-1", b"chunk-2"))
         .await
         .unwrap();
-    tx.send(make_stream_end_msg("req-stream-1"))
-        .await
-        .unwrap();
+    tx.send(make_stream_end_msg("req-stream-1")).await.unwrap();
 
     // Caller receives stream chunks
     let mut rx = invoke_handle.await.unwrap().unwrap();
@@ -578,7 +597,11 @@ async fn cancel_request_cancels_pending() {
 
     // The invoke should fail with Cancelled
     let result = invoke_handle.await.unwrap();
-    assert!(matches!(result, Err(RuneError::Cancelled)), "expected Cancelled, got {:?}", result);
+    assert!(
+        matches!(result, Err(RuneError::Cancelled)),
+        "expected Cancelled, got {:?}",
+        result
+    );
 
     tx.send(make_detach_msg("done")).await.unwrap();
 }
@@ -688,7 +711,10 @@ async fn disconnect_with_pending_requests_sends_errors() {
         .expect("invoke should complete")
         .unwrap();
 
-    assert!(result.is_err(), "pending request should error on disconnect");
+    assert!(
+        result.is_err(),
+        "pending request should error on disconnect"
+    );
 }
 
 /// Test 10: Multiple rune registration via single attach
@@ -737,4 +763,265 @@ async fn attach_registers_multiple_runes() {
     assert_eq!(list.len(), 3);
 
     tx.send(make_detach_msg("done")).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Retry + Circuit Breaker integration test (real remote invoker path)
+// ---------------------------------------------------------------------------
+
+/// Integration test: consecutive timeouts through real remote invoker path
+/// open the circuit breaker, but timeout itself is never retried.
+///
+/// Verifies the full chain: Relay::resolve → RetryInvoker → RemoteInvoker →
+/// SessionManager → gRPC → (Caster never responds) → Timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_fix_timeout_trips_cb_but_never_retries_integration() {
+    let retry_config = RetryConfig {
+        enabled: true,
+        max_retries: 3,
+        base_delay_ms: 10,
+        max_delay_ms: 50,
+        backoff_multiplier: 1.0,
+        retryable_errors: vec!["unavailable".into(), "internal".into()],
+        circuit_breaker: CircuitBreakerConfig {
+            enabled: true,
+            failure_threshold: 2,
+            success_threshold: 1,
+            reset_timeout_ms: 60_000,
+            half_open_max_permits: 1,
+        },
+    };
+
+    let config = default_session_config();
+    let relay = Arc::new(Relay::with_retry(retry_config));
+    let session_mgr = Arc::new(SessionManager::new_dev(
+        config.heartbeat_interval(),
+        config.heartbeat_timeout(),
+    ));
+
+    let (addr, _shutdown) = start_server(Arc::clone(&relay), Arc::clone(&session_mgr)).await;
+    let mut client = connect_client(addr).await;
+
+    let (tx, rx) = mpsc::channel(32);
+    let stream = ReceiverStream::new(rx);
+
+    let mut response_stream = client
+        .session(Request::new(stream))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Attach a caster that declares a rune but will NEVER respond to ExecuteRequest.
+    tx.send(make_attach_msg(
+        "caster-slow",
+        vec![make_echo_rune_decl("slow_rune")],
+        5,
+    ))
+    .await
+    .unwrap();
+
+    let ack = response_stream.message().await.unwrap().unwrap();
+    assert!(matches!(
+        ack.payload,
+        Some(session_message::Payload::AttachAck(_))
+    ));
+
+    let resolver = RoundRobinResolver::new();
+
+    // --- Call 1: timeout (not retried), CB failure count → 1 ---
+    let invoker = relay
+        .resolve("slow_rune", &resolver)
+        .expect("rune should be registered");
+    let ctx1 = RuneContext {
+        rune_name: "slow_rune".into(),
+        request_id: "timeout-1".into(),
+        context: Default::default(),
+        timeout: Duration::from_millis(200),
+    };
+    let result1 = invoker.invoke_once(ctx1, Bytes::from("ping")).await;
+    assert!(
+        matches!(result1, Err(RuneError::Timeout)),
+        "call 1 should timeout, got {:?}",
+        result1
+    );
+
+    // Drain the ExecuteRequest the caster received (we never respond).
+    let exec_msg1 = tokio::time::timeout(Duration::from_secs(2), response_stream.message())
+        .await
+        .expect("should receive execute request 1")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        exec_msg1.payload,
+        Some(session_message::Payload::Execute(_))
+    ));
+
+    // CB still Closed (1 < threshold 2)
+    let states = relay.circuit_breaker_states();
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].state, CBState::Closed);
+
+    // --- Call 2: another timeout → CB failure count → 2 → Opens ---
+    let invoker = relay.resolve("slow_rune", &resolver).unwrap();
+    let ctx2 = RuneContext {
+        rune_name: "slow_rune".into(),
+        request_id: "timeout-2".into(),
+        context: Default::default(),
+        timeout: Duration::from_millis(200),
+    };
+    let result2 = invoker.invoke_once(ctx2, Bytes::from("ping")).await;
+    assert!(matches!(result2, Err(RuneError::Timeout)));
+
+    // Drain ExecuteRequest 2
+    let exec_msg2 = tokio::time::timeout(Duration::from_secs(2), response_stream.message())
+        .await
+        .expect("should receive execute request 2")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        exec_msg2.payload,
+        Some(session_message::Payload::Execute(_))
+    ));
+
+    // CB should now be Open
+    let states = relay.circuit_breaker_states();
+    assert_eq!(
+        states[0].state,
+        CBState::Open,
+        "CB must be Open after 2 consecutive timeouts"
+    );
+
+    // --- Call 3: CB open → fast-fail Unavailable, no ExecuteRequest sent ---
+    let invoker = relay.resolve("slow_rune", &resolver).unwrap();
+    let ctx3 = RuneContext {
+        rune_name: "slow_rune".into(),
+        request_id: "fast-fail-3".into(),
+        context: Default::default(),
+        timeout: Duration::from_secs(5),
+    };
+    let start = std::time::Instant::now();
+    let result3 = invoker.invoke_once(ctx3, Bytes::from("ping")).await;
+    let elapsed = start.elapsed();
+
+    assert!(
+        matches!(result3, Err(RuneError::CircuitOpen { .. })),
+        "call 3 should fast-fail, got {:?}",
+        result3
+    );
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "fast-fail should be instant, took {:?}",
+        elapsed
+    );
+
+    // Verify NO ExecuteRequest reached the caster for call 3.
+    let maybe_msg =
+        tokio::time::timeout(Duration::from_millis(100), response_stream.message()).await;
+    assert!(
+        maybe_msg.is_err(),
+        "no ExecuteRequest should reach caster when CB is open"
+    );
+
+    tx.send(make_detach_msg("done")).await.unwrap();
+}
+
+/// Regression P0-1: cleanup_session of old session must NOT delete new session's data.
+///
+/// Scenario: caster-A connects → session 1 active → caster-A reconnects (session 2)
+/// → session 1 loop breaks and cleanup runs. Before the fix, cleanup_session
+/// unconditionally removed all data for the caster_id, deleting session 2's entries.
+#[tokio::test]
+async fn test_fix_reconnect_cleanup_does_not_delete_new_session() {
+    let config = default_session_config();
+    let relay = Arc::new(Relay::new());
+    let session_mgr = Arc::new(SessionManager::new_dev(
+        config.heartbeat_interval(),
+        config.heartbeat_timeout(),
+    ));
+
+    let (addr, _shutdown) = start_server(Arc::clone(&relay), Arc::clone(&session_mgr)).await;
+
+    // Session 1: connect and attach
+    let mut client1 = connect_client(addr).await;
+    let (tx1, rx1) = mpsc::channel(32);
+    let stream1 = ReceiverStream::new(rx1);
+    let mut resp1 = client1
+        .session(Request::new(stream1))
+        .await
+        .unwrap()
+        .into_inner();
+
+    tx1.send(make_attach_msg(
+        "reconnect-caster",
+        vec![make_echo_rune_decl("echo")],
+        2,
+    ))
+    .await
+    .unwrap();
+    let ack1 = resp1.message().await.unwrap().unwrap();
+    assert!(matches!(ack1.payload, Some(session_message::Payload::AttachAck(ref a)) if a.accepted));
+    assert_eq!(session_mgr.caster_count(), 1);
+
+    // Session 2: connect and attach with SAME caster_id (reconnect)
+    let mut client2 = connect_client(addr).await;
+    let (tx2, rx2) = mpsc::channel(32);
+    let stream2 = ReceiverStream::new(rx2);
+    let mut resp2 = client2
+        .session(Request::new(stream2))
+        .await
+        .unwrap()
+        .into_inner();
+
+    tx2.send(make_attach_msg(
+        "reconnect-caster",
+        vec![make_echo_rune_decl("echo")],
+        4,
+    ))
+    .await
+    .unwrap();
+    let ack2 = resp2.message().await.unwrap().unwrap();
+    assert!(matches!(ack2.payload, Some(session_message::Payload::AttachAck(ref a)) if a.accepted));
+
+    // Session 2 is now the active session. max_concurrent should be 4.
+    assert_eq!(session_mgr.max_concurrent("reconnect-caster"), 4);
+
+    // Now disconnect session 1 (triggers cleanup of old session)
+    tx1.send(make_detach_msg("reconnect")).await.unwrap();
+    // Wait for cleanup to complete
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Session 2's data must still be intact
+    assert_eq!(
+        session_mgr.caster_count(),
+        1,
+        "new session must survive old session's cleanup"
+    );
+    assert_eq!(
+        session_mgr.max_concurrent("reconnect-caster"),
+        4,
+        "new session's metadata must not be deleted by old cleanup"
+    );
+    assert!(
+        session_mgr.session_generation("reconnect-caster").is_some(),
+        "new session entry must still exist"
+    );
+    // Relay entries from session 2 must survive old cleanup
+    assert!(
+        relay.find("echo").is_some(),
+        "new session's relay entries must not be wiped by old cleanup"
+    );
+
+    // Clean up session 2
+    tx2.send(make_detach_msg("done")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        session_mgr.caster_count(),
+        0,
+        "session 2 cleanup should work normally"
+    );
+    // After session 2 disconnects normally, relay should be clean
+    assert!(
+        relay.find("echo").is_none(),
+        "relay should be clean after final session disconnects"
+    );
 }

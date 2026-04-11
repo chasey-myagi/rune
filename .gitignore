@@ -2,3 +2,5 @@ target/
 __pycache__/
 *.pyc
 sdks/typescript/node_modules/
+sdks/typescript/dist/
+.DS_Store

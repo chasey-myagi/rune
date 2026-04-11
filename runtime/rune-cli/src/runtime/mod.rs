@@ -37,9 +37,6 @@ pub fn is_runtime_alive(state: &RuntimeState) -> bool {
             .as_ref()
             .map(|id| docker::is_container_running(id))
             .unwrap_or(false),
-        state::RuntimeMode::Binary => state
-            .pid
-            .map(binary::is_process_alive)
-            .unwrap_or(false),
+        state::RuntimeMode::Binary => state.pid.map(binary::is_process_alive).unwrap_or(false),
     }
 }

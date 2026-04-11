@@ -1,21 +1,17 @@
-use axum::{
-    Json,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use rune_schema::openapi::{generate_openapi, RuneInfo};
 
 use crate::state::GateState;
 
 pub async fn openapi_handler(State(state): State<GateState>) -> impl IntoResponse {
     let rune_infos: Vec<RuneInfo> = state
-        .rune.relay
+        .rune
+        .relay
         .list()
         .into_iter()
         .filter_map(|(name, _gate_path)| {
             let entries = state.rune.relay.find(&name)?;
-            let first = entries.value().first()?;
+            let first = entries.value().values().next()?;
             let config = &first.config;
             Some(RuneInfo {
                 name: config.name.clone(),

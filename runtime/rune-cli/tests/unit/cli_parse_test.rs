@@ -1,5 +1,7 @@
 use clap::Parser;
-use rune_cli::{Cli, Commands, ConfigCommands, FlowCommands, KeyCommands, TaskCommands};
+use rune_cli::{
+    Cli, Commands, ConfigCommands, FlowCommands, KeyCommands, PilotCommands, TaskCommands,
+};
 
 fn parse(args: &[&str]) -> Cli {
     let mut full = vec!["rune"];
@@ -128,9 +130,7 @@ fn call_stream() {
     let cli = parse(&["call", "echo", "--stream"]);
     match cli.command {
         Commands::Call {
-            stream,
-            async_mode,
-            ..
+            stream, async_mode, ..
         } => {
             assert!(stream);
             assert!(!async_mode);
@@ -144,9 +144,7 @@ fn call_async() {
     let cli = parse(&["call", "echo", "--async"]);
     match cli.command {
         Commands::Call {
-            stream,
-            async_mode,
-            ..
+            stream, async_mode, ..
         } => {
             assert!(!stream);
             assert!(async_mode);
@@ -198,7 +196,10 @@ fn task_get() {
 #[test]
 fn task_list() {
     let cli = parse(&["task", "list"]);
-    assert!(matches!(cli.command, Commands::Task(TaskCommands::List { .. })));
+    assert!(matches!(
+        cli.command,
+        Commands::Task(TaskCommands::List { .. })
+    ));
 }
 
 #[test]
@@ -230,6 +231,34 @@ fn casters() {
     assert!(matches!(cli.command, Commands::Casters));
 }
 
+// ── Pilot ──────────────────────────────────────────────────────
+
+#[test]
+fn pilot_daemon_with_runtime() {
+    let cli = parse(&["pilot", "daemon", "--runtime", "localhost:50070"]);
+    match cli.command {
+        Commands::Pilot(PilotCommands::Daemon { runtime }) => {
+            assert_eq!(runtime, "localhost:50070");
+        }
+        _ => panic!("expected Pilot Daemon"),
+    }
+}
+
+#[test]
+fn pilot_status() {
+    let cli = parse(&["pilot", "status"]);
+    assert!(matches!(
+        cli.command,
+        Commands::Pilot(PilotCommands::Status)
+    ));
+}
+
+#[test]
+fn pilot_stop() {
+    let cli = parse(&["pilot", "stop"]);
+    assert!(matches!(cli.command, Commands::Pilot(PilotCommands::Stop)));
+}
+
 // ── Key ────────────────────────────────────────────────────────
 
 #[test]
@@ -256,6 +285,48 @@ fn key_revoke() {
     match cli.command {
         Commands::Key(KeyCommands::Revoke { key_id }) => assert_eq!(key_id, "key-42"),
         _ => panic!("expected Key Revoke"),
+    }
+}
+
+#[test]
+fn key_bootstrap_defaults() {
+    let cli = parse(&["key", "bootstrap"]);
+    match cli.command {
+        Commands::Key(KeyCommands::Bootstrap {
+            label,
+            db_path,
+            force,
+        }) => {
+            assert_eq!(label, "bootstrap-admin");
+            assert_eq!(db_path, "rune.db");
+            assert!(!force);
+        }
+        _ => panic!("expected Key Bootstrap"),
+    }
+}
+
+#[test]
+fn key_bootstrap_custom_values() {
+    let cli = parse(&[
+        "key",
+        "bootstrap",
+        "--label",
+        "ops-admin",
+        "--db-path",
+        "/tmp/rune.db",
+        "--force",
+    ]);
+    match cli.command {
+        Commands::Key(KeyCommands::Bootstrap {
+            label,
+            db_path,
+            force,
+        }) => {
+            assert_eq!(label, "ops-admin");
+            assert_eq!(db_path, "/tmp/rune.db");
+            assert!(force);
+        }
+        _ => panic!("expected Key Bootstrap"),
     }
 }
 
@@ -312,10 +383,7 @@ fn flow_delete() {
 fn logs_default() {
     let cli = parse(&["logs"]);
     match cli.command {
-        Commands::Logs {
-            rune,
-            limit,
-        } => {
+        Commands::Logs { rune, limit } => {
             assert!(rune.is_none());
             assert_eq!(limit, 20);
         }
@@ -327,10 +395,7 @@ fn logs_default() {
 fn logs_with_filter() {
     let cli = parse(&["logs", "--rune", "echo", "--limit", "100"]);
     match cli.command {
-        Commands::Logs {
-            rune,
-            limit,
-        } => {
+        Commands::Logs { rune, limit } => {
             assert_eq!(rune.as_deref(), Some("echo"));
             assert_eq!(limit, 100);
         }

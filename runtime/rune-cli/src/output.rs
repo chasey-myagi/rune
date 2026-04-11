@@ -30,8 +30,7 @@ pub fn new_table(headers: &[&str]) -> Table {
     let header_cells: Vec<comfy_table::Cell> = headers
         .iter()
         .map(|h| {
-            comfy_table::Cell::new(h.to_uppercase())
-                .add_attribute(comfy_table::Attribute::Bold)
+            comfy_table::Cell::new(h.to_uppercase()).add_attribute(comfy_table::Attribute::Bold)
         })
         .collect();
     table.set_header(header_cells);
@@ -47,9 +46,18 @@ mod tests {
     fn test_new_table_creates_table_with_headers() {
         let table = new_table(&["Name", "Version", "Status"]);
         let output = table.to_string();
-        assert!(output.contains("NAME"), "table should have uppercased NAME header");
-        assert!(output.contains("VERSION"), "table should have uppercased VERSION header");
-        assert!(output.contains("STATUS"), "table should have uppercased STATUS header");
+        assert!(
+            output.contains("NAME"),
+            "table should have uppercased NAME header"
+        );
+        assert!(
+            output.contains("VERSION"),
+            "table should have uppercased VERSION header"
+        );
+        assert!(
+            output.contains("STATUS"),
+            "table should have uppercased STATUS header"
+        );
     }
 
     #[test]
@@ -76,6 +84,9 @@ mod tests {
     fn test_print_json_compact_format() {
         let val = json!({"key": "value"});
         let compact = serde_json::to_string(&val).unwrap();
-        assert!(!compact.contains('\n'), "compact JSON should be single line");
+        assert!(
+            !compact.contains('\n'),
+            "compact JSON should be single line"
+        );
     }
 }

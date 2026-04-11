@@ -26,6 +26,11 @@ libc = "0.2"
 urlencoding = "2"
 comfy-table = "7"
 chrono = { version = "0.4", features = ["serde"] }
+rune-proto = { path = "../rune-proto" }
+tonic = { workspace = true, features = ["transport"] }
+tokio-stream = { workspace = true }
+rune-store = { path = "../rune-store" }
+fs2 = "0.4"
 
 [[test]]
 name = "cli_parse_test"

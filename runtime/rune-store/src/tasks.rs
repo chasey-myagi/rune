@@ -9,13 +9,13 @@ impl RuneStore {
         rune_name: &str,
         input: Option<&str>,
     ) -> StoreResult<TaskRecord> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let task_id = task_id.to_string();
         let rune_name = rune_name.to_string();
         let input = input.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || {
             let now = timestamp_now();
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.writer();
             conn.execute(
                 "INSERT INTO tasks (task_id, rune_name, status, input, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -37,10 +37,10 @@ impl RuneStore {
     }
 
     pub async fn get_task(&self, task_id: &str) -> StoreResult<Option<TaskRecord>> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let task_id = task_id.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.reader();
             let mut stmt = conn.prepare(
                 "SELECT task_id, rune_name, status, input, output, error, \
                  created_at, started_at, completed_at \
@@ -50,7 +50,7 @@ impl RuneStore {
                 Ok(TaskRecord {
                     task_id: row.get(0)?,
                     rune_name: row.get(1)?,
-                    status: TaskStatus::from_str(&row.get::<_, String>(2)?)
+                    status: TaskStatus::parse(&row.get::<_, String>(2)?)
                         .unwrap_or(TaskStatus::Pending),
                     input: row.get(3)?,
                     output: row.get(4)?,
@@ -76,13 +76,13 @@ impl RuneStore {
         output: Option<&str>,
         error: Option<&str>,
     ) -> StoreResult<()> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let task_id = task_id.to_string();
         let output = output.map(|s| s.to_string());
         let error = error.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || {
             let now = timestamp_now();
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.writer();
             match status {
                 TaskStatus::Running => {
                     conn.execute(
@@ -118,13 +118,13 @@ impl RuneStore {
         output: Option<&str>,
         error: Option<&str>,
     ) -> StoreResult<bool> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let task_id = task_id.to_string();
         let output = output.map(|s| s.to_string());
         let error = error.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || {
             let now = timestamp_now();
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.writer();
             let rows = conn.execute(
                 "UPDATE tasks SET status = ?1, output = ?2, error = ?3, \
                  completed_at = ?4 WHERE task_id = ?5 AND status != 'cancelled'",
@@ -142,10 +142,10 @@ impl RuneStore {
         limit: i64,
         offset: i64,
     ) -> StoreResult<Vec<TaskRecord>> {
-        let conn = self.conn.clone();
+        let pool = self.pool.clone();
         let rune_name = rune_name.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = pool.reader();
             let mut sql = String::from(
                 "SELECT task_id, rune_name, status, input, output, error, \
                  created_at, started_at, completed_at FROM tasks WHERE 1=1",
@@ -170,7 +170,7 @@ impl RuneStore {
                     Ok(TaskRecord {
                         task_id: row.get(0)?,
                         rune_name: row.get(1)?,
-                        status: TaskStatus::from_str(&row.get::<_, String>(2)?)
+                        status: TaskStatus::parse(&row.get::<_, String>(2)?)
                             .unwrap_or(TaskStatus::Pending),
                         input: row.get(3)?,
                         output: row.get(4)?,

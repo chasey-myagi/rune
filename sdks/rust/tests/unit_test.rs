@@ -156,9 +156,10 @@ fn test_u10_caster_id_custom() {
 async fn test_u11_register_unary_handler() {
     let caster = Caster::new(CasterConfig::default());
     caster
-        .rune(RuneConfig::new("echo"), |_ctx: RuneContext, input: Bytes| async move {
-            Ok(input)
-        })
+        .rune(
+            RuneConfig::new("echo"),
+            |_ctx: RuneContext, input: Bytes| async move { Ok(input) },
+        )
         .unwrap();
     assert_eq!(caster.rune_count(), 1);
     assert!(caster.get_rune_config("echo").is_some());
@@ -186,14 +187,16 @@ async fn test_u12_register_stream_handler() {
 async fn test_u13_register_multiple_runes() {
     let caster = Caster::new(CasterConfig::default());
     caster
-        .rune(RuneConfig::new("a"), |_ctx: RuneContext, input: Bytes| async move {
-            Ok(input)
-        })
+        .rune(
+            RuneConfig::new("a"),
+            |_ctx: RuneContext, input: Bytes| async move { Ok(input) },
+        )
         .unwrap();
     caster
-        .rune(RuneConfig::new("b"), |_ctx: RuneContext, input: Bytes| async move {
-            Ok(input)
-        })
+        .rune(
+            RuneConfig::new("b"),
+            |_ctx: RuneContext, input: Bytes| async move { Ok(input) },
+        )
         .unwrap();
     caster
         .stream_rune(
@@ -211,14 +214,16 @@ async fn test_u13_register_multiple_runes() {
 async fn test_u14_duplicate_rune_error() {
     let caster = Caster::new(CasterConfig::default());
     caster
-        .rune(RuneConfig::new("dup"), |_ctx: RuneContext, input: Bytes| async move {
-            Ok(input)
-        })
+        .rune(
+            RuneConfig::new("dup"),
+            |_ctx: RuneContext, input: Bytes| async move { Ok(input) },
+        )
         .unwrap();
     let err = caster
-        .rune(RuneConfig::new("dup"), |_ctx: RuneContext, input: Bytes| async move {
-            Ok(input)
-        })
+        .rune(
+            RuneConfig::new("dup"),
+            |_ctx: RuneContext, input: Bytes| async move { Ok(input) },
+        )
         .unwrap_err();
     assert!(matches!(err, SdkError::DuplicateRune(_)));
 }
@@ -298,8 +303,7 @@ async fn test_u18_register_with_priority() {
 #[tokio::test]
 async fn test_u19_handler_can_be_called_directly() {
     // Verify handler can be invoked without gRPC by calling the closure directly
-    let handler =
-        |_ctx: RuneContext, input: Bytes| async move { Ok::<Bytes, SdkError>(input) };
+    let handler = |_ctx: RuneContext, input: Bytes| async move { Ok::<Bytes, SdkError>(input) };
     let ctx = RuneContext {
         rune_name: "echo".into(),
         request_id: "test".into(),
@@ -497,9 +501,7 @@ async fn test_u35_unary_handler_with_files() {
     caster
         .rune_with_files(
             RuneConfig::new("with_files"),
-            |_ctx: RuneContext, input: Bytes, _files: Vec<FileAttachment>| async move {
-                Ok(input)
-            },
+            |_ctx: RuneContext, input: Bytes, _files: Vec<FileAttachment>| async move { Ok(input) },
         )
         .unwrap();
     assert!(caster.rune_accepts_files("with_files"));
@@ -654,16 +656,48 @@ async fn test_nf9_run_exits_after_stop() {
     });
 
     // run() should not hang forever; it should exit after stop() is called
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        caster.run(),
-    )
-    .await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), caster.run()).await;
 
     stop_handle.await.unwrap();
 
     // Should complete (not timeout), and the result should be Ok or an error
     assert!(result.is_ok(), "run() should have exited after stop()");
+}
+
+// ============================================================================
+// P1-6: HealthReport should be sent regardless of scale_policy
+// ============================================================================
+
+#[test]
+fn test_p1_6_config_supports_health_report_without_scale_policy() {
+    // build_health_report_message and the draining flag are internal to
+    // the crate, so we can only verify config-level preconditions here.
+    // The behavioral assertion (health report sent on every heartbeat,
+    // UNHEALTHY status during drain) is covered by the Python and
+    // TypeScript unit tests which have access to the internal methods.
+    let config = CasterConfig::default();
+    assert!(config.scale_policy.is_none());
+    assert_eq!(config.max_concurrent, 10);
+    assert!(config.load_report.is_none());
+}
+
+#[test]
+fn test_p1_6_config_supports_load_report_without_scale_policy() {
+    use rune_framework::LoadReport;
+    // Verify a Caster with load_report but no scale_policy has a valid
+    // config structure.  Behavioral coverage is in Python/TS tests.
+    let mut metrics = HashMap::new();
+    metrics.insert("gpu_util".into(), 0.75);
+    let config = CasterConfig {
+        load_report: Some(LoadReport {
+            pressure: Some(0.5),
+            metrics,
+        }),
+        ..Default::default()
+    };
+    assert!(config.scale_policy.is_none());
+    assert!(config.load_report.is_some());
+    assert!((config.load_report.as_ref().unwrap().pressure.unwrap() - 0.5).abs() < f64::EPSILON);
 }
 
 // ============================================================================
@@ -676,9 +710,8 @@ async fn test_nf9_run_exits_after_stop() {
 // We verify via code inspection that the error path is correct.
 // The following test verifies SdkError::Other can hold the reject message.
 #[test]
-fn test_nf16_sdk_error_other_for_attach_rejected() {
-    let err = SdkError::Other("attach rejected: unauthorized".into());
+fn test_nf16_sdk_error_attach_rejected() {
+    let err = SdkError::AttachRejected("unauthorized".into());
     assert_eq!(err.to_string(), "attach rejected: unauthorized");
-    // Verify it's the right variant
-    assert!(matches!(err, SdkError::Other(_)));
+    assert!(matches!(err, SdkError::AttachRejected(_)));
 }

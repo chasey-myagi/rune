@@ -46,7 +46,7 @@ pub async fn init() -> Result<()> {
         return Ok(());
     }
 
-    std::fs::create_dir_all(&config_dir)
+    std::fs::create_dir_all(config_dir)
         .with_context(|| format!("Failed to create directory: {}", config_dir.display()))?;
     std::fs::write(&config_path, DEFAULT_CONFIG)
         .with_context(|| format!("Failed to write config: {}", config_path.display()))?;
@@ -59,10 +59,7 @@ pub async fn show() -> Result<()> {
     let config_path = config_file_path()?;
 
     if !config_path.exists() {
-        eprintln!(
-            "No configuration file found at {}",
-            config_path.display()
-        );
+        eprintln!("No configuration file found at {}", config_path.display());
         eprintln!("Run `rune config init` to create one.");
         return Ok(());
     }

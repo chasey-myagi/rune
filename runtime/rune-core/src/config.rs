@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -43,6 +44,10 @@ pub struct AuthConfig {
     /// verifiable via automatic fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hmac_secret: Option<String>,
+    /// Bootstrap-only admin key imported from env on startup.
+    /// Deliberately excluded from TOML serialization/deserialization.
+    #[serde(skip)]
+    pub initial_admin_key: Option<String>,
 }
 
 impl Default for AuthConfig {
@@ -51,6 +56,7 @@ impl Default for AuthConfig {
             enabled: true,
             exempt_routes: vec!["/health".to_string()],
             hmac_secret: None,
+            initial_admin_key: None,
         }
     }
 }
@@ -60,6 +66,9 @@ impl Default for AuthConfig {
 pub struct StoreConfig {
     pub db_path: String,
     pub log_retention_days: u32,
+    pub reader_pool_size: usize,
+    pub key_cache_ttl_secs: u64,
+    pub key_cache_negative_ttl_secs: u64,
 }
 
 impl Default for StoreConfig {
@@ -67,6 +76,9 @@ impl Default for StoreConfig {
         Self {
             db_path: "rune.db".to_string(),
             log_retention_days: 30,
+            reader_pool_size: 4,
+            key_cache_ttl_secs: 60,
+            key_cache_negative_ttl_secs: 30,
         }
     }
 }
@@ -125,14 +137,102 @@ impl Default for ResolverConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct CircuitBreakerConfig {
+    pub enabled: bool,
+    pub failure_threshold: u32,
+    pub success_threshold: u32,
+    pub reset_timeout_ms: u64,
+    pub half_open_max_permits: u32,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            failure_threshold: 5,
+            success_threshold: 2,
+            reset_timeout_ms: 30_000,
+            half_open_max_permits: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetryConfig {
+    pub enabled: bool,
+    pub max_retries: u32,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub backoff_multiplier: f64,
+    pub retryable_errors: Vec<String>,
+    pub circuit_breaker: CircuitBreakerConfig,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 100,
+            max_delay_ms: 5_000,
+            backoff_multiplier: 2.0,
+            // Timeout is excluded: the runtime does not cancel the remote caster
+            // on timeout, so retrying would start a second concurrent execution.
+            retryable_errors: vec!["unavailable".to_string(), "internal".to_string()],
+            circuit_breaker: CircuitBreakerConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RateLimitConfig {
-    pub requests_per_minute: u32,
+    /// Maximum requests allowed per `window_secs` window.
+    #[serde(alias = "requests_per_minute")]
+    pub max_requests: u32,
+    /// Sliding window size in seconds. Default 60.
+    pub window_secs: u64,
+    pub per_rune: HashMap<String, PerRuneRateLimit>,
+    pub default_caster_max_concurrent: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerRuneRateLimit {
+    #[serde(alias = "requests_per_minute")]
+    pub max_requests: u32,
+}
+
+impl Default for PerRuneRateLimit {
+    fn default() -> Self {
+        Self { max_requests: 60 }
+    }
 }
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
-            requests_per_minute: 600,
+            max_requests: 600,
+            window_secs: 60,
+            per_rune: HashMap::new(),
+            default_caster_max_concurrent: 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScalingConfig {
+    pub enabled: bool,
+    pub eval_interval_secs: u64,
+}
+
+impl Default for ScalingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            eval_interval_secs: 30,
         }
     }
 }
@@ -167,7 +267,7 @@ pub struct TlsConfig {
 // AppConfig — top-level configuration
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -176,27 +276,12 @@ pub struct AppConfig {
     pub session: SessionConfig,
     pub gate: GateServerConfig,
     pub resolver: ResolverConfig,
+    pub retry: RetryConfig,
     pub rate_limit: RateLimitConfig,
+    pub scaling: ScalingConfig,
     pub log: LogConfig,
     pub telemetry: TelemetryConfig,
     pub tls: TlsConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            auth: AuthConfig::default(),
-            store: StoreConfig::default(),
-            session: SessionConfig::default(),
-            gate: GateServerConfig::default(),
-            resolver: ResolverConfig::default(),
-            rate_limit: RateLimitConfig::default(),
-            log: LogConfig::default(),
-            telemetry: TelemetryConfig::default(),
-            tls: TlsConfig::default(),
-        }
-    }
 }
 
 impl AppConfig {
@@ -259,6 +344,39 @@ impl AppConfig {
         self.auth.enabled = false;
     }
 
+    /// Validate configuration values. Call after [`apply_env_overrides`](Self::apply_env_overrides)
+    /// to catch invalid final config (e.g. zero `window_secs` set via env).
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.rate_limit.window_secs > 0,
+            "rate_limit.window_secs must be > 0"
+        );
+
+        if self.retry.enabled {
+            anyhow::ensure!(
+                self.retry.backoff_multiplier > 0.0,
+                "retry.backoff_multiplier must be > 0"
+            );
+            anyhow::ensure!(
+                self.retry.max_delay_ms >= self.retry.base_delay_ms,
+                "retry.max_delay_ms must be >= base_delay_ms"
+            );
+        }
+
+        if self.retry.circuit_breaker.enabled {
+            anyhow::ensure!(
+                self.retry.circuit_breaker.failure_threshold > 0,
+                "circuit_breaker.failure_threshold must be > 0"
+            );
+            anyhow::ensure!(
+                self.retry.circuit_breaker.reset_timeout_ms > 0,
+                "circuit_breaker.reset_timeout_ms must be > 0"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Apply environment variable overrides.
     ///
     /// Format: `RUNE_{SECTION}__{FIELD}` (double underscore separates section
@@ -266,10 +384,12 @@ impl AppConfig {
     pub fn apply_env_overrides(&mut self) {
         macro_rules! env_override {
             ($var:expr, $field:expr, $ty:ty) => {
-                if let Ok(v) = std::env::var($var) {
-                    match v.parse::<$ty>() {
+                if let Ok(val) = std::env::var($var) {
+                    match val.parse::<$ty>() {
                         Ok(parsed) => $field = parsed,
-                        Err(_) => {}
+                        Err(e) => {
+                            tracing::warn!(env = $var, value = %val, error = %e, "failed to parse env override, using default");
+                        }
                     }
                 }
             };
@@ -300,6 +420,9 @@ impl AppConfig {
         if let Ok(v) = std::env::var("RUNE_AUTH__HMAC_SECRET") {
             self.auth.hmac_secret = if v.is_empty() { None } else { Some(v) };
         }
+        if let Ok(v) = std::env::var("RUNE_AUTH__INITIAL_ADMIN_KEY") {
+            self.auth.initial_admin_key = if v.is_empty() { None } else { Some(v) };
+        }
 
         // Store
         env_override_string!("RUNE_STORE__DB_PATH", self.store.db_path);
@@ -307,6 +430,21 @@ impl AppConfig {
             "RUNE_STORE__LOG_RETENTION_DAYS",
             self.store.log_retention_days,
             u32
+        );
+        env_override!(
+            "RUNE_STORE__READER_POOL_SIZE",
+            self.store.reader_pool_size,
+            usize
+        );
+        env_override!(
+            "RUNE_STORE__KEY_CACHE_TTL_SECS",
+            self.store.key_cache_ttl_secs,
+            u64
+        );
+        env_override!(
+            "RUNE_STORE__KEY_CACHE_NEGATIVE_TTL_SECS",
+            self.store.key_cache_negative_ttl_secs,
+            u64
         );
 
         // Session
@@ -334,16 +472,67 @@ impl AppConfig {
         );
 
         // Resolver
-        env_override_string!(
-            "RUNE_RESOLVER__STRATEGY",
-            self.resolver.strategy
+        env_override_string!("RUNE_RESOLVER__STRATEGY", self.resolver.strategy);
+
+        // Retry
+        env_override!("RUNE_RETRY__ENABLED", self.retry.enabled, bool);
+        env_override!("RUNE_RETRY__MAX_RETRIES", self.retry.max_retries, u32);
+        env_override!("RUNE_RETRY__BASE_DELAY_MS", self.retry.base_delay_ms, u64);
+        env_override!("RUNE_RETRY__MAX_DELAY_MS", self.retry.max_delay_ms, u64);
+        env_override!(
+            "RUNE_RETRY__BACKOFF_MULTIPLIER",
+            self.retry.backoff_multiplier,
+            f64
+        );
+        env_override!(
+            "RUNE_RETRY__CIRCUIT_BREAKER__ENABLED",
+            self.retry.circuit_breaker.enabled,
+            bool
+        );
+        env_override!(
+            "RUNE_RETRY__CIRCUIT_BREAKER__FAILURE_THRESHOLD",
+            self.retry.circuit_breaker.failure_threshold,
+            u32
+        );
+        env_override!(
+            "RUNE_RETRY__CIRCUIT_BREAKER__SUCCESS_THRESHOLD",
+            self.retry.circuit_breaker.success_threshold,
+            u32
+        );
+        env_override!(
+            "RUNE_RETRY__CIRCUIT_BREAKER__RESET_TIMEOUT_MS",
+            self.retry.circuit_breaker.reset_timeout_ms,
+            u64
+        );
+        env_override!(
+            "RUNE_RETRY__CIRCUIT_BREAKER__HALF_OPEN_MAX_PERMITS",
+            self.retry.circuit_breaker.half_open_max_permits,
+            u32
         );
 
         // Rate limit
         env_override!(
             "RUNE_RATE_LIMIT__REQUESTS_PER_MINUTE",
-            self.rate_limit.requests_per_minute,
+            self.rate_limit.max_requests,
             u32
+        );
+        env_override!(
+            "RUNE_RATE_LIMIT__WINDOW_SECS",
+            self.rate_limit.window_secs,
+            u64
+        );
+        env_override!(
+            "RUNE_RATE_LIMIT__DEFAULT_CASTER_MAX_CONCURRENT",
+            self.rate_limit.default_caster_max_concurrent,
+            u32
+        );
+
+        // Scaling
+        env_override!("RUNE_SCALING__ENABLED", self.scaling.enabled, bool);
+        env_override!(
+            "RUNE_SCALING__EVAL_INTERVAL_SECS",
+            self.scaling.eval_interval_secs,
+            u64
         );
 
         // Log
@@ -458,5 +647,57 @@ http_port = 19999
         let config =
             AppConfig::from_path("/tmp/rune_test_m5_nonexistent/does_not_exist.toml").unwrap();
         assert_eq!(config.server.http_port, 50060); // default
+    }
+
+    #[test]
+    fn initial_admin_key_is_env_only() {
+        std::env::set_var(
+            "RUNE_AUTH__INITIAL_ADMIN_KEY",
+            "rk_envonly1234567890abcdef1234567890",
+        );
+        let mut config = AppConfig::default();
+        config.apply_env_overrides();
+        assert_eq!(
+            config.auth.initial_admin_key.as_deref(),
+            Some("rk_envonly1234567890abcdef1234567890")
+        );
+        std::env::remove_var("RUNE_AUTH__INITIAL_ADMIN_KEY");
+    }
+
+    #[test]
+    fn initial_admin_key_is_ignored_in_toml() {
+        let toml_str = r#"
+        [auth]
+        initial_admin_key = "rk_should_be_ignored"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.auth.initial_admin_key.is_none());
+    }
+
+    #[test]
+    fn scaling_config_from_toml() {
+        let toml_str = r#"
+        [scaling]
+        enabled = true
+        eval_interval_secs = 12
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.scaling.enabled);
+        assert_eq!(config.scaling.eval_interval_secs, 12);
+    }
+
+    #[test]
+    fn scaling_config_env_overrides_apply() {
+        std::env::set_var("RUNE_SCALING__ENABLED", "true");
+        std::env::set_var("RUNE_SCALING__EVAL_INTERVAL_SECS", "9");
+
+        let mut config = AppConfig::default();
+        config.apply_env_overrides();
+
+        assert!(config.scaling.enabled);
+        assert_eq!(config.scaling.eval_interval_secs, 9);
+
+        std::env::remove_var("RUNE_SCALING__ENABLED");
+        std::env::remove_var("RUNE_SCALING__EVAL_INTERVAL_SECS");
     }
 }
