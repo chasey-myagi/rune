@@ -710,9 +710,8 @@ fn test_p1_6_config_supports_load_report_without_scale_policy() {
 // We verify via code inspection that the error path is correct.
 // The following test verifies SdkError::Other can hold the reject message.
 #[test]
-fn test_nf16_sdk_error_other_for_attach_rejected() {
-    let err = SdkError::Other("attach rejected: unauthorized".into());
+fn test_nf16_sdk_error_attach_rejected() {
+    let err = SdkError::AttachRejected("unauthorized".into());
     assert_eq!(err.to_string(), "attach rejected: unauthorized");
-    // Verify it's the right variant
-    assert!(matches!(err, SdkError::Other(_)));
+    assert!(matches!(err, SdkError::AttachRejected(_)));
 }

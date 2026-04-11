@@ -208,14 +208,18 @@ impl Caster {
             // that a pilot daemon restart is picked up automatically.
             let pilot_id = if let Some(policy) = self.config.scale_policy.as_ref() {
                 match PilotClient::ensure(&self.config.runtime, self.config.key.as_deref()).await {
-                    Ok(client) => {
-                        if let Err(e) = client.register(&self.caster_id, policy).await {
-                            tracing::warn!("pilot registration failed: {e}");
+                    Ok(client) => match client.register(&self.caster_id, policy).await {
+                        Ok(()) => {
+                            let id = client.pilot_id().to_string();
+                            last_pilot = Some(client);
+                            Some(id)
                         }
-                        let id = client.pilot_id().to_string();
-                        last_pilot = Some(client);
-                        Some(id)
-                    }
+                        Err(e) => {
+                            tracing::warn!("pilot registration failed: {e}");
+                            last_pilot = Some(client);
+                            None
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!("pilot ensure failed: {e}");
                         None
@@ -227,6 +231,10 @@ impl Caster {
 
             match self.connect_and_run(pilot_id.as_deref()).await {
                 Ok(()) => break Ok(()),
+                Err(SdkError::AttachRejected(reason)) => {
+                    tracing::error!("attach permanently rejected: {reason}");
+                    break Err(SdkError::AttachRejected(reason));
+                }
                 Err(e) => {
                     if self.shutdown_token.is_cancelled() {
                         break Ok(());
@@ -342,7 +350,7 @@ impl Caster {
                         .map_err(|e| SdkError::ChannelSend(e.to_string()))?;
                     } else {
                         tracing::error!("attach rejected: {}", ack.reason);
-                        return Err(SdkError::Other(format!("attach rejected: {}", ack.reason)));
+                        return Err(SdkError::AttachRejected(ack.reason.clone()));
                     }
                 }
                 Some(Payload::Execute(req)) => {

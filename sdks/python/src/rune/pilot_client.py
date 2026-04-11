@@ -21,8 +21,8 @@ class PilotClient:
         response = None
         try:
             response = await _send_request({"command": "status"})
-        except OSError:
-            pass  # No running pilot — will start one below.
+        except (OSError, TimeoutError):
+            pass  # No running pilot or hung socket — will start one below.
 
         if response is not None:
             status = _classify_status(response, normalized)
@@ -56,7 +56,7 @@ class PilotClient:
         while time.monotonic() < deadline:
             try:
                 response = await _send_request({"command": "status"})
-            except OSError:
+            except (OSError, TimeoutError):
                 if retry_runtime and time.monotonic() - last_start >= 1.0:
                     _start_pilot(retry_runtime, retry_key)
                     last_start = time.monotonic()

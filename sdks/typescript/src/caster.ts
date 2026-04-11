@@ -15,6 +15,17 @@ import type { RuneHandler, RuneHandlerWithFiles, StreamRuneHandler, StreamRuneHa
 import { PilotClient } from './pilot-client.js';
 import { StreamSender } from './stream.js';
 
+/**
+ * Raised when the runtime rejects CasterAttach — a permanent error
+ * that must not be retried.
+ */
+export class AttachRejectedError extends Error {
+  constructor(reason: string) {
+    super(`attach rejected: ${reason}`);
+    this.name = 'AttachRejectedError';
+  }
+}
+
 /** Default gRPC endpoint */
 const DEFAULT_RUNTIME = 'localhost:50070';
 /** Default heartbeat interval in ms */
@@ -233,9 +244,9 @@ export class Caster {
         if (this.scalePolicy) {
           try {
             const pilot = await PilotClient.ensure(this.runtime, this.key);
+            lastPilot = pilot;
             await pilot.register(this.casterId, this.scalePolicy);
             pilotId = pilot.pilotId;
-            lastPilot = pilot;
           } catch (err) {
             // Pilot failure is non-fatal — caster can still serve traffic.
             // eslint-disable-next-line no-console
@@ -248,6 +259,9 @@ export class Caster {
           // Session ended normally — don't reconnect
           break;
         } catch (err) {
+          if (err instanceof AttachRejectedError) {
+            throw err;
+          }
           if (!this.reconnect.enabled || this._stopped) {
             throw err;
           }
@@ -305,7 +319,7 @@ export class Caster {
           if (!ack.accepted) {
             clearInterval(heartbeatTimer);
             stream.end();
-            reject(new Error(`Attach rejected: ${ack.reason}`));
+            reject(new AttachRejectedError(ack.reason));
             return;
           }
           // Always send initial HealthReport regardless of scalePolicy
@@ -411,10 +425,10 @@ export class Caster {
   private _buildHealthReport(): Record<string, unknown> {
     const userMetrics = this.loadReport?.metrics ?? {};
     const metrics: Record<string, number> = {
+      ...userMetrics,
       active_requests: this._activeRequests,
       max_concurrent: this.maxConcurrent,
       available_permits: Math.max(0, this.maxConcurrent - this._activeRequests),
-      ...userMetrics,
     };
     const computedPressure =
       this.maxConcurrent === 0 ? 0 : this._activeRequests / this.maxConcurrent;

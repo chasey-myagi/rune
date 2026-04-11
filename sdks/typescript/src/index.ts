@@ -20,6 +20,6 @@ export type {
 } from './handler.js';
 
 // Classes
-export { Caster } from './caster.js';
+export { Caster, AttachRejectedError } from './caster.js';
 export { PilotClient } from './pilot-client.js';
 export { StreamSender } from './stream.js';

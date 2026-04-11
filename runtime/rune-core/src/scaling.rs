@@ -620,7 +620,7 @@ impl ScaleEvaluator {
                     .cmp(&b.has_reported_pressure)
                     .then_with(|| a.pressure.total_cmp(&b.pressure))
                     .then_with(|| b.available_permits.cmp(&a.available_permits))
-                    .then_with(|| b.generation.cmp(&a.generation))
+                    .then_with(|| a.generation.cmp(&b.generation))
             })
             .map(|c| c.caster_id)
     }
@@ -1183,6 +1183,44 @@ mod tests {
             gpu_status.reason.contains("missing pilot"),
             "reason should indicate missing pilot, got: {}",
             gpu_status.reason
+        );
+    }
+
+    /// Regression: scale-down tiebreaker must prefer the oldest generation
+    /// (smallest generation number) when pressure, permits, and reported
+    /// status are all equal.
+    #[tokio::test]
+    async fn test_scale_down_prefers_oldest_generation() {
+        let mgr = Arc::new(SessionManager::new_dev(
+            Duration::from_secs(10),
+            Duration::from_secs(35),
+        ));
+        let _pilot_rx = insert_pilot(&mgr, "pilot-1");
+
+        // Insert older caster first — gets a smaller generation number.
+        let mut older_rx =
+            insert_scaling_caster(&mgr, "older-caster", "gpu", Some("pilot-1"), 2, 0.05).unwrap();
+        // Insert newer caster second — gets a larger generation number.
+        let mut newer_rx =
+            insert_scaling_caster(&mgr, "newer-caster", "gpu", Some("pilot-1"), 2, 0.05).unwrap();
+
+        let evaluator = ScaleEvaluator::new(Arc::clone(&mgr), Duration::from_secs(30));
+        evaluator.evaluate_once().await;
+
+        // The oldest-generation caster should be the scale-down victim.
+        let msg = tokio::time::timeout(Duration::from_millis(200), older_rx.recv())
+            .await
+            .expect("older caster should be selected for scale-down")
+            .expect("older caster should receive shutdown request");
+        match msg.payload {
+            Some(session_message::Payload::Shutdown(req)) => {
+                assert_eq!(req.reason, "scale_down");
+            }
+            other => panic!("expected ShutdownRequest on older caster, got {:?}", other),
+        }
+        assert!(
+            newer_rx.try_recv().is_err(),
+            "newer caster should NOT be chosen when older generation exists"
         );
     }
 }

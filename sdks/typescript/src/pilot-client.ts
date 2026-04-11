@@ -153,6 +153,9 @@ function startPilot(runtime: string, key?: string): void {
       env: key ? { ...process.env, RUNE_KEY: key } : process.env,
     },
   );
+  // Swallow spawn errors (ENOENT, EACCES) — the ensure() retry loop
+  // will detect the missing pilot and re-attempt or timeout.
+  child.on('error', () => {});
   child.unref();
 }
 

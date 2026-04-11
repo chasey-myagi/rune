@@ -198,6 +198,7 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
         }
     });
 
+    let mut conn_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     loop {
         tokio::select! {
             changed = shutdown_rx.changed() => {
@@ -220,7 +221,7 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
                 let cli_registry = Arc::clone(&registry);
                 let cli_shutdown_tx = shutdown_tx.clone();
                 let cli_runtime_state = runtime_state_rx.clone();
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     let response = match handle_client(
                         &mut stream,
                         &cli_pilot_id,
@@ -239,10 +240,16 @@ pub async fn run_daemon(runtime: &str, json_mode: bool) -> Result<()> {
                         let _ = stream.write_all(&payload).await;
                     }
                 });
+                conn_tasks.push(handle);
             }
         }
     }
 
+    // Drain active connection tasks so stop/deregister responses are
+    // flushed before we tear down the socket and clean up paths.
+    for handle in conn_tasks {
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
     session_task.abort();
     reaper_task.abort();
     cleanup_paths(&paths);

@@ -787,15 +787,34 @@ impl SessionManager {
 
     fn handle_health_report(&self, ctx: &SessionContext, report: rune_proto::HealthReport) {
         if let Some(ref id) = ctx.caster_id {
-            self.apply_health_report(id, report);
+            self.apply_health_report(id, ctx.generation, report);
         }
     }
 
     /// Apply a raw HealthReport to the stored HealthInfo for a caster.
     /// This is the SOLE boundary where telemetry floats are sanitized.
     /// `pub(crate)` for direct testing — production entry is `handle_health_report()`.
-    pub(crate) fn apply_health_report(&self, caster_id: &str, report: rune_proto::HealthReport) {
+    /// When `generation` is `Some`, the report is ignored if it doesn't match
+    /// the stored entry's generation (stale report from a superseded session).
+    /// Pass `None` in tests to bypass the generation check.
+    pub(crate) fn apply_health_report(
+        &self,
+        caster_id: &str,
+        generation: Option<u64>,
+        report: rune_proto::HealthReport,
+    ) {
         if let Some(entry) = self.health.get(caster_id) {
+            if let Some(gen) = generation {
+                if entry.generation != gen {
+                    tracing::debug!(
+                        caster_id,
+                        report_gen = gen,
+                        stored_gen = entry.generation,
+                        "ignoring stale health report from superseded session"
+                    );
+                    return;
+                }
+            }
             let mut current = entry
                 .info
                 .write()
@@ -812,13 +831,21 @@ impl SessionManager {
             // storing 0.0 is safe for JSON, but counting it as a real
             // idle sample would undercount group load.
             current.pressure_reported = report.pressure.is_finite() && report.pressure >= 0.0;
-            // Filter out non-finite metric values: NaN/inf entries are
+            // Filter out non-finite metric values and reserved keys that
+            // overlap with first-class telemetry fields.  NaN/inf entries are
             // dropped rather than clamped to 0.0 — for user-defined metrics,
             // absence is more honest than a fabricated zero.
+            const RESERVED_METRIC_KEYS: &[&str] = &[
+                "pressure",
+                "error_rate",
+                "active_requests",
+                "max_concurrent",
+                "available_permits",
+            ];
             current.metrics = report
                 .metrics
                 .into_iter()
-                .filter(|(_, v)| v.is_finite())
+                .filter(|(k, v)| v.is_finite() && !RESERVED_METRIC_KEYS.contains(&k.as_str()))
                 .collect();
         }
     }
@@ -2766,7 +2793,7 @@ mod tests {
 
         // Send a HealthReport with NaN pressure through the real boundary
         let report = make_health_report(f64::NAN, HashMap::new());
-        mgr.apply_health_report("c1", report);
+        mgr.apply_health_report("c1", None, report);
 
         // Storage is safe (finite)
         let info = mgr.health_info("c1").unwrap();
@@ -2795,7 +2822,7 @@ mod tests {
         metrics.insert("neg".to_string(), -1.0); // finite negative — keep
 
         let report = make_health_report(0.5, metrics);
-        mgr.apply_health_report("c1", report);
+        mgr.apply_health_report("c1", None, report);
 
         let info = mgr.health_info("c1").unwrap();
         assert_eq!(
@@ -2817,7 +2844,7 @@ mod tests {
         setup_caster_with_group(&mgr, "c1", "g1");
 
         let report = make_health_report(0.75, HashMap::new());
-        mgr.apply_health_report("c1", report);
+        mgr.apply_health_report("c1", None, report);
 
         let info = mgr.health_info("c1").unwrap();
         assert_eq!(info.pressure, 0.75);
