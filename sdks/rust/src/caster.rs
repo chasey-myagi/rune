@@ -34,6 +34,9 @@ pub struct Caster {
     active_requests: Arc<AtomicU32>,
     /// When true, new Execute requests are rejected with SHUTTING_DOWN.
     draining: Arc<AtomicBool>,
+    /// Notified when active_requests reaches zero — wakes the drain loop
+    /// instead of polling with sleep(50ms).
+    drain_notify: Arc<tokio::sync::Notify>,
 }
 
 impl Caster {
@@ -50,6 +53,7 @@ impl Caster {
             shutdown_token: CancellationToken::new(),
             active_requests: Arc::new(AtomicU32::new(0)),
             draining: Arc::new(AtomicBool::new(false)),
+            drain_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -387,16 +391,20 @@ impl Caster {
                     let cancel_tokens_clone = cancel_tokens.clone();
                     let request_id = req.request_id.clone();
                     let active_requests = Arc::clone(&self.active_requests);
+                    let drain_notify = Arc::clone(&self.drain_notify);
                     tokio::spawn(async move {
                         // Decrement active_requests on exit regardless of
                         // whether the handler completes normally or panics.
-                        struct Guard(Arc<std::sync::atomic::AtomicU32>);
+                        // Notifies the drain loop when count reaches zero.
+                        struct Guard(Arc<std::sync::atomic::AtomicU32>, Arc<tokio::sync::Notify>);
                         impl Drop for Guard {
                             fn drop(&mut self) {
-                                self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                                if self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) == 1 {
+                                    self.1.notify_one();
+                                }
                             }
                         }
-                        let _guard = Guard(active_requests);
+                        let _guard = Guard(active_requests, drain_notify);
 
                         execute_handler(registered, req, tx_clone, token).await;
                         cancel_tokens_clone.write().await.remove(&request_id);
@@ -431,16 +439,23 @@ impl Caster {
                     // Graceful drain: wait for in-flight requests to complete
                     // or until grace_period_ms expires, whichever comes first.
                     let grace = Duration::from_millis(shutdown.grace_period_ms as u64);
-                    let drain_start = tokio::time::Instant::now();
+                    let drain_deadline = tokio::time::Instant::now() + grace;
                     while self.active_requests.load(Ordering::Relaxed) > 0 {
-                        if drain_start.elapsed() >= grace {
+                        let remaining =
+                            drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                        if remaining.is_zero() {
                             tracing::warn!(
                                 "grace period expired with {} active requests remaining",
                                 self.active_requests.load(Ordering::Relaxed)
                             );
                             break;
                         }
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        // Wait for drain_notify (fired when active_requests
+                        // drops to zero) or timeout — no polling.
+                        tokio::select! {
+                            _ = self.drain_notify.notified() => {}
+                            _ = tokio::time::sleep(remaining) => {}
+                        }
                     }
                     self.stop();
                     break;

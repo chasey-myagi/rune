@@ -130,7 +130,8 @@ async def _send_request_inner(payload: dict) -> dict:
     except (AttributeError, OSError):
         pass
     await writer.drain()
-    data = await reader.read()
+    _MAX_RESPONSE_SIZE = 256 * 1024  # 256KB — symmetric with daemon's request limit
+    data = await reader.read(_MAX_RESPONSE_SIZE)
     writer.close()
     await writer.wait_closed()
     return json.loads(data.decode("utf-8"))
