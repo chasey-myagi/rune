@@ -297,8 +297,8 @@ impl Relay {
         }
         let entries = self.find(rune_name)?;
 
-        // Collect matching keys first (cheap), then clone only the filtered set.
-        let matching_keys: Vec<&String> = entries
+        // Filter and clone matching entries in a single pass over the map.
+        let mut filtered: Vec<RuneEntry> = entries
             .value()
             .iter()
             .filter(|(_, e)| {
@@ -306,20 +306,15 @@ impl Relay {
                     .iter()
                     .all(|(k, v)| e.config.labels.get(k) == Some(v))
             })
-            .map(|(k, _)| k)
+            .map(|(_, e)| e.clone())
             .collect();
-        if matching_keys.is_empty() {
+        if filtered.is_empty() {
             return None;
         }
         // Fast path: single match.
-        if matching_keys.len() == 1 {
-            return entries.value().get(matching_keys[0]).cloned();
+        if filtered.len() == 1 {
+            return Some(filtered.swap_remove(0));
         }
-
-        let mut filtered: Vec<RuneEntry> = matching_keys
-            .iter()
-            .filter_map(|k| entries.value().get(*k).cloned())
-            .collect();
 
         let idx = resolver.pick(rune_name, &filtered)?;
         Some(filtered.swap_remove(idx))
