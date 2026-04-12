@@ -5,6 +5,7 @@ edition = "2021"
 description = "Protocol Buffer generated code for Rune Wire Protocol"
 license = "MIT"
 repository = "https://github.com/chasey-myagi/rune"
+include = ["src/**/*", "build.rs", "proto/**/*", "Cargo.toml"]
 
 [dependencies]
 prost.workspace = true
