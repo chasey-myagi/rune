@@ -209,7 +209,7 @@ impl ScaleEvaluator {
     }
 
     pub async fn evaluate_once(&self) {
-        // SAFETY: The two-phase lock pattern on `breaches` (Phase 1: lock →
+        // INVARIANT: The two-phase lock pattern on `breaches` (Phase 1: lock →
         // decide; Phase 2: unlock → candidate selection; Phase 3: re-lock →
         // reset timer) assumes this method is never called concurrently.
         // This is currently guaranteed by `start()` running a single

@@ -297,8 +297,8 @@ impl Relay {
         }
         let entries = self.find(rune_name)?;
 
-        // Collect matching keys first (cheap), then clone only the filtered set.
-        let matching_keys: Vec<&String> = entries
+        // Collect matching keys (owned) so we don't hold a borrow on the DashMap Ref.
+        let matching_keys: Vec<String> = entries
             .value()
             .iter()
             .filter(|(_, e)| {
@@ -306,19 +306,19 @@ impl Relay {
                     .iter()
                     .all(|(k, v)| e.config.labels.get(k) == Some(v))
             })
-            .map(|(k, _)| k)
+            .map(|(k, _)| k.clone())
             .collect();
         if matching_keys.is_empty() {
             return None;
         }
         // Fast path: single match.
         if matching_keys.len() == 1 {
-            return entries.value().get(matching_keys[0]).cloned();
+            return entries.value().get(&matching_keys[0]).cloned();
         }
 
         let mut filtered: Vec<RuneEntry> = matching_keys
             .iter()
-            .filter_map(|k| entries.value().get(*k).cloned())
+            .filter_map(|k| entries.value().get(k).cloned())
             .collect();
 
         let idx = resolver.pick(rune_name, &filtered)?;
