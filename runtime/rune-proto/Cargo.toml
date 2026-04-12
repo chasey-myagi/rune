@@ -2,6 +2,9 @@
 name = "rune-proto"
 version = "1.2.0"
 edition = "2021"
+description = "Protocol Buffer generated code for Rune Wire Protocol"
+license = "MIT"
+repository = "https://github.com/chasey-myagi/rune"
 
 [dependencies]
 prost.workspace = true
