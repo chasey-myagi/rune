@@ -133,10 +133,10 @@ async def _send_request_inner(payload: dict) -> dict:
     except (AttributeError, OSError):
         pass
     await writer.drain()
-    data = await reader.read(_MAX_RESPONSE_SIZE)
+    data = await reader.read(_MAX_RESPONSE_SIZE + 1)
     writer.close()
     await writer.wait_closed()
-    if len(data) >= _MAX_RESPONSE_SIZE:
+    if len(data) > _MAX_RESPONSE_SIZE:
         raise RuntimeError("pilot response exceeded 256KB limit")
     return json.loads(data.decode("utf-8"))
 
