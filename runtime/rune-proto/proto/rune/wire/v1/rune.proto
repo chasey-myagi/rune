@@ -1,0 +1,174 @@
+syntax = "proto3";
+package rune.wire.v1;
+
+// Caster 与 Runtime 的双向流
+service RuneService {
+    rpc Session(stream SessionMessage) returns (stream SessionMessage);
+}
+
+// 顶层消息：oneof 区分类型，无冗余字段
+message SessionMessage {
+    oneof payload {
+        // Caster → Runtime
+        CasterAttach attach = 10;
+        CasterDetach detach = 11;
+        ExecuteResult result = 12;
+        StreamEvent stream_event = 13;
+        StreamEnd stream_end = 14;
+        HealthReport health_report = 15;
+
+        // Runtime → Caster
+        AttachAck attach_ack = 20;
+        ExecuteRequest execute = 21;
+        CancelRequest cancel = 22;
+        ScaleSignal scale_signal = 23;
+        ShutdownRequest shutdown = 24;
+
+        // 双向
+        Heartbeat heartbeat = 30;
+    }
+}
+
+// ── Caster 注册 ──
+
+message CasterAttach {
+    string caster_id = 1;
+    repeated RuneDeclaration runes = 2;
+    map<string, string> labels = 3;
+    uint32 max_concurrent = 4;
+    string key = 5;              // Caster 认证密钥（dev 模式下可省略）
+    string role = 6;             // "caster" (default) | "pilot"
+}
+
+message AttachAck {
+    bool accepted = 1;
+    string reason = 2;
+    repeated string supported_features = 3;   // Runtime 支持的特性集
+    string protocol_version = 4;
+}
+
+message CasterDetach {
+    string reason = 1;
+}
+
+// ── Rune 声明 ──
+
+message RuneDeclaration {
+    string name = 1;
+    string version = 2;
+    string description = 3;
+    string input_schema = 4;         // JSON Schema string（可选，不声明则跳过校验）
+    string output_schema = 5;        // JSON Schema string（可选）
+    bool supports_stream = 6;
+    GateConfig gate = 7;
+    int32 priority = 8;              // Caster 优先级（高值优先）
+}
+
+message GateConfig {
+    string path = 1;
+    string method = 2;
+}
+
+// ── 文件附件 ──
+
+message FileAttachment {
+    string filename = 1;
+    bytes data = 2;
+    string mime_type = 3;
+}
+
+// ── 执行 ──
+
+message ExecuteRequest {
+    string request_id = 1;
+    string rune_name = 2;
+    bytes input = 3;
+    map<string, string> context = 4;
+    uint32 timeout_ms = 5;
+    repeated FileAttachment attachments = 6;   // 文件附件
+}
+
+message CancelRequest {
+    string request_id = 1;
+    string reason = 2;
+}
+
+message ScaleSignal {
+    ScaleAction action = 1;
+    string group_id = 2;
+    uint32 desired_replicas = 3;
+    double current_pressure = 4;
+    string reason = 5;
+}
+
+message ShutdownRequest {
+    string reason = 1;
+    uint32 grace_period_ms = 2;
+}
+
+message ExecuteResult {
+    string request_id = 1;
+    Status status = 2;
+    bytes output = 3;
+    ErrorDetail error = 4;
+    repeated FileAttachment attachments = 5;   // 返回文件附件
+}
+
+// ── 流式 ──
+
+message StreamEvent {
+    string request_id = 1;
+    bytes data = 2;
+    string event_type = 3;
+}
+
+message StreamEnd {
+    string request_id = 1;
+    Status status = 2;
+    ErrorDetail error = 3;
+}
+
+// ── 心跳 ──
+
+message Heartbeat {
+    uint64 timestamp_ms = 1;
+}
+
+message HealthReport {
+    HealthStatus status = 1;
+    uint32 active_requests = 2;
+    float error_rate = 3;
+    string custom_info = 4;
+    uint64 timestamp_ms = 5;
+    uint32 error_rate_window_secs = 6;
+    double pressure = 7;
+    map<string, double> metrics = 8;
+}
+
+// ── 公共类型 ──
+
+enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_COMPLETED = 1;
+    STATUS_FAILED = 2;
+    STATUS_CANCELLED = 3;
+}
+
+enum HealthStatus {
+    HEALTH_STATUS_UNSPECIFIED = 0;
+    HEALTH_STATUS_HEALTHY = 1;
+    HEALTH_STATUS_DEGRADED = 2;
+    HEALTH_STATUS_UNHEALTHY = 3;
+}
+
+enum ScaleAction {
+    SCALE_ACTION_UNSPECIFIED = 0;
+    SCALE_ACTION_UP = 1;
+    SCALE_ACTION_DOWN = 2;
+}
+
+message ErrorDetail {
+    string code = 1;
+    string message = 2;
+    bytes details = 3;
+}
