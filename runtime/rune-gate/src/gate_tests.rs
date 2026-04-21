@@ -8827,6 +8827,7 @@ mod tests {
                 depends_on: vec![],
                 condition: None,
                 input_mapping: None,
+                timeout_ms: None,
             }],
             gate_path: None,
         };

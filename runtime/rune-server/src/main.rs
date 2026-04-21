@@ -265,6 +265,7 @@ async fn main() -> anyhow::Result<()> {
                     depends_on: vec![],
                     condition: None,
                     input_mapping: None,
+                    timeout_ms: None,
                 },
                 StepDefinition {
                     name: "s_b".into(),
@@ -272,6 +273,7 @@ async fn main() -> anyhow::Result<()> {
                     depends_on: vec!["s_a".into()],
                     condition: None,
                     input_mapping: None,
+                    timeout_ms: None,
                 },
                 StepDefinition {
                     name: "s_c".into(),
@@ -279,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
                     depends_on: vec!["s_b".into()],
                     condition: None,
                     input_mapping: None,
+                    timeout_ms: None,
                 },
             ],
             gate_path: None,
@@ -292,6 +295,7 @@ async fn main() -> anyhow::Result<()> {
                 depends_on: vec![],
                 condition: None,
                 input_mapping: None,
+                timeout_ms: None,
             }],
             gate_path: None,
         });

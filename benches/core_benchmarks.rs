@@ -292,6 +292,7 @@ fn dag_benchmarks(c: &mut Criterion) {
                 },
                 condition: None,
                 input_mapping: None,
+                timeout_ms: None,
             })
             .collect(),
         gate_path: None,
@@ -348,6 +349,7 @@ fn dag_benchmarks(c: &mut Criterion) {
                     },
                     condition: None,
                     input_mapping: None,
+                    timeout_ms: None,
                 })
                 .collect(),
             gate_path: None,
@@ -393,6 +395,7 @@ fn dag_benchmarks(c: &mut Criterion) {
                     depends_on: vec![],
                     condition: None,
                     input_mapping: None,
+                    timeout_ms: None,
                 },
                 StepDefinition {
                     name: "left".into(),
@@ -400,6 +403,7 @@ fn dag_benchmarks(c: &mut Criterion) {
                     depends_on: vec!["start".into()],
                     condition: None,
                     input_mapping: None,
+                    timeout_ms: None,
                 },
                 StepDefinition {
                     name: "right".into(),
@@ -407,6 +411,7 @@ fn dag_benchmarks(c: &mut Criterion) {
                     depends_on: vec!["start".into()],
                     condition: None,
                     input_mapping: None,
+                    timeout_ms: None,
                 },
                 StepDefinition {
                     name: "join".into(),
@@ -419,6 +424,7 @@ fn dag_benchmarks(c: &mut Criterion) {
                         m.insert("right".to_string(), "right.output".to_string());
                         m
                     }),
+                    timeout_ms: None,
                 },
             ],
             gate_path: None,
