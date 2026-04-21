@@ -18,6 +18,9 @@ pub struct StepDefinition {
     pub depends_on: Vec<String>,
     pub condition: Option<String>,
     pub input_mapping: Option<HashMap<String, String>>,
+    /// 覆盖全局 step_timeout（单位毫秒）
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// DAG 验证错误

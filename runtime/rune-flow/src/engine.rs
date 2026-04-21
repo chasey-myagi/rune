@@ -6,6 +6,7 @@ use rune_core::rune::{RuneContext, RuneError};
 use rune_core::trace;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Step 执行状态
 #[derive(Debug, Clone)]
@@ -308,7 +309,10 @@ impl FlowRunner {
 
                 match invoker {
                     Some(inv) => {
-                        let timeout = self.step_timeout;
+                        let timeout = step_def
+                            .timeout_ms
+                            .map(Duration::from_millis)
+                            .unwrap_or(self.step_timeout);
                         let parent_context = parent_context.clone();
                         let flow_request_id = flow_request_id.clone();
                         let flow_span_id = flow_span_id.clone();
@@ -328,9 +332,13 @@ impl FlowRunner {
                                 context: step_context,
                                 timeout,
                             };
-                            match inv.invoke_once(ctx, si).await {
-                                Ok(output) => Ok((step_idx, output)),
-                                Err(e) => Err((step_idx, e)),
+                            // engine 层强制 hard deadline（LocalInvoker 无内置 timeout）。
+                            // RemoteInvoker 会经由 RuneContext.timeout 在 session 层同时发起
+                            // cancel 信号给 caster，两者使用相同的 timeout 值，互补不冲突。
+                            match tokio::time::timeout(timeout, inv.invoke_once(ctx, si)).await {
+                                Ok(Ok(output)) => Ok((step_idx, output)),
+                                Ok(Err(e)) => Err((step_idx, e)),
+                                Err(_) => Err((step_idx, RuneError::Timeout)),
                             }
                         });
                     }
@@ -723,6 +731,7 @@ mod tests {
             depends_on: vec![],
             condition: None,
             input_mapping: Some(mapping),
+            timeout_ms: None,
         };
 
         let flow_input = Bytes::from(r#"{"field1": "hello", "field2": 42}"#);
@@ -749,6 +758,7 @@ mod tests {
             depends_on: vec![],
             condition: None,
             input_mapping: None,
+            timeout_ms: None,
         };
 
         let flow_input = Bytes::from(r#"{"data": "test"}"#);

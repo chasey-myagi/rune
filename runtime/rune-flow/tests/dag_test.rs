@@ -12,6 +12,7 @@ fn step(name: &str, rune: &str) -> StepDefinition {
         depends_on: vec![],
         condition: None,
         input_mapping: None,
+        timeout_ms: None,
     }
 }
 
@@ -22,6 +23,7 @@ fn step_with_deps(name: &str, rune: &str, deps: &[&str]) -> StepDefinition {
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: None,
         input_mapping: None,
+        timeout_ms: None,
     }
 }
 
@@ -37,6 +39,7 @@ fn step_with_deps_and_mapping(
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: None,
         input_mapping: Some(mapping),
+        timeout_ms: None,
     }
 }
 
@@ -47,6 +50,7 @@ fn step_with_condition(name: &str, rune: &str, deps: &[&str], condition: &str) -
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: Some(condition.to_string()),
         input_mapping: None,
+        timeout_ms: None,
     }
 }
 
@@ -335,6 +339,7 @@ fn serde_round_trip() {
                 depends_on: vec![],
                 condition: None,
                 input_mapping: None,
+                timeout_ms: None,
             },
             StepDefinition {
                 name: "B".to_string(),
@@ -342,6 +347,7 @@ fn serde_round_trip() {
                 depends_on: vec!["A".to_string()],
                 condition: Some("input.ready == true".to_string()),
                 input_mapping: Some(mapping),
+                timeout_ms: None,
             },
         ],
         gate_path: Some("/api/test".to_string()),

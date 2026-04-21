@@ -117,6 +117,7 @@ mod tests {
                 depends_on: Vec::new(),
                 condition: None,
                 input_mapping: None,
+                timeout_ms: None,
             }],
             gate_path: Some(format!("/{name}")),
         }

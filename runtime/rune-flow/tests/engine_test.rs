@@ -34,6 +34,7 @@ fn step(name: &str, rune: &str) -> StepDefinition {
         depends_on: vec![],
         condition: None,
         input_mapping: None,
+        timeout_ms: None,
     }
 }
 
@@ -44,6 +45,7 @@ fn step_with_deps(name: &str, rune: &str, deps: &[&str]) -> StepDefinition {
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: None,
         input_mapping: None,
+        timeout_ms: None,
     }
 }
 
@@ -59,6 +61,7 @@ fn step_with_deps_and_mapping(
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: None,
         input_mapping: Some(mapping),
+        timeout_ms: None,
     }
 }
 
@@ -69,6 +72,7 @@ fn step_with_condition(name: &str, rune: &str, deps: &[&str], condition: &str) -
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: Some(condition.to_string()),
         input_mapping: None,
+        timeout_ms: None,
     }
 }
 
@@ -85,6 +89,7 @@ fn step_with_condition_and_mapping(
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: Some(condition.to_string()),
         input_mapping: Some(mapping),
+        timeout_ms: None,
     }
 }
 
@@ -174,6 +179,19 @@ fn test_relay() -> Arc<Relay> {
         .register(
             rune_config("slow_step"),
             Arc::new(LocalInvoker::new(hs)),
+            None,
+        )
+        .unwrap();
+
+    // sleep_200ms: sleep 200ms 后返回（用于 timeout 测试）
+    let h200 = make_handler(|_ctx, input| async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        Ok(input)
+    });
+    relay
+        .register(
+            rune_config("sleep_200ms"),
+            Arc::new(LocalInvoker::new(h200)),
             None,
         )
         .unwrap();
@@ -1560,4 +1578,61 @@ fn nf5_time_utils_now_iso8601_format() {
     let s = rune_core::time_utils::now_iso8601();
     assert_eq!(s.len(), 20);
     assert!(s.ends_with('Z'));
+}
+
+// ============================================================
+// G: Per-step timeout_ms
+// ============================================================
+
+#[tokio::test]
+async fn per_step_timeout_overrides_global() {
+    // 全局 500ms，step 设 50ms，rune sleep 200ms → step timeout 触发
+    let relay = test_relay();
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::with_timeout(relay, resolver, Duration::from_millis(500));
+
+    let mut timed_step = step("A", "sleep_200ms");
+    timed_step.timeout_ms = Some(50);
+
+    engine
+        .register(flow("timeout_override", vec![timed_step]))
+        .unwrap();
+
+    let err = engine
+        .execute("timeout_override", Bytes::from(r#"{}"#))
+        .await
+        .unwrap_err();
+
+    match err {
+        FlowError::StepFailed {
+            source: rune_core::rune::RuneError::Timeout,
+            ..
+        } => {}
+        other => panic!("expected StepFailed(Timeout), got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn per_step_timeout_none_uses_global() {
+    // 无 per-step timeout，全局 50ms，rune sleep 200ms → 全局 timeout 触发
+    let relay = test_relay();
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::with_timeout(relay, resolver, Duration::from_millis(50));
+
+    engine
+        .register(flow("global_timeout", vec![step("A", "sleep_200ms")]))
+        .unwrap();
+
+    let err = engine
+        .execute("global_timeout", Bytes::from(r#"{}"#))
+        .await
+        .unwrap_err();
+
+    match err {
+        FlowError::StepFailed {
+            source: rune_core::rune::RuneError::Timeout,
+            ..
+        } => {}
+        other => panic!("expected StepFailed(Timeout), got {:?}", other),
+    }
 }
