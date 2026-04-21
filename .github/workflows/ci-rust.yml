@@ -1,9 +1,9 @@
 name: CI
 on:
   push:
-    branches: [dev]
+    branches: [dev, v1.3.0-dev]
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, v1.3.0-dev]
 env:
   CARGO_TERM_COLOR: always
 jobs:
