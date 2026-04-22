@@ -544,6 +544,18 @@ fn validate_condition_syntax(
     Ok(())
 }
 
+fn validate_retry_config(step_name: &str, retry: &Option<RetryConfig>) -> Result<(), DagError> {
+    if let Some(r) = retry {
+        if r.max_attempts == 0 {
+            return Err(DagError::InvalidRetryConfig {
+                step: step_name.to_string(),
+                reason: "max_attempts must be >= 1 (includes the initial attempt)".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_loop_config(
     step_name: &str,
     lc: &LoopConfig,
@@ -573,10 +585,11 @@ fn validate_loop_config(
         }
     }
 
-    // body step condition 预检 + 递归验证嵌套 loop/map/switch/flow
+    // body step condition 预检 + retry 验证 + 递归验证嵌套 loop/map/switch/flow
     let qualified = |bs_name: &str| format!("{step_name}/{bs_name}");
     for bs in &lc.body {
         validate_condition_syntax(&qualified(&bs.name), &bs.condition, operators)?;
+        validate_retry_config(&qualified(&bs.name), &bs.retry)?;
         match &bs.kind {
             BodyStepKind::Loop(nested) => {
                 validate_loop_config(&qualified(&bs.name), nested, operators)?
@@ -620,6 +633,7 @@ fn validate_map_config(
     // 递归验证 body
     let body_name = format!("{step_name}/{}", mc.body.name);
     validate_condition_syntax(&body_name, &mc.body.condition, operators)?;
+    validate_retry_config(&body_name, &mc.body.retry)?;
     match &mc.body.kind {
         BodyStepKind::Loop(nested) => validate_loop_config(&body_name, nested, operators)?,
         BodyStepKind::Map(nested) => validate_map_config(&body_name, nested, operators)?,
@@ -663,6 +677,7 @@ fn validate_switch_config(
     let validate_body = |b: &BodyStep| -> Result<(), DagError> {
         let body_name = format!("{step_name}/{}", b.name);
         validate_condition_syntax(&body_name, &b.condition, operators)?;
+        validate_retry_config(&body_name, &b.retry)?;
         match &b.kind {
             BodyStepKind::Loop(nested) => validate_loop_config(&body_name, nested, operators)?,
             BodyStepKind::Map(nested) => validate_map_config(&body_name, nested, operators)?,

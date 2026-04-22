@@ -417,7 +417,12 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {}
-                    _ = cleanup_shutdown_rx.changed() => break,
+                    result = cleanup_shutdown_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("cleanup task: shutdown channel closed unexpectedly");
+                        }
+                        break;
+                    }
                 }
                 if *cleanup_shutdown_rx.borrow() {
                     break;

@@ -1096,7 +1096,6 @@ impl SessionManager {
     /// call may still be a no-op if the session was cleaned up in the narrow
     /// window between `request_index.get` and `cancel`). The `cancel` function
     /// acts as the authoritative gate, so correctness holds regardless.
-    /// Request IDs are monotonic/UUID-derived, making hash collisions negligible.
     pub async fn cancel_by_request_id(&self, request_id: &str, reason: &str) -> bool {
         if let Some(entry) = self.request_index.get(request_id) {
             let caster_id = entry.value().clone();
