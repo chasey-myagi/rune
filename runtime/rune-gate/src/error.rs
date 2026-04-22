@@ -99,6 +99,18 @@ pub fn map_flow_error(e: FlowError, request_id: Option<&str>) -> axum::response:
             &e.to_string(),
             request_id,
         ),
+        FlowError::FlowStepNotFound(_) => error_response_with_id(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "FLOW_STEP_NOT_FOUND",
+            &e.to_string(),
+            request_id,
+        ),
+        FlowError::CircularFlowRef(_) => error_response_with_id(
+            StatusCode::BAD_REQUEST,
+            "CIRCULAR_FLOW_REF",
+            &e.to_string(),
+            request_id,
+        ),
     }
 }
 
