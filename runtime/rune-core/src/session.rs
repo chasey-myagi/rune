@@ -141,6 +141,10 @@ pub struct SessionManager {
     pub(crate) heartbeat_timeout: Duration,
     pub(crate) default_caster_max_concurrent: usize,
     caster_count_atomic: AtomicUsize,
+    /// Global reverse index: request_id → caster_id.
+    /// Enables O(1) cancel_by_request_id without iterating all sessions.
+    /// Maintained in lock-step with each session's `pending` map.
+    request_index: Arc<DashMap<String, String>>,
     /// Monotonic counter for session generations — each attach gets a unique
     /// u64, eliminating the `Instant`-based identity which could collide in
     /// fast-reconnect scenarios.
@@ -182,6 +186,7 @@ impl SessionManager {
             on_caster_attach: OnceLock::new(),
             key_verifier: Arc::new(crate::auth::NoopVerifier),
             dev_mode: true,
+            request_index: Arc::new(DashMap::new()),
         }
     }
 
@@ -219,6 +224,7 @@ impl SessionManager {
             on_caster_attach: OnceLock::new(),
             key_verifier,
             dev_mode,
+            request_index: Arc::new(DashMap::new()),
         }
     }
 
@@ -442,6 +448,9 @@ struct SessionContext {
     last_heartbeat_ms: Arc<AtomicU64>,
     outbound_tx: mpsc::Sender<SessionMessage>,
     relay: Arc<Relay>,
+    /// Shared reference to the SessionManager's global request_index.
+    /// Used to clean up entries when requests complete, timeout, or are drained.
+    request_index: Arc<DashMap<String, String>>,
     /// Monotonic generation set during handle_attach; cleanup_session compares
     /// this against the stored CasterState.generation to avoid deleting a
     /// newer session that reconnected with the same caster_id.
@@ -449,7 +458,11 @@ struct SessionContext {
 }
 
 impl SessionContext {
-    fn new(outbound_tx: mpsc::Sender<SessionMessage>, relay: Arc<Relay>) -> Self {
+    fn new(
+        outbound_tx: mpsc::Sender<SessionMessage>,
+        relay: Arc<Relay>,
+        request_index: Arc<DashMap<String, String>>,
+    ) -> Self {
         Self {
             caster_id: None,
             state: SessionState::Attaching,
@@ -462,6 +475,7 @@ impl SessionContext {
             last_heartbeat_ms: Arc::new(AtomicU64::new(now_ms())),
             outbound_tx,
             relay,
+            request_index,
             generation: None,
         }
     }
@@ -482,7 +496,7 @@ impl SessionManager {
         mut inbound: Streaming<SessionMessage>,
         outbound_tx: mpsc::Sender<SessionMessage>,
     ) {
-        let mut ctx = SessionContext::new(outbound_tx, relay);
+        let mut ctx = SessionContext::new(outbound_tx, relay, Arc::clone(&self.request_index));
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
         let hb_handle = self.spawn_heartbeat_task(&ctx, shutdown_tx);
 
@@ -732,6 +746,7 @@ impl SessionManager {
     async fn handle_execute_result(ctx: &SessionContext, result: rune_proto::ExecuteResult) {
         let req_id = result.request_id.clone();
         if let Some((_, p)) = ctx.pending.remove(&req_id) {
+            ctx.request_index.remove(&req_id);
             abort_timeout_handle(&ctx.timeout_handles, &req_id);
             let outcome = match result.status() {
                 Status::Completed => Ok(Bytes::from(result.output)),
@@ -771,6 +786,7 @@ impl SessionManager {
     async fn handle_stream_end(ctx: &SessionContext, end: rune_proto::StreamEnd) {
         let req_id = end.request_id.clone();
         if let Some((_, p)) = ctx.pending.remove(&req_id) {
+            ctx.request_index.remove(&req_id);
             abort_timeout_handle(&ctx.timeout_handles, &req_id);
             if let PendingResponse::Stream(tx) = p.tx {
                 if end.status() != Status::Completed {
@@ -918,6 +934,7 @@ impl SessionManager {
         let keys: Vec<String> = ctx.pending.iter().map(|e| e.key().clone()).collect();
         for req_id in keys {
             if let Some((_, p)) = ctx.pending.remove(&req_id) {
+                ctx.request_index.remove(&req_id);
                 let err = Err(RuneError::Internal(anyhow::anyhow!(
                     "caster '{}' {} — pending request aborted",
                     caster_id,
@@ -964,10 +981,13 @@ impl SessionManager {
                     created_at: Instant::now(),
                 },
             );
+            self.request_index
+                .insert(request_id.to_string(), caster_id.to_string());
 
             spawn_request_timeout(
                 Arc::clone(&session.pending),
                 Arc::clone(&session.timeout_handles),
+                Arc::clone(&self.request_index),
                 request_id.to_string(),
                 timeout,
             );
@@ -986,6 +1006,7 @@ impl SessionManager {
             if session.outbound.send(msg).await.is_err() {
                 abort_timeout_handle(&session.timeout_handles, request_id);
                 session.pending.remove(request_id);
+                self.request_index.remove(request_id);
                 return Err(RuneError::Unavailable);
             }
             drop(session);
@@ -1031,10 +1052,13 @@ impl SessionManager {
                     created_at: Instant::now(),
                 },
             );
+            self.request_index
+                .insert(request_id.to_string(), caster_id.to_string());
 
             spawn_request_timeout(
                 Arc::clone(&session.pending),
                 Arc::clone(&session.timeout_handles),
+                Arc::clone(&self.request_index),
                 request_id.to_string(),
                 timeout,
             );
@@ -1053,6 +1077,7 @@ impl SessionManager {
             if session.outbound.send(msg).await.is_err() {
                 abort_timeout_handle(&session.timeout_handles, request_id);
                 session.pending.remove(request_id);
+                self.request_index.remove(request_id);
                 return Err(RuneError::Unavailable);
             }
             drop(session);
@@ -1068,16 +1093,14 @@ impl SessionManager {
         .await
     }
 
-    /// Cancel a request by searching all sessions for the request_id.
+    /// Cancel a request by its request_id using the O(1) reverse index.
     /// Returns true if the request was found and cancelled.
     pub async fn cancel_by_request_id(&self, request_id: &str, reason: &str) -> bool {
-        for session in self.sessions.iter() {
-            if session.pending.contains_key(request_id) {
-                let caster_id = session.key().clone();
-                drop(session);
-                let _ = self.cancel(&caster_id, request_id, reason).await;
-                return true;
-            }
+        if let Some(entry) = self.request_index.get(request_id) {
+            let caster_id = entry.value().clone();
+            drop(entry);
+            let _ = self.cancel(&caster_id, request_id, reason).await;
+            return true;
         }
         false
     }
@@ -1090,6 +1113,7 @@ impl SessionManager {
     ) -> Result<(), RuneError> {
         let session = self.sessions.get(caster_id).ok_or(RuneError::Unavailable)?;
         if let Some((_, p)) = session.pending.remove(request_id) {
+            self.request_index.remove(request_id);
             abort_timeout_handle(&session.timeout_handles, request_id);
             // permit auto-returned when PendingRequest is dropped
             let err = Err(RuneError::Cancelled);
@@ -1136,6 +1160,7 @@ impl SessionManager {
 fn spawn_request_timeout(
     pending: Arc<DashMap<String, PendingRequest>>,
     timeout_handles: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
+    request_index: Arc<DashMap<String, String>>,
     request_id: String,
     timeout: Duration,
 ) {
@@ -1145,6 +1170,7 @@ fn spawn_request_timeout(
         tokio::time::sleep(timeout).await;
         // If still pending when timeout fires, remove and send error
         if let Some((_, p)) = pending.remove(&req_id_clone) {
+            request_index.remove(&req_id_clone);
             tracing::warn!(request_id = %req_id_clone, "request timed out");
             match p.tx {
                 PendingResponse::Once(tx) => {

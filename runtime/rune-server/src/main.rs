@@ -143,6 +143,30 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(NoopVerifier)
     };
 
+    // ── Background cleanup task ──
+    {
+        let store_cleanup = store.clone();
+        let log_days = config.store.log_retention_days;
+        let task_days = config.store.task_retention_days;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(24 * 3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let cutoff_logs = chrono_days_ago(log_days);
+                let cutoff_tasks = chrono_days_ago(task_days);
+                match store_cleanup.cleanup_logs_before(&cutoff_logs).await {
+                    Ok(n) => tracing::info!(deleted = n, "cleaned up call_logs"),
+                    Err(e) => tracing::warn!(error = %e, "call_logs cleanup failed"),
+                }
+                match store_cleanup.cleanup_tasks_before(&cutoff_tasks).await {
+                    Ok(n) => tracing::info!(deleted = n, "cleaned up tasks"),
+                    Err(e) => tracing::warn!(error = %e, "tasks cleanup failed"),
+                }
+            }
+        });
+    }
+
     // ── App + Runes ──
     let mut app = App::with_config_and_auth(config.clone(), key_verifier.clone());
 
@@ -565,6 +589,70 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Return an ISO-8601 timestamp for `days` days ago, used as a DELETE cutoff.
+fn chrono_days_ago(days: u32) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(u64::from(days) * 86_400);
+    // Format as RFC-3339 / ISO-8601 to match the timestamps stored by rune-store.
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let total_days = secs / 86_400;
+    // Simple Gregorian calendar reconstruction (no external dep).
+    let (y, mo, d) = days_to_ymd(total_days);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    // Days since 1970-01-01
+    let mut year = 1970u64;
+    loop {
+        let leap = is_leap(year);
+        let days_in_year = if leap { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = is_leap(year);
+    let month_days = [
+        31u64,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1u64;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+    (year, month, days + 1)
+}
+
+fn is_leap(y: u64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 // ---------------------------------------------------------------------------

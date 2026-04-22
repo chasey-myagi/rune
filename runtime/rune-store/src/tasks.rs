@@ -226,4 +226,20 @@ impl RuneStore {
         })
         .await?
     }
+
+    /// Delete completed/failed tasks whose `created_at` is older than `before` (ISO-8601).
+    /// Returns the number of rows deleted.
+    pub async fn cleanup_tasks_before(&self, before: &str) -> StoreResult<u64> {
+        let pool = self.pool.clone();
+        let before = before.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.writer();
+            let deleted = conn.execute(
+                "DELETE FROM tasks WHERE created_at < ?1 AND status IN ('completed', 'failed')",
+                rusqlite::params![before],
+            )?;
+            Ok(deleted as u64)
+        })
+        .await?
+    }
 }
