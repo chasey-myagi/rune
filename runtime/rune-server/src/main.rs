@@ -410,7 +410,9 @@ async fn main() -> anyhow::Result<()> {
         let task_days = config.store.task_retention_days;
         let mut cleanup_shutdown_rx = shutdown_tx.subscribe();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(24 * 3600));
+            let period = Duration::from_secs(24 * 3600);
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
@@ -690,13 +692,19 @@ mod calendar_tests {
 
     #[test]
     fn year_1900_has_no_feb_29() {
-        // 1900 is not a leap year: 1900-03-01 must be day-after Feb 28
-        // Days from epoch to 1900 is before epoch (negative), so test via is_leap
+        // 1900 is before the epoch so we can only test is_leap for it.
         assert!(!is_leap(1900));
-        // Feb has 28 days in 1900: days_to_ymd on the first day of March in a
-        // non-leap year should land on (y, 3, 1) after 31+28 days in year.
-        // Use 2100 (also not leap) which is after epoch:
+        // 2100 is also not a leap year. Verify via days_to_ymd that 2100-02-28 + 1
+        // jumps directly to 2100-03-01 (no Feb 29).
+        // Days from epoch to 2100-01-01:
+        //   1970..2099 = 130 years; leap years in [1972..2096] step 4 = 32 leaps
+        //   (2000 counts as leap; 2100 is outside this range)
+        //   130*365+32 = 47482 → 2100-01-01
+        //   Jan=31, Feb=28 (non-leap) → 2100-03-01 = 47482+31+28 = 47541
         assert!(!is_leap(2100));
+        assert_eq!(days_to_ymd(47541), (2100, 3, 1));
+        // And the day before is the last of Feb (28th, not 29th):
+        assert_eq!(days_to_ymd(47540), (2100, 2, 28));
     }
 
     #[test]

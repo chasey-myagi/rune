@@ -11,9 +11,9 @@ fn record_rune_metrics(rune_name: &str, mode: &'static str, status_code: i32, la
         metrics::Label::new("mode", mode),
         metrics::Label::new("status", status),
     ];
-    metrics::counter!("rune_requests_total", labels.clone()).increment(1);
-    metrics::histogram!("rune_request_duration_seconds", labels)
+    metrics::histogram!("rune_request_duration_seconds", labels.clone())
         .record(latency_ms.max(0) as f64 / 1000.0);
+    metrics::counter!("rune_requests_total", labels).increment(1);
     if status_code >= 400 {
         let err_labels = vec![
             metrics::Label::new("rune", rune_name.to_owned()),

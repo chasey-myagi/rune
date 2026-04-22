@@ -407,6 +407,8 @@ pub enum DagError {
     InvalidSwitchConfig { step: String, reason: String },
     #[error("step '{step}' has invalid flow config: {reason}")]
     InvalidFlowConfig { step: String, reason: String },
+    #[error("step '{step}' has invalid retry config: {reason}")]
+    InvalidRetryConfig { step: String, reason: String },
 }
 
 // ─── 验证 ─────────────────────────────────────────────────────────────────────
@@ -496,10 +498,18 @@ pub fn validate_dag(flow: &FlowDefinition) -> Result<(), DagError> {
         }
     }
 
-    // 5. condition 语法预检 + loop/map/switch/flow config 验证
+    // 5. condition 语法预检 + loop/map/switch/flow config 验证 + retry 验证
     let operators = ["==", "!=", ">=", "<=", ">", "<"];
     for s in steps {
         validate_condition_syntax(&s.name, &s.condition, &operators)?;
+        if let Some(r) = &s.retry {
+            if r.max_attempts == 0 {
+                return Err(DagError::InvalidRetryConfig {
+                    step: s.name.clone(),
+                    reason: "max_attempts must be >= 1 (includes the initial attempt)".into(),
+                });
+            }
+        }
         match &s.kind {
             StepKind::Loop(lc) => validate_loop_config(&s.name, lc, &operators)?,
             StepKind::Map(mc) => validate_map_config(&s.name, mc, &operators)?,

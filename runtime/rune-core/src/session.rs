@@ -1092,12 +1092,10 @@ impl SessionManager {
     }
 
     /// Cancel a request by its request_id using the O(1) reverse index.
-    /// Returns true if the request was found and cancelled.
-    ///
-    /// There is a narrow stale-entry window: if the caster disconnects between
-    /// the `request_index.get` and `cancel`, the cancel call is a no-op (the
-    /// session's `pending.remove` inside `cancel` will find nothing). The
-    /// `cancel` function acts as the authoritative gate, so correctness holds.
+    /// Returns true if the request was found in the index (the downstream cancel
+    /// call may still be a no-op if the session was cleaned up in the narrow
+    /// window between `request_index.get` and `cancel`). The `cancel` function
+    /// acts as the authoritative gate, so correctness holds regardless.
     /// Request IDs are monotonic/UUID-derived, making hash collisions negligible.
     pub async fn cancel_by_request_id(&self, request_id: &str, reason: &str) -> bool {
         if let Some(entry) = self.request_index.get(request_id) {
