@@ -49,11 +49,9 @@ pub async fn run(
 
     let call_future = async {
         if stream {
-            let output = client.call_rune_stream(name, Some(&payload_str)).await?;
-            if json_output {
-                let result = serde_json::json!({ "output": output.trim_end() });
-                crate::output::print_json(&result);
-            }
+            // call_rune_stream prints each SSE event in real-time via println!;
+            // do NOT also print the accumulated output as JSON — that would double-print.
+            client.call_rune_stream(name, Some(&payload_str)).await?;
         } else {
             let result = if async_mode {
                 client.call_rune_async(name, Some(&payload_str)).await?

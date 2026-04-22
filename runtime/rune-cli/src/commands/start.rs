@@ -6,6 +6,61 @@ const DEFAULT_TAG: &str = "latest";
 const DEFAULT_HTTP_PORT: u16 = 50060;
 const DEFAULT_GRPC_PORT: u16 = 50070;
 
+struct CliConfig {
+    http_port: Option<u16>,
+    grpc_port: Option<u16>,
+    image: Option<String>,
+    tag: Option<String>,
+}
+
+/// Read port / image / tag defaults from ~/.rune/config.toml.
+/// Missing or malformed config is silently ignored (CLI tool should not panic on config absence).
+fn load_cli_config() -> CliConfig {
+    let none = CliConfig {
+        http_port: None,
+        grpc_port: None,
+        image: None,
+        tag: None,
+    };
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return none,
+    };
+    let path = home.join(".rune").join("config.toml");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return none,
+    };
+    let doc: toml::Value = match toml::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("warning: failed to parse ~/.rune/config.toml: {e}");
+            return none;
+        }
+    };
+    let rt = match doc.get("runtime") {
+        Some(v) => v,
+        None => return none,
+    };
+    // Use try_from to avoid silent truncation of out-of-range port values.
+    let http_port = rt
+        .get("http_port")
+        .and_then(|v| v.as_integer())
+        .and_then(|v| u16::try_from(v).ok());
+    let grpc_port = rt
+        .get("grpc_port")
+        .and_then(|v| v.as_integer())
+        .and_then(|v| u16::try_from(v).ok());
+    let image = rt.get("image").and_then(|v| v.as_str()).map(str::to_owned);
+    let tag = rt.get("tag").and_then(|v| v.as_str()).map(str::to_owned);
+    CliConfig {
+        http_port,
+        grpc_port,
+        image,
+        tag,
+    }
+}
+
 pub async fn run(
     dev: bool,
     binary_path: Option<String>,
@@ -15,8 +70,11 @@ pub async fn run(
     grpc_port: Option<u16>,
     foreground: bool,
 ) -> Result<()> {
-    let http_port = http_port.unwrap_or(DEFAULT_HTTP_PORT);
-    let grpc_port = grpc_port.unwrap_or(DEFAULT_GRPC_PORT);
+    let cfg = load_cli_config();
+    let http_port = http_port.or(cfg.http_port).unwrap_or(DEFAULT_HTTP_PORT);
+    let grpc_port = grpc_port.or(cfg.grpc_port).unwrap_or(DEFAULT_GRPC_PORT);
+    let image = image.or(cfg.image);
+    let tag = tag.or(cfg.tag);
 
     // Check if already running
     if let Ok(Some(existing)) = state::read_state() {

@@ -174,9 +174,14 @@ impl RuneStore {
 
             CREATE INDEX IF NOT EXISTS idx_call_logs_rune ON call_logs(rune_name);
             CREATE INDEX IF NOT EXISTS idx_call_logs_ts ON call_logs(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_call_logs_caster ON call_logs(caster_id);
+            CREATE INDEX IF NOT EXISTS idx_call_logs_request ON call_logs(request_id);
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
             CREATE INDEX IF NOT EXISTS idx_tasks_rune ON tasks(rune_name);
+            CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
             CREATE INDEX IF NOT EXISTS idx_flows_updated_at ON flows(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+            CREATE INDEX IF NOT EXISTS idx_api_keys_type_active ON api_keys(key_type, revoked_at);
             ",
         )?;
         Ok(())

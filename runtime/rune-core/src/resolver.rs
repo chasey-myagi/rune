@@ -35,6 +35,9 @@ impl RoundRobinResolver {
 impl Resolver for RoundRobinResolver {
     fn pick(&self, rune_name: &str, candidates: &[RuneEntry]) -> Option<usize> {
         if candidates.is_empty() {
+            // Self-cleaning: remove stale counter when rune has no candidates.
+            // Prevents unbounded map growth when runes are dynamically registered/deregistered.
+            self.counters.remove(rune_name);
             return None;
         }
         let idx = self

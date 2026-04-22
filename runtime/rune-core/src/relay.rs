@@ -32,7 +32,6 @@ pub struct Relay {
     caster_generation: DashMap<String, u64>,
     /// Serializes register/remove_caster to prevent race conditions on gate_path_index
     write_lock: Mutex<()>,
-    generation: AtomicU64,
     local_key_counter: AtomicU64,
     circuit_breaker_registry: Option<Arc<CircuitBreakerRegistry>>,
     retry_config: Option<RetryConfig>,
@@ -52,7 +51,6 @@ impl Relay {
             caster_index: DashMap::new(),
             caster_generation: DashMap::new(),
             write_lock: Mutex::new(()),
-            generation: AtomicU64::new(0),
             local_key_counter: AtomicU64::new(0),
             circuit_breaker_registry: None,
             retry_config: None,
@@ -153,7 +151,6 @@ impl Relay {
                 names.push(name);
             }
         }
-        self.generation.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -215,7 +212,6 @@ impl Relay {
             registry.remove(caster_id);
         }
         self.caster_generation.remove(caster_id);
-        self.generation.fetch_add(1, Ordering::Release);
     }
 
     /// Record the session generation for a caster.  Called from
@@ -257,24 +253,38 @@ impl Relay {
         true
     }
 
-    /// Find all candidates for a rune name
-    pub fn find(&self, rune_name: &str) -> Option<dashmap::mapref::one::Ref<'_, String, EntryMap>> {
+    /// Find all candidates for a rune name, returning a cloned snapshot.
+    ///
+    /// Returns `None` if the rune is unknown or has no registered entries.
+    /// The returned `EntryMap` is a clone so the caller holds no lock on the
+    /// internal DashMap, keeping the implementation detail private.
+    pub fn find(&self, rune_name: &str) -> Option<EntryMap> {
         let entry = self.entries.get(rune_name)?;
         if entry.value().is_empty() {
             return None;
         }
-        Some(entry)
+        Some(entry.value().clone())
     }
 
-    /// Convenience: find + pick using a resolver
+    /// Convenience: find + pick using a resolver.
+    ///
+    /// Fast-paths the single-candidate case to avoid a Vec allocation.
+    /// For N>1, clones all candidates into a temporary Vec for the resolver
+    /// (the Resolver trait requires `&[RuneEntry]`).
     pub fn select_entry(&self, rune_name: &str, resolver: &dyn Resolver) -> Option<RuneEntry> {
-        let entries = self.find(rune_name)?;
-        let mut candidates: Vec<RuneEntry> = entries.value().values().cloned().collect();
+        let map = self.find(rune_name)?;
+        // Fast path: single candidate — skip resolver + Vec allocation.
+        if map.len() == 1 {
+            return map.into_values().next();
+        }
+        let mut candidates: Vec<RuneEntry> = map.into_values().collect();
         let idx = resolver.pick(rune_name, &candidates)?;
         Some(candidates.swap_remove(idx))
     }
 
     /// Select a concrete candidate with label filtering applied.
+    ///
+    /// Filters with references first, only clones the matching subset.
     pub fn select_entry_with_labels(
         &self,
         rune_name: &str,
@@ -284,20 +294,23 @@ impl Relay {
         if required_labels.is_empty() {
             return self.select_entry(rune_name, resolver);
         }
-        let entries = self.find(rune_name)?;
+        let map = self.find(rune_name)?;
 
-        let mut filtered: Vec<RuneEntry> = entries
-            .value()
-            .values()
+        // Filter matching entries in a single pass over the map.
+        let mut filtered: Vec<RuneEntry> = map
+            .into_values()
             .filter(|e| {
                 required_labels
                     .iter()
                     .all(|(k, v)| e.config.labels.get(k) == Some(v))
             })
-            .cloned()
             .collect();
         if filtered.is_empty() {
             return None;
+        }
+        // Fast path: single match.
+        if filtered.len() == 1 {
+            return Some(filtered.swap_remove(0));
         }
 
         let idx = resolver.pick(rune_name, &filtered)?;
@@ -1032,7 +1045,7 @@ mod tests {
             .filter(|(n, _)| n == "shared_rune")
             .collect();
         assert_eq!(list.len(), 1);
-        assert_eq!(relay.find("shared_rune").unwrap().value().len(), 5);
+        assert_eq!(relay.find("shared_rune").unwrap().len(), 5);
 
         // Remove casters c0, c1, c2
         relay.remove_caster("c0");
@@ -1046,7 +1059,7 @@ mod tests {
             .filter(|(n, _)| n == "shared_rune")
             .collect();
         assert_eq!(list.len(), 1);
-        assert_eq!(relay.find("shared_rune").unwrap().value().len(), 2);
+        assert_eq!(relay.find("shared_rune").unwrap().len(), 2);
 
         // Rune should still be resolvable
         assert!(relay.resolve("shared_rune", &resolver).is_some());
@@ -1103,7 +1116,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(relay.list().len(), 1); // 1 rune name
-        assert_eq!(relay.find("interleaved").unwrap().value().len(), 1);
+        assert_eq!(relay.find("interleaved").unwrap().len(), 1);
 
         // Register B (same rune name, different caster)
         let h_b = make_handler(|_ctx, _input| async { Ok(Bytes::from("B")) });
@@ -1115,12 +1128,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(relay.list().len(), 1); // still 1 rune name (deduped)
-        assert_eq!(relay.find("interleaved").unwrap().value().len(), 2);
+        assert_eq!(relay.find("interleaved").unwrap().len(), 2);
 
         // Remove A
         relay.remove_caster("A");
         assert_eq!(relay.list().len(), 1);
-        assert_eq!(relay.find("interleaved").unwrap().value().len(), 1);
+        assert_eq!(relay.find("interleaved").unwrap().len(), 1);
 
         // Register C
         let h_c = make_handler(|_ctx, _input| async { Ok(Bytes::from("C")) });
@@ -1132,23 +1145,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(relay.list().len(), 1); // still 1 rune name
-        assert_eq!(relay.find("interleaved").unwrap().value().len(), 2);
+        assert_eq!(relay.find("interleaved").unwrap().len(), 2);
 
         // Remove B
         relay.remove_caster("B");
         assert_eq!(relay.list().len(), 1);
-        assert_eq!(relay.find("interleaved").unwrap().value().len(), 1);
+        assert_eq!(relay.find("interleaved").unwrap().len(), 1);
 
         // Only C should remain
         assert!(relay.resolve("interleaved", &resolver).is_some());
         let entries = relay.find("interleaved").unwrap();
-        assert_eq!(entries.value().len(), 1);
+        assert_eq!(entries.len(), 1);
         assert_eq!(
             entries
-                .value()
-                .values()
+                .into_values()
                 .next()
-                .and_then(|entry| entry.caster_id.as_deref()),
+                .and_then(|entry| entry.caster_id.as_deref().map(|s| s.to_string()))
+                .as_deref(),
             Some("C")
         );
     }
@@ -1215,7 +1228,7 @@ mod tests {
         // SF-7: deduped by name — only one entry in list
         assert_eq!(list.len(), 1);
         // But both candidates exist internally
-        assert_eq!(relay.find("multi_path_rune").unwrap().value().len(), 2);
+        assert_eq!(relay.find("multi_path_rune").unwrap().len(), 2);
     }
 
     // ---- Gate path with query string ----
@@ -2609,7 +2622,7 @@ mod tests {
         assert_eq!(list[0].0, "echo");
 
         // But internal entries should have all 3 candidates
-        assert_eq!(relay.find("echo").unwrap().value().len(), 3);
+        assert_eq!(relay.find("echo").unwrap().len(), 3);
     }
 
     // ---- NF-3: gate_path_index O(1) conflict check ----

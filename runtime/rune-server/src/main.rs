@@ -10,7 +10,7 @@ use rune_core::grpc_service::RuneGrpcService;
 use rune_core::rune::{make_handler, GateConfig, RuneConfig, RuneError};
 use rune_core::scaling::ScaleEvaluator;
 use rune_core::telemetry::TelemetryConfig;
-use rune_flow::dag::{FlowDefinition, StepDefinition};
+use rune_flow::dag::{FlowDefinition, RuneConfig as FlowRuneConfig, StepDefinition, StepKind};
 use rune_flow::engine::FlowEngine;
 use rune_gate::gate;
 use rune_proto::rune_service_server::RuneServiceServer;
@@ -38,6 +38,14 @@ async fn main() -> anyhow::Result<()> {
     }
     config.apply_env_overrides();
     config.validate()?;
+
+    if config.server.dev_mode {
+        eprintln!(
+            "\n\
+             ⚠️  DEV MODE ACTIVE — auth disabled, rate limiting disabled\n\
+             \x20   DO NOT USE IN PRODUCTION\n"
+        );
+    }
 
     // ── Telemetry (tracing + metrics) ──
     let _tracer_provider = init_telemetry(&config.telemetry);
@@ -111,20 +119,22 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Key Verifier ──
     let key_verifier: Arc<dyn KeyVerifier> = if config.auth.enabled {
-        let hmac_secret = config.auth.hmac_secret.clone().unwrap_or_else(|| {
-            if config.server.dev_mode {
+        let hmac_secret = match config.auth.hmac_secret.clone() {
+            Some(s) => s,
+            None if config.server.dev_mode => {
                 tracing::info!("dev mode: using fixed HMAC secret for key hashing");
                 "dev-hmac-secret".to_string()
-            } else {
-                let secret = hex::encode(rand::random::<[u8; 32]>());
-                tracing::warn!(
-                    "no HMAC secret configured (auth.hmac_secret); generated a random \
-                     ephemeral secret — keys created now will NOT survive a restart. \
-                     Set RUNE_AUTH__HMAC_SECRET or auth.hmac_secret in config."
-                );
-                secret
             }
-        });
+            None => {
+                anyhow::bail!(
+                    "auth is enabled but auth.hmac_secret is not configured.\n\
+                     API keys use HMAC-SHA256 and will NOT survive a restart without a \
+                     stable secret.\n\
+                     Set RUNE_AUTH__HMAC_SECRET or auth.hmac_secret in rune.toml.\n\
+                     To disable auth (development only), use --dev."
+                );
+            }
+        };
         Arc::new(StoreKeyVerifier::with_hmac_secret(
             store.clone(),
             hmac_secret.into_bytes(),
@@ -261,24 +271,36 @@ async fn main() -> anyhow::Result<()> {
             steps: vec![
                 StepDefinition {
                     name: "s_a".into(),
-                    rune: "step_a".into(),
                     depends_on: vec![],
                     condition: None,
                     input_mapping: None,
+                    timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: "step_a".into(),
+                    }),
                 },
                 StepDefinition {
                     name: "s_b".into(),
-                    rune: "step_b".into(),
                     depends_on: vec!["s_a".into()],
                     condition: None,
                     input_mapping: None,
+                    timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: "step_b".into(),
+                    }),
                 },
                 StepDefinition {
                     name: "s_c".into(),
-                    rune: "step_c".into(),
                     depends_on: vec!["s_b".into()],
                     condition: None,
                     input_mapping: None,
+                    timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: "step_c".into(),
+                    }),
                 },
             ],
             gate_path: None,
@@ -288,10 +310,14 @@ async fn main() -> anyhow::Result<()> {
             name: "single".to_string(),
             steps: vec![StepDefinition {
                 name: "s_a".into(),
-                rune: "step_a".into(),
                 depends_on: vec![],
                 condition: None,
                 input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Rune(FlowRuneConfig {
+                    rune: "step_a".into(),
+                }),
             }],
             gate_path: None,
         });
@@ -376,6 +402,44 @@ async fn main() -> anyhow::Result<()> {
     // for both HTTP and gRPC servers.
     let (shutdown_tx, mut http_shutdown_rx) = tokio::sync::watch::channel(false);
     let mut grpc_shutdown_rx = shutdown_tx.subscribe();
+
+    // ── Background cleanup task ──
+    {
+        let store_cleanup = store.clone();
+        let log_days = config.store.log_retention_days;
+        let task_days = config.store.task_retention_days;
+        let mut cleanup_shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let period = Duration::from_secs(24 * 3600);
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    result = cleanup_shutdown_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("cleanup task: shutdown channel closed unexpectedly");
+                        }
+                        break;
+                    }
+                }
+                if *cleanup_shutdown_rx.borrow() {
+                    break;
+                }
+                let cutoff_logs = chrono_days_ago(log_days);
+                let cutoff_tasks = chrono_days_ago(task_days);
+                match store_cleanup.cleanup_logs_before(&cutoff_logs).await {
+                    Ok(n) => tracing::info!(deleted = n, "cleaned up call_logs"),
+                    Err(e) => tracing::warn!(error = %e, "call_logs cleanup failed"),
+                }
+                match store_cleanup.cleanup_tasks_before(&cutoff_tasks).await {
+                    Ok(n) => tracing::info!(deleted = n, "cleaned up tasks"),
+                    Err(e) => tracing::warn!(error = %e, "tasks cleanup failed"),
+                }
+            }
+        });
+    }
 
     let http_addr = running.config.http_addr();
     // Handle for axum-server graceful shutdown (only used in TLS mode)
@@ -487,8 +551,26 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // ── Wait for shutdown signal ──
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("received SIGINT, starting graceful shutdown");
+    // Listen for both SIGINT (Ctrl-C) and SIGTERM (docker stop / systemd).
+    // On non-Unix platforms only SIGINT is available.
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("received SIGINT, starting graceful shutdown");
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("received SIGTERM, starting graceful shutdown");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
+        tracing::info!("received SIGINT, starting graceful shutdown");
+    }
 
     // 0. Stop the scale evaluator so no new grace-period force_kill spawns fire
     if let Some(ref evaluator) = scaling {
@@ -521,6 +603,133 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Return an ISO-8601 timestamp for `days` days ago, used as a DELETE cutoff.
+fn chrono_days_ago(days: u32) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(u64::from(days) * 86_400);
+    // Format as RFC-3339 / ISO-8601 to match the timestamps stored by rune-store.
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let total_days = secs / 86_400;
+    // Simple Gregorian calendar reconstruction (no external dep).
+    let (y, mo, d) = days_to_ymd(total_days);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    // Days since 1970-01-01
+    let mut year = 1970u64;
+    loop {
+        let leap = is_leap(year);
+        let days_in_year = if leap { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = is_leap(year);
+    let month_days = [
+        31u64,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1u64;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+    (year, month, days + 1)
+}
+
+fn is_leap(y: u64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    use super::{days_to_ymd, is_leap};
+
+    #[test]
+    fn is_leap_rules() {
+        assert!(is_leap(2000)); // divisible by 400 → leap
+        assert!(!is_leap(1900)); // divisible by 100 but not 400 → not leap
+        assert!(is_leap(2024)); // divisible by 4, not 100 → leap
+        assert!(!is_leap(2023)); // not divisible by 4 → not leap
+    }
+
+    #[test]
+    fn epoch_is_1970_jan_01() {
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn year_2000_is_leap_feb_29_exists() {
+        // 2000-02-29: days since epoch for 2000-02-01 = 10988, +28 = 11016
+        // 1970..1999 = 30 years; 7 leaps (72,76,80,84,88,92,96) = 30*365+7 = 10957
+        // Jan 2000 = 31 days → 10957+31 = 10988 → Feb 1
+        // Feb 29 = 10988+28 = 11016
+        assert_eq!(days_to_ymd(11016), (2000, 2, 29));
+    }
+
+    #[test]
+    fn year_1900_has_no_feb_29() {
+        // 1900 is before the epoch so we can only test is_leap for it.
+        assert!(!is_leap(1900));
+        // 2100 is also not a leap year. Verify via days_to_ymd that 2100-02-28 + 1
+        // jumps directly to 2100-03-01 (no Feb 29).
+        // Days from epoch to 2100-01-01:
+        //   1970..2099 = 130 years; leap years in [1972..2096] step 4 = 32 leaps
+        //   (2000 counts as leap; 2100 is outside this range)
+        //   130*365+32 = 47482 → 2100-01-01
+        //   Jan=31, Feb=28 (non-leap) → 2100-03-01 = 47482+31+28 = 47541
+        assert!(!is_leap(2100));
+        assert_eq!(days_to_ymd(47541), (2100, 3, 1));
+        // And the day before is the last of Feb (28th, not 29th):
+        assert_eq!(days_to_ymd(47540), (2100, 2, 28));
+    }
+
+    #[test]
+    fn month_rollover_leap_day_plus_one() {
+        // 2024-02-29 + 1 day = 2024-03-01
+        // days from epoch to 2024-02-29:
+        // 1970..2023 = 54 years; leaps: 72,76,80,84,88,92,96,00,04,08,12,16,20 = 13
+        // 54*365+13 = 19723 → Jan 1 2024
+        // Jan=31, Feb (leap)=29 → Feb 29 = 19723+31+28 = 19782
+        assert_eq!(days_to_ymd(19782), (2024, 2, 29));
+        assert_eq!(days_to_ymd(19783), (2024, 3, 1));
+    }
+
+    #[test]
+    fn year_boundary_dec_31_to_jan_01() {
+        // 2023-12-31 → 2024-01-01
+        // 2024-01-01 = 19723 (from above test)
+        assert_eq!(days_to_ymd(19722), (2023, 12, 31));
+        assert_eq!(days_to_ymd(19723), (2024, 1, 1));
+    }
 }
 
 // ---------------------------------------------------------------------------

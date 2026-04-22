@@ -93,6 +93,10 @@ pub struct ScaleEvaluator {
     /// critical section in `evaluate_once` performs only CPU-bound comparisons
     /// with no `.await`.
     breaches: Mutex<HashMap<String, BreachTracker>>,
+    /// Guard ensuring `evaluate_once` is not called concurrently.
+    /// The two-phase lock pattern on `breaches` (lock → unlock → re-lock)
+    /// assumes single-caller serialization; this flag enforces it at runtime.
+    evaluating: std::sync::atomic::AtomicBool,
     /// Shared shutdown signal.  `notify_waiters()` wakes both the periodic
     /// loop in `start()` and any pending force_kill grace-period sleeps,
     /// ensuring orphan tasks exit promptly instead of lingering for up to
@@ -108,6 +112,7 @@ impl ScaleEvaluator {
             check_interval,
             statuses: DashMap::new(),
             breaches: Mutex::new(HashMap::new()),
+            evaluating: std::sync::atomic::AtomicBool::new(false),
             shutdown: Arc::new(Notify::new()),
             shutdown_called: std::sync::atomic::AtomicBool::new(false),
         }
@@ -204,6 +209,36 @@ impl ScaleEvaluator {
     }
 
     pub async fn evaluate_once(&self) {
+        // INVARIANT: The two-phase lock pattern on `breaches` (Phase 1: lock →
+        // decide; Phase 2: unlock → candidate selection; Phase 3: re-lock →
+        // reset timer) assumes this method is never called concurrently.
+        // This is currently guaranteed by `start()` running a single
+        // `tokio::spawn` with a serial interval loop.  The flag below makes
+        // this invariant explicit and catches violations immediately.
+        // SAFETY: assert replaced with graceful early-return to avoid panicking
+        // the whole process if this invariant is ever violated in a test or
+        // unexpected code path.  The invariant itself still holds for production
+        // (single serial loop in `start()`), but a panic in an async service is
+        // unacceptable.
+        if self
+            .evaluating
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            tracing::error!(
+                "evaluate_once called concurrently — the two-phase breaches lock \
+                 pattern is not safe under concurrent evaluation; skipping cycle"
+            );
+            return;
+        }
+        // Reset on all exit paths (normal return + panic).
+        struct EvalGuard<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for EvalGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _eval_guard = EvalGuard(&self.evaluating);
+
         let groups = self.collect_groups();
         let mut seen: HashSet<String> = HashSet::new();
 

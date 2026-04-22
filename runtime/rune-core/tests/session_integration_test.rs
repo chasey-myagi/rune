@@ -122,7 +122,6 @@ fn make_result_msg(request_id: &str, output: &[u8]) -> SessionMessage {
             status: Status::Completed as i32,
             output: output.to_vec(),
             error: None,
-            attachments: Vec::new(),
         })),
     }
 }

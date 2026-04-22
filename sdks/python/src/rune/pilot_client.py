@@ -11,6 +11,9 @@ import time
 from .types import ScalePolicy
 
 
+_MAX_RESPONSE_SIZE = 256 * 1024  # 256KB — symmetric with daemon's request limit
+
+
 class PilotClient:
     def __init__(self, pilot_id: str) -> None:
         self.pilot_id = pilot_id
@@ -130,9 +133,11 @@ async def _send_request_inner(payload: dict) -> dict:
     except (AttributeError, OSError):
         pass
     await writer.drain()
-    data = await reader.read()
+    data = await reader.read(_MAX_RESPONSE_SIZE + 1)
     writer.close()
     await writer.wait_closed()
+    if len(data) > _MAX_RESPONSE_SIZE:
+        raise RuntimeError("pilot response exceeded 256KB limit")
     return json.loads(data.decode("utf-8"))
 
 

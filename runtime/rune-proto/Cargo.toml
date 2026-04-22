@@ -1,7 +1,11 @@
 [package]
 name = "rune-proto"
-version = "0.2.0"
+version = "1.3.0"
 edition = "2021"
+description = "Protocol Buffer generated code for Rune Wire Protocol"
+license = "MIT"
+repository = "https://github.com/chasey-myagi/rune"
+include = ["src/**/*", "build.rs", "proto/**/*", "Cargo.toml"]
 
 [dependencies]
 prost.workspace = true
