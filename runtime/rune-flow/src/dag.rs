@@ -106,12 +106,37 @@ pub enum BodyStepKind {
     Flow(FlowConfig),
 }
 
+/// 退避策略
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackoffStrategy {
+    #[default]
+    Fixed,
+    Exponential,
+    ExponentialJitter,
+}
+
+/// 重试触发条件
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryCondition {
+    Any,
+    Timeout,
+}
+
 /// Step 失败后的重试策略（PR-7 实现执行逻辑）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
     /// 含首次执行，必须 >= 1
     pub max_attempts: u32,
     pub backoff_ms: u64,
+    #[serde(default)]
+    pub backoff_strategy: BackoffStrategy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_delay_ms: Option<u64>,
+    /// 空列表等价于 [Any] — 重试所有错误
+    #[serde(default)]
+    pub retry_on: Vec<RetryCondition>,
 }
 
 // ─── Serde for StepDefinition ────────────────────────────────────────────────
@@ -545,6 +570,14 @@ fn validate_retry_config(step_name: &str, retry: &Option<RetryConfig>) -> Result
                 reason: "max_attempts must be >= 1 (includes the initial attempt)".into(),
             });
         }
+        if let Some(max_delay) = r.max_delay_ms {
+            if max_delay < r.backoff_ms {
+                return Err(DagError::InvalidRetryConfig {
+                    step: step_name.to_string(),
+                    reason: "max_delay_ms must be >= backoff_ms".into(),
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -756,4 +789,70 @@ pub fn topological_layers(flow: &FlowDefinition) -> Result<Vec<Vec<usize>>, DagE
     }
 
     Ok(layers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_flow_with_retry(retry: Option<RetryConfig>) -> FlowDefinition {
+        FlowDefinition {
+            name: "test".into(),
+            gate_path: None,
+            steps: vec![StepDefinition {
+                name: "s1".into(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry,
+                kind: StepKind::Rune(RuneConfig {
+                    rune: "my_rune".into(),
+                }),
+            }],
+        }
+    }
+
+    /// max_delay_ms < backoff_ms 时 validate_dag 报 InvalidRetryConfig
+    #[test]
+    fn validate_max_delay_lt_backoff_fails() {
+        let flow = make_flow_with_retry(Some(RetryConfig {
+            max_attempts: 3,
+            backoff_ms: 500,
+            backoff_strategy: BackoffStrategy::Exponential,
+            max_delay_ms: Some(200), // 200 < 500，非法
+            retry_on: vec![],
+        }));
+        let result = validate_dag(&flow);
+        assert!(
+            matches!(result, Err(DagError::InvalidRetryConfig { .. })),
+            "expected InvalidRetryConfig, got {:?}",
+            result
+        );
+    }
+
+    /// max_delay_ms >= backoff_ms 时验证通过
+    #[test]
+    fn validate_max_delay_ge_backoff_ok() {
+        let flow = make_flow_with_retry(Some(RetryConfig {
+            max_attempts: 3,
+            backoff_ms: 100,
+            backoff_strategy: BackoffStrategy::Exponential,
+            max_delay_ms: Some(1000),
+            retry_on: vec![],
+        }));
+        assert!(validate_dag(&flow).is_ok());
+    }
+
+    /// 旧格式 JSON（只有 max_attempts + backoff_ms）反序列化向后兼容
+    #[test]
+    fn retry_config_backward_compat_deserialize() {
+        let json = r#"{"max_attempts": 3, "backoff_ms": 100}"#;
+        let cfg: RetryConfig = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(cfg.max_attempts, 3);
+        assert_eq!(cfg.backoff_ms, 100);
+        assert_eq!(cfg.backoff_strategy, BackoffStrategy::Fixed);
+        assert_eq!(cfg.max_delay_ms, None);
+        assert!(cfg.retry_on.is_empty());
+    }
 }
