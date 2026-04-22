@@ -140,11 +140,12 @@ impl FileBroker {
         let storage = if data.len() > DISK_THRESHOLD {
             if let Some(dir) = &self.disk_dir {
                 let path = dir.join(&file_id);
+                let path_for_entry = path.clone();
                 let data_clone = data.clone();
                 match tokio::task::spawn_blocking(move || std::fs::write(&path, &data_clone)).await
                 {
                     Ok(Ok(())) => FileStorage::Disk {
-                        path: dir.join(&file_id),
+                        path: path_for_entry,
                     },
                     Ok(Err(e)) => {
                         tracing::warn!(file_id = %file_id, error = %e, "disk spill failed, keeping in memory");

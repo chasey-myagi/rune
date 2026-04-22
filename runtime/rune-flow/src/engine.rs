@@ -1542,17 +1542,14 @@ fn compute_backoff_ms(config: &crate::dag::RetryConfig, attempt: u32) -> u64 {
         BackoffStrategy::Exponential => base.saturating_mul(1u64 << attempt.min(62)),
         BackoffStrategy::ExponentialJitter => {
             let exp = base.saturating_mul(1u64 << attempt.min(62));
-            // ±25% jitter：确定性伪随机，基于 attempt，无需 rand crate
-            let jitter_range = exp / 4;
-            let jitter = if attempt.is_multiple_of(2) {
-                jitter_range / 2
+            // ±25% random jitter to desynchronise concurrent retriers.
+            let half_range = exp / 4;
+            if half_range == 0 {
+                exp
             } else {
-                jitter_range.wrapping_mul(3) / 4
-            };
-            if (attempt / 2).is_multiple_of(2) {
-                exp.saturating_add(jitter)
-            } else {
-                exp.saturating_sub(jitter)
+                use rand::Rng as _;
+                let offset = rand::rng().random_range(0..=half_range * 2);
+                exp.saturating_sub(half_range).saturating_add(offset)
             }
         }
     };

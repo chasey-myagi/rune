@@ -559,7 +559,9 @@ impl AppConfig {
             match val.to_lowercase().as_str() {
                 "json" => self.log.format = LogFormat::Json,
                 "text" => self.log.format = LogFormat::Text,
-                _ => {} // 忽略未知值
+                _ => {
+                    tracing::warn!(value = %val, "unknown RUNE_LOG__FORMAT value, using current setting")
+                }
             }
         }
         if let Ok(v) = std::env::var("RUNE_LOG__FILE") {

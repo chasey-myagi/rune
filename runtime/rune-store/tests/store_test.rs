@@ -2410,6 +2410,7 @@ async fn test_update_key_last_used() {
 
     store
         .update_key_last_used(&key_hash, used_at, used_ip)
+        .await
         .unwrap();
 
     // Verify via list_keys
@@ -2432,6 +2433,7 @@ async fn test_update_key_last_used() {
     let used_ip2 = "203.0.113.5";
     store
         .update_key_last_used(&key_hash, used_at2, used_ip2)
+        .await
         .unwrap();
 
     let keys2 = store.list_keys().await.unwrap();

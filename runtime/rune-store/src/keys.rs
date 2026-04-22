@@ -199,21 +199,26 @@ impl RuneStore {
     }
 
     /// Update the last_used_at and last_used_ip audit fields for the given key hash.
-    ///
-    /// This is synchronous; callers in async context should wrap in tokio::spawn or
-    /// call fire-and-forget via tokio::spawn(async move { ... }).
-    pub fn update_key_last_used(
+    /// Offloads the blocking SQLite write to a spawn_blocking thread.
+    pub async fn update_key_last_used(
         &self,
         key_hash: &str,
         used_at: &str,
         used_ip: &str,
     ) -> StoreResult<()> {
-        let conn = self.pool.writer();
-        conn.execute(
-            "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE key_hash = ?3",
-            rusqlite::params![used_at, used_ip, key_hash],
-        )?;
-        Ok(())
+        let pool = self.pool.clone();
+        let key_hash = key_hash.to_string();
+        let used_at = used_at.to_string();
+        let used_ip = used_ip.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.writer();
+            conn.execute(
+                "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE key_hash = ?3",
+                rusqlite::params![used_at, used_ip, key_hash],
+            )?;
+            Ok(())
+        })
+        .await?
     }
 }
 

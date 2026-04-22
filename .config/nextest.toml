@@ -10,4 +10,5 @@ fail-fast = false
 # CI 环境限制并发，避免资源争抢
 test-threads = 4
 slow-timeout = { period = "30s", terminate-after = 2 }
-fail-fast = true
+# 不提前中止，确保收集所有失败信息（而非仅第一个失败）
+fail-fast = false

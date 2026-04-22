@@ -11,13 +11,18 @@ use crate::error::error_response;
 use crate::handlers::rune::parse_labels_header;
 use crate::state::GateState;
 
-/// Extract the client IP from `X-Forwarded-For` header (first address), or return empty string.
+/// Extract the client IP from `X-Forwarded-For` header (first address).
+/// Returns an empty string if the header is absent or its value is not a valid IP address.
+/// Note: X-Forwarded-For is client-controlled and can be forged; this field is for
+/// informational audit logging only, not for security decisions.
 fn extract_client_ip(req: &axum::extract::Request) -> String {
     req.headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string())
+        .map(|s| s.trim())
+        .filter(|s| s.parse::<std::net::IpAddr>().is_ok())
+        .map(|s| s.to_string())
         .unwrap_or_default()
 }
 
@@ -209,7 +214,10 @@ pub async fn auth_middleware(
                 };
                 let now = rune_core::time_utils::now_iso8601();
                 tokio::spawn(async move {
-                    if let Err(e) = store.update_key_last_used(&key_hash, &now, &client_ip) {
+                    if let Err(e) = store
+                        .update_key_last_used(&key_hash, &now, &client_ip)
+                        .await
+                    {
                         tracing::debug!(
                             error = %e,
                             "failed to update key last_used audit fields"

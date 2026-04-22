@@ -12,3 +12,4 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 metrics = "0.24"
+rand = "0.9"
