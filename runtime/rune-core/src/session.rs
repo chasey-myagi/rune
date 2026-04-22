@@ -999,7 +999,6 @@ impl SessionManager {
                     input: input.to_vec(),
                     context,
                     timeout_ms: safe_timeout_ms(timeout),
-                    attachments: Vec::new(),
                 })),
             };
 
@@ -1070,7 +1069,6 @@ impl SessionManager {
                     input: input.to_vec(),
                     context,
                     timeout_ms: safe_timeout_ms(timeout),
-                    attachments: Vec::new(),
                 })),
             };
 

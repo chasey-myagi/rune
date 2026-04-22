@@ -69,14 +69,6 @@ message GateConfig {
     string method = 2;
 }
 
-// ── 文件附件 ──
-
-message FileAttachment {
-    string filename = 1;
-    bytes data = 2;
-    string mime_type = 3;
-}
-
 // ── 执行 ──
 
 message ExecuteRequest {
@@ -85,7 +77,6 @@ message ExecuteRequest {
     bytes input = 3;
     map<string, string> context = 4;
     uint32 timeout_ms = 5;
-    repeated FileAttachment attachments = 6;   // 文件附件
 }
 
 message CancelRequest {
@@ -111,7 +102,6 @@ message ExecuteResult {
     Status status = 2;
     bytes output = 3;
     ErrorDetail error = 4;
-    repeated FileAttachment attachments = 5;   // 返回文件附件
 }
 
 // ── 流式 ──
