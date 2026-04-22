@@ -6,7 +6,7 @@ pub mod grpc_service;
 pub mod invoker;
 pub mod relay;
 pub mod resolver;
-pub mod retry;
+pub(crate) mod retry;
 pub mod rune;
 pub mod scaling;
 pub mod session;

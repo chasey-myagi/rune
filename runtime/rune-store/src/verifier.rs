@@ -3,6 +3,7 @@ use crate::store::RuneStore;
 use async_trait::async_trait;
 use rune_core::auth::KeyVerifier;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub struct StoreKeyVerifier {
     store: Arc<RuneStore>,
@@ -29,11 +30,16 @@ impl StoreKeyVerifier {
     }
 
     async fn verify(&self, raw_key: &str, key_type: KeyType) -> bool {
+        // Constant-time guard: pad response to at least MIN_VERIFY_MS so callers
+        // cannot distinguish cache hits, DB misses, or invalid-format keys by timing.
+        const MIN_VERIFY_MS: u64 = 5;
+        let start = Instant::now();
+
         let result = match &self.hmac_secret {
             Some(secret) => self.store.verify_key_hmac(raw_key, key_type, secret).await,
             None => self.store.verify_key(raw_key, key_type).await,
         };
-        result
+        let ok = result
             .inspect_err(|e| {
                 tracing::error!(
                     key_type = key_type.as_str(),
@@ -43,7 +49,14 @@ impl StoreKeyVerifier {
             })
             .ok()
             .flatten()
-            .is_some()
+            .is_some();
+
+        let elapsed = start.elapsed();
+        let min = Duration::from_millis(MIN_VERIFY_MS);
+        if elapsed < min {
+            tokio::time::sleep(min - elapsed).await;
+        }
+        ok
     }
 }
 

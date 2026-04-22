@@ -513,12 +513,20 @@ impl SessionManager {
                 Some(session_message::Payload::StreamEnd(end)) if ctx.is_active() => {
                     Self::handle_stream_end(&ctx, end).await;
                 }
-                Some(session_message::Payload::Detach(detach)) => {
+                Some(session_message::Payload::Detach(detach)) if ctx.is_active() => {
                     tracing::info!(reason = %detach.reason, "caster detached");
                     break;
                 }
-                Some(session_message::Payload::Heartbeat(_)) => {
+                Some(session_message::Payload::Heartbeat(_)) if ctx.is_active() => {
                     ctx.touch_heartbeat();
+                }
+                Some(
+                    session_message::Payload::Detach(_) | session_message::Payload::Heartbeat(_),
+                ) => {
+                    tracing::warn!(
+                        "received Detach/Heartbeat before CasterAttach — closing session"
+                    );
+                    break;
                 }
                 Some(session_message::Payload::HealthReport(report)) if ctx.is_active() => {
                     self.handle_health_report(&ctx, report);
