@@ -2103,3 +2103,360 @@ async fn loop_all_body_steps_skipped_passthrough() {
     let v: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
     assert_eq!(v["original"], true);
 }
+
+// ============================================================
+// B: Map Step (B-6 to B-10)
+// ============================================================
+
+use rune_flow::dag::MapConfig;
+
+/// B-6: 基础数组并行处理，验证输出顺序与输入对应
+#[tokio::test]
+async fn map_basic_parallel_preserves_order() {
+    let relay = test_relay();
+    // double: wraps input number in {"value": n * 2}
+    relay
+        .register(
+            rune_config("double"),
+            Arc::new(LocalInvoker::new(make_handler(|_ctx, input| async move {
+                let v: serde_json::Value = serde_json::from_slice(&input).unwrap();
+                let n = v.as_i64().unwrap_or(0);
+                Ok(Bytes::from(
+                    serde_json::to_vec(&serde_json::json!({"value": n * 2})).unwrap(),
+                ))
+            }))),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "map_flow",
+            vec![StepDefinition {
+                name: "map_step".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Map(MapConfig {
+                    over: "$input.items".to_string(),
+                    body: Box::new(BodyStep {
+                        name: "process".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Rune(FlowRuneConfig {
+                            rune: "double".into(),
+                        }),
+                    }),
+                    concurrency: None,
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let input = Bytes::from(r#"{"items": [1, 2, 3, 4, 5]}"#);
+    let result = engine.execute("map_flow", input).await.unwrap();
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(&result.output).unwrap();
+
+    assert_eq!(arr.len(), 5);
+    // output order must match input order
+    assert_eq!(arr[0]["value"], 2);
+    assert_eq!(arr[1]["value"], 4);
+    assert_eq!(arr[2]["value"], 6);
+    assert_eq!(arr[3]["value"], 8);
+    assert_eq!(arr[4]["value"], 10);
+}
+
+/// B-7: concurrency 限制 — 验证峰值并发数不超过设定值
+#[tokio::test]
+async fn map_concurrency_limit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let relay = test_relay();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    let counter_c = Arc::clone(&counter);
+    let peak_c = Arc::clone(&peak);
+
+    relay
+        .register(
+            rune_config("slow_task"),
+            Arc::new(LocalInvoker::new(make_handler(move |_ctx, input| {
+                let counter_c = Arc::clone(&counter_c);
+                let peak_c = Arc::clone(&peak_c);
+                async move {
+                    let current = counter_c.fetch_add(1, Ordering::SeqCst) + 1;
+                    // record peak
+                    let mut p = peak_c.load(Ordering::SeqCst);
+                    while current > p {
+                        match peak_c.compare_exchange(
+                            p,
+                            current,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(_) => break,
+                            Err(actual) => p = actual,
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    counter_c.fetch_sub(1, Ordering::SeqCst);
+                    Ok(input)
+                }
+            }))),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "limited_map",
+            vec![StepDefinition {
+                name: "map_step".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Map(MapConfig {
+                    over: "$input.items".to_string(),
+                    body: Box::new(BodyStep {
+                        name: "task".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Rune(FlowRuneConfig {
+                            rune: "slow_task".into(),
+                        }),
+                    }),
+                    concurrency: Some(2),
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let input = Bytes::from(r#"{"items": [1, 2, 3, 4, 5, 6]}"#);
+    engine.execute("limited_map", input).await.unwrap();
+
+    assert!(
+        peak.load(Ordering::SeqCst) <= 2,
+        "peak concurrency exceeded limit"
+    );
+}
+
+/// B-8: over 路径为 steps.X.output.list（引用前一 step 的输出）
+#[tokio::test]
+async fn map_over_previous_step_output() {
+    let relay = test_relay();
+
+    // producer: returns {"list": [10, 20, 30]}
+    relay
+        .register(
+            rune_config("produce_list"),
+            Arc::new(LocalInvoker::new(make_handler(|_ctx, _input| async move {
+                Ok(Bytes::from(r#"{"list": [10, 20, 30]}"#))
+            }))),
+            None,
+        )
+        .unwrap();
+
+    // add_one: increments input number
+    relay
+        .register(
+            rune_config("add_one"),
+            Arc::new(LocalInvoker::new(make_handler(|_ctx, input| async move {
+                let v: serde_json::Value = serde_json::from_slice(&input).unwrap();
+                let n = v.as_i64().unwrap_or(0) + 1;
+                Ok(Bytes::from(
+                    serde_json::to_vec(&serde_json::json!(n)).unwrap(),
+                ))
+            }))),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "ref_step_flow",
+            vec![
+                step("producer", "produce_list"),
+                StepDefinition {
+                    name: "mapper".to_string(),
+                    depends_on: vec!["producer".to_string()],
+                    condition: None,
+                    input_mapping: None,
+                    timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Map(MapConfig {
+                        over: "steps.producer.output.list".to_string(),
+                        body: Box::new(BodyStep {
+                            name: "inc".to_string(),
+                            condition: None,
+                            input_mapping: None,
+                            timeout_ms: None,
+                            retry: None,
+                            kind: BodyStepKind::Rune(FlowRuneConfig {
+                                rune: "add_one".into(),
+                            }),
+                        }),
+                        concurrency: None,
+                    }),
+                },
+            ],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("ref_step_flow", Bytes::from("{}"))
+        .await
+        .unwrap();
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(arr, vec![11, 21, 31]);
+}
+
+/// B-9: 数组中某元素失败 → 整个 Map step StepFailed
+#[tokio::test]
+async fn map_element_failure_propagates() {
+    let relay = test_relay();
+
+    relay
+        .register(
+            rune_config("sometimes_fail"),
+            Arc::new(LocalInvoker::new(make_handler(|_ctx, input| async move {
+                let v: serde_json::Value = serde_json::from_slice(&input).unwrap();
+                if v.as_i64() == Some(2) {
+                    return Err(RuneError::ExecutionFailed {
+                        code: "BOOM".into(),
+                        message: "element 2 exploded".into(),
+                    });
+                }
+                Ok(input)
+            }))),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "fail_map",
+            vec![StepDefinition {
+                name: "map_step".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Map(MapConfig {
+                    over: "$input.items".to_string(),
+                    body: Box::new(BodyStep {
+                        name: "check".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Rune(FlowRuneConfig {
+                            rune: "sometimes_fail".into(),
+                        }),
+                    }),
+                    concurrency: None,
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let input = Bytes::from(r#"{"items": [1, 2, 3]}"#);
+    let err = engine.execute("fail_map", input).await.unwrap_err();
+    assert!(
+        matches!(err, FlowError::StepFailed { .. }),
+        "expected StepFailed, got: {err:?}"
+    );
+}
+
+/// B-10: body 为 Loop（Map + Loop 嵌套）
+#[tokio::test]
+async fn map_body_is_loop() {
+    let relay = test_relay();
+
+    // add: increments {"n": x} by 1
+    relay
+        .register(
+            rune_config("increment"),
+            Arc::new(LocalInvoker::new(make_handler(|_ctx, input| async move {
+                let mut v: serde_json::Value = serde_json::from_slice(&input).unwrap();
+                let n = v["n"].as_i64().unwrap_or(0) + 1;
+                v["n"] = n.into();
+                Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
+            }))),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    // For each item {"n": x}, loop 3 times incrementing n, so output {"n": x+3}
+    engine
+        .register(flow(
+            "map_loop_flow",
+            vec![StepDefinition {
+                name: "map_step".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Map(MapConfig {
+                    over: "$input.items".to_string(),
+                    body: Box::new(BodyStep {
+                        name: "loop_body".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Loop(LoopConfig {
+                            max_iterations: 3,
+                            until: None,
+                            body: vec![BodyStep {
+                                name: "inc".to_string(),
+                                condition: None,
+                                input_mapping: None,
+                                timeout_ms: None,
+                                retry: None,
+                                kind: BodyStepKind::Rune(FlowRuneConfig {
+                                    rune: "increment".into(),
+                                }),
+                            }],
+                        }),
+                    }),
+                    concurrency: None,
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let input = Bytes::from(r#"{"items": [{"n": 0}, {"n": 10}, {"n": 100}]}"#);
+    let result = engine.execute("map_loop_flow", input).await.unwrap();
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(&result.output).unwrap();
+
+    assert_eq!(arr.len(), 3);
+    assert_eq!(arr[0]["n"], 3);
+    assert_eq!(arr[1]["n"], 13);
+    assert_eq!(arr[2]["n"], 103);
+}
