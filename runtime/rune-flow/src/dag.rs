@@ -393,6 +393,8 @@ pub enum DagError {
     UnknownDependency { step: String, dep: String },
     #[error("duplicate step name: {0}")]
     DuplicateStep(String),
+    #[error("reserved step name: '{0}' is reserved for flow input references")]
+    ReservedStepName(String),
     #[error("multi-upstream step '{step}' must declare input_mapping")]
     MissingInputMapping { step: String },
     #[error("step '{step}' has unparseable condition: '{condition}' — use 'true', 'false', or a comparison with spaces around the operator (e.g. 'x == 5')")]
@@ -417,11 +419,14 @@ pub fn validate_dag(flow: &FlowDefinition) -> Result<(), DagError> {
         return Ok(());
     }
 
-    // 1. 检查重复 step 名
+    // 1. 检查重复 step 名，以及保留名（input / $input 在 resolve_path 中有特殊语义）
     let mut seen = HashSet::new();
     for s in steps {
         if !seen.insert(&s.name) {
             return Err(DagError::DuplicateStep(s.name.clone()));
+        }
+        if s.name == "input" || s.name == "$input" {
+            return Err(DagError::ReservedStepName(s.name.clone()));
         }
     }
 

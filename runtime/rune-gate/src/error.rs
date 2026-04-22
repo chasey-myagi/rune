@@ -100,7 +100,7 @@ pub fn map_flow_error(e: FlowError, request_id: Option<&str>) -> axum::response:
             request_id,
         ),
         FlowError::FlowStepNotFound(_) => error_response_with_id(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::UNPROCESSABLE_ENTITY,
             "FLOW_STEP_NOT_FOUND",
             &e.to_string(),
             request_id,

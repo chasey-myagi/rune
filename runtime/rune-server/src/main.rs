@@ -503,8 +503,26 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // ── Wait for shutdown signal ──
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("received SIGINT, starting graceful shutdown");
+    // Listen for both SIGINT (Ctrl-C) and SIGTERM (docker stop / systemd).
+    // On non-Unix platforms only SIGINT is available.
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("received SIGINT, starting graceful shutdown");
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("received SIGTERM, starting graceful shutdown");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
+        tracing::info!("received SIGINT, starting graceful shutdown");
+    }
 
     // 0. Stop the scale evaluator so no new grace-period force_kill spawns fire
     if let Some(ref evaluator) = scaling {

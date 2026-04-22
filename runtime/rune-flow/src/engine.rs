@@ -295,36 +295,32 @@ impl FlowRunner {
 
         // 解析 flow 原始输入为 JSON（用于 $input 引用和 condition 上下文）
         let flow_input_json: Option<serde_json::Value> = serde_json::from_slice(&input).ok();
+        let mut first_error: Option<FlowError> = None;
 
         for layer in &layers {
-            // 检查该层是否有上游失败
-            let mut has_failed_upstream = false;
-            for &step_idx in layer {
-                let step_def = &flow.steps[step_idx];
-                for dep in &step_def.depends_on {
-                    if matches!(
-                        step_statuses.get(dep.as_str()),
-                        Some(StepStatus::Failed { .. })
-                    ) {
-                        has_failed_upstream = true;
-                        break;
-                    }
-                }
-                if has_failed_upstream {
-                    break;
-                }
-            }
-
-            if has_failed_upstream {
-                // 上游失败，这层不执行
-                break;
-            }
-
             // 确定每个 step 是否 skip
             let mut step_tasks: Vec<(usize, bool)> = Vec::new(); // (step_idx, should_skip)
 
             for &step_idx in layer {
                 let step_def = &flow.steps[step_idx];
+
+                // 检查是否有失败的上游：失败向下游传播，该 step 标记为 Failed 并跳过；
+                // 仅跳过有失败依赖的 step，不影响同层其他独立 step（修正层级粒度 fail-fast bug）
+                let has_failed_dep = step_def.depends_on.iter().any(|dep| {
+                    matches!(
+                        step_statuses.get(dep.as_str()),
+                        Some(StepStatus::Failed { .. })
+                    )
+                });
+                if has_failed_dep {
+                    step_statuses.insert(
+                        step_def.name.clone(),
+                        StepStatus::Failed {
+                            error: "upstream step failed".to_string(),
+                        },
+                    );
+                    continue;
+                }
 
                 // 检查是否所有上游都被 skip
                 let all_upstreams_skipped = if step_def.depends_on.is_empty() {
@@ -554,6 +550,7 @@ impl FlowRunner {
                                         .unwrap_or(timeout);
                                     let body_future = runner.execute_body_step_kind(
                                         body.kind,
+                                        body.name,
                                         body_input,
                                         effective_timeout,
                                         parent_context,
@@ -652,23 +649,54 @@ impl FlowRunner {
                 }
             }
 
-            // 如果该层有失败 step，终止执行并返回错误
+            // 记录首个失败（不立即返回，允许独立分支继续执行）
             if let Some((step_name, rune_err)) = layer_error {
-                return Err(FlowError::StepFailed {
-                    step: step_name,
-                    source: rune_err,
-                });
+                if first_error.is_none() {
+                    first_error = Some(FlowError::StepFailed {
+                        step: step_name,
+                        source: rune_err,
+                    });
+                }
             }
         }
 
         // 确定最终输出：取最后一层中最后一个完成的 step 的 output
         let output = Self::determine_output(flow, &step_outputs, &input);
 
-        Ok(FlowResult {
-            output,
-            steps: step_statuses,
-            steps_executed,
-        })
+        // 如果任意 terminal step（无后继的 step）成功完成，视为整体成功（部分执行）；
+        // 否则以第一个实际失败的 step 为错误返回。
+        // 使用 step_statuses 而非字节比较，避免 passthrough/echo flow 被误判为失败。
+        let all_deps: std::collections::HashSet<&str> = flow
+            .steps
+            .iter()
+            .flat_map(|s| s.depends_on.iter().map(String::as_str))
+            .collect();
+        let terminal_succeeded = flow
+            .steps
+            .iter()
+            .filter(|s| !all_deps.contains(s.name.as_str()))
+            .any(|s| {
+                matches!(
+                    step_statuses.get(&s.name),
+                    Some(StepStatus::Completed { .. })
+                )
+            });
+
+        if terminal_succeeded {
+            Ok(FlowResult {
+                output,
+                steps: step_statuses,
+                steps_executed,
+            })
+        } else if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok(FlowResult {
+                output,
+                steps: step_statuses,
+                steps_executed,
+            })
+        }
     }
 
     fn build_step_input(
@@ -720,12 +748,12 @@ impl FlowRunner {
             }
         };
 
-        for _iter in 0..config.max_iterations {
+        for iter in 0..config.max_iterations {
             let iter_start = std::time::Instant::now();
 
             emit(FlowProgressEvent::LoopIterationStart {
                 step: loop_step_name.clone(),
-                iteration: _iter,
+                iteration: iter,
                 max_iterations: config.max_iterations,
             });
 
@@ -759,6 +787,7 @@ impl FlowRunner {
 
                 let body_future = self.execute_body_step_kind(
                     body_step.kind.clone(),
+                    body_step.name.clone(),
                     step_input,
                     effective_timeout,
                     parent_context.clone(),
@@ -786,7 +815,7 @@ impl FlowRunner {
                             duration_ms,
                         });
                         return Err(FlowError::StepFailed {
-                            step: body_step.name.clone(),
+                            step: format!("{loop_step_name}[iter={iter}]/{}", body_step.name),
                             source: e,
                         });
                     }
@@ -799,7 +828,7 @@ impl FlowRunner {
                             duration_ms,
                         });
                         return Err(FlowError::StepFailed {
-                            step: body_step.name.clone(),
+                            step: format!("{loop_step_name}[iter={iter}]/{}", body_step.name),
                             source: RuneError::Timeout,
                         });
                     }
@@ -824,7 +853,7 @@ impl FlowRunner {
                 let met = evaluate_condition(until, &HashMap::new(), &body_outputs, &last_json);
                 emit(FlowProgressEvent::LoopIterationEnd {
                     step: loop_step_name.clone(),
-                    iteration: _iter,
+                    iteration: iter,
                     duration_ms: iter_start.elapsed().as_millis() as u64,
                     until_met: met,
                 });
@@ -834,7 +863,7 @@ impl FlowRunner {
             } else {
                 emit(FlowProgressEvent::LoopIterationEnd {
                     step: loop_step_name.clone(),
-                    iteration: _iter,
+                    iteration: iter,
                     duration_ms: iter_start.elapsed().as_millis() as u64,
                     until_met: false,
                 });
@@ -898,7 +927,10 @@ impl FlowRunner {
             let call_stack = call_stack.clone();
 
             join_set.spawn(async move {
-                let _permit = sem.acquire_owned().await.unwrap();
+                let _permit = sem
+                    .acquire_owned()
+                    .await
+                    .expect("map semaphore closed unexpectedly");
 
                 let effective_timeout = body
                     .timeout_ms
@@ -907,6 +939,7 @@ impl FlowRunner {
 
                 let body_future = runner.execute_body_step_kind(
                     body.kind,
+                    body.name,
                     item_bytes,
                     effective_timeout,
                     parent_context,
@@ -969,9 +1002,11 @@ impl FlowRunner {
 
     /// 执行单个 BodyStep 的 kind（不含 timeout，调用方负责包裹）。
     /// 返回 Pin<Box<...>> 以支持 BodyStepKind::Loop 的异步递归。
+    #[allow(clippy::too_many_arguments)]
     fn execute_body_step_kind(
         &self,
         kind: BodyStepKind,
+        step_name: String,
         input: Bytes,
         effective_timeout: Duration,
         parent_context: HashMap<String, String>,
@@ -1013,7 +1048,7 @@ impl FlowRunner {
                         parent_context,
                         flow_request_id,
                         call_stack,
-                        "nested_loop".to_string(),
+                        step_name.clone(),
                     )
                     .await
                     .map_err(|e| RuneError::ExecutionFailed {
@@ -1066,6 +1101,7 @@ impl FlowRunner {
                             runner
                                 .execute_body_step_kind(
                                     body.kind,
+                                    body.name,
                                     body_input,
                                     effective_timeout,
                                     parent_context,
@@ -1189,20 +1225,20 @@ fn resolve_path(
     step_outputs: &HashMap<String, Option<Bytes>>,
     flow_input_json: &Option<serde_json::Value>,
 ) -> serde_json::Value {
-    if path.starts_with("$input") {
-        // $input.field.subfield...
-        let parts: Vec<&str> = path.splitn(2, '.').collect();
-        if parts.len() < 2 {
-            // just "$input"
-            return flow_input_json.clone().unwrap_or(serde_json::Value::Null);
-        }
-        let field_path = parts[1]; // "field" or "field.subfield"
-        if let Some(input_val) = flow_input_json {
-            resolve_json_path(input_val, field_path)
-        } else {
-            serde_json::Value::Null
-        }
-    } else {
+    // Support both "$input.x" and "input.x" for consistency with condition expressions.
+    if path.starts_with("$input") || path == "input" || path.starts_with("input.") {
+        let field_path = path
+            .strip_prefix("$input.")
+            .or_else(|| path.strip_prefix("input."));
+        return match field_path {
+            None => flow_input_json.clone().unwrap_or(serde_json::Value::Null),
+            Some(fp) => flow_input_json
+                .as_ref()
+                .map(|v| resolve_json_path(v, fp))
+                .unwrap_or(serde_json::Value::Null),
+        };
+    }
+    {
         // step_name.output or step_name.output.field
         let parts: Vec<&str> = path.splitn(3, '.').collect();
         if parts.is_empty() {
