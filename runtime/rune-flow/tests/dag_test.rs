@@ -8,20 +8,24 @@ use std::collections::HashMap;
 fn step(name: &str, rune: &str) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: vec![],
         condition: None,
         input_mapping: None,
+        timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(RuneConfig { rune: rune.into() }),
     }
 }
 
 fn step_with_deps(name: &str, rune: &str, deps: &[&str]) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: None,
         input_mapping: None,
+        timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(RuneConfig { rune: rune.into() }),
     }
 }
 
@@ -33,20 +37,24 @@ fn step_with_deps_and_mapping(
 ) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: None,
         input_mapping: Some(mapping),
+        timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(RuneConfig { rune: rune.into() }),
     }
 }
 
 fn step_with_condition(name: &str, rune: &str, deps: &[&str], condition: &str) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: Some(condition.to_string()),
         input_mapping: None,
+        timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(RuneConfig { rune: rune.into() }),
     }
 }
 
@@ -331,17 +339,25 @@ fn serde_round_trip() {
         steps: vec![
             StepDefinition {
                 name: "A".to_string(),
-                rune: "rune_a".to_string(),
                 depends_on: vec![],
                 condition: None,
                 input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Rune(RuneConfig {
+                    rune: "rune_a".into(),
+                }),
             },
             StepDefinition {
                 name: "B".to_string(),
-                rune: "rune_b".to_string(),
                 depends_on: vec!["A".to_string()],
                 condition: Some("input.ready == true".to_string()),
                 input_mapping: Some(mapping),
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Rune(RuneConfig {
+                    rune: "rune_b".into(),
+                }),
             },
         ],
         gate_path: Some("/api/test".to_string()),
@@ -502,4 +518,152 @@ fn validate_complex_diamond_with_conditions_and_mappings() {
         ],
     );
     assert!(validate_dag(&f).is_ok());
+}
+
+// ============================================================
+// Reserved step name tests
+// ============================================================
+
+#[test]
+fn reserved_name_input_is_rejected() {
+    let f = flow("reserved_input", vec![step("input", "rune_a")]);
+    assert!(
+        matches!(validate_dag(&f), Err(DagError::ReservedStepName(n)) if n == "input"),
+        "step named 'input' should be rejected with ReservedStepName"
+    );
+}
+
+#[test]
+fn reserved_name_dollar_input_is_rejected() {
+    let f = flow("reserved_dollar_input", vec![step("$input", "rune_a")]);
+    assert!(
+        matches!(validate_dag(&f), Err(DagError::ReservedStepName(n)) if n == "$input"),
+        "step named '$input' should be rejected with ReservedStepName"
+    );
+}
+
+#[test]
+fn non_reserved_names_are_accepted() {
+    // Names that contain "input" as a substring must not be rejected.
+    let f = flow(
+        "near_reserved",
+        vec![
+            step("inputs", "rune_a"),
+            step("my_input", "rune_b"),
+            step("input_data", "rune_c"),
+        ],
+    );
+    assert!(
+        validate_dag(&f).is_ok(),
+        "names that merely contain 'input' should be allowed"
+    );
+}
+
+// ============================================================
+// Loop config validation boundaries
+// ============================================================
+
+#[test]
+fn loop_zero_max_iterations_rejected() {
+    let f = flow(
+        "bad_loop",
+        vec![StepDefinition {
+            name: "l".to_string(),
+            depends_on: vec![],
+            condition: None,
+            input_mapping: None,
+            timeout_ms: None,
+            retry: None,
+            kind: StepKind::Loop(LoopConfig {
+                body: vec![BodyStep {
+                    name: "b".to_string(),
+                    condition: None,
+                    input_mapping: None,
+                    timeout_ms: None,
+                    retry: None,
+                    kind: BodyStepKind::Rune(RuneConfig { rune: "r".into() }),
+                }],
+                max_iterations: 0,
+                until: None,
+            }),
+        }],
+    );
+    assert!(
+        matches!(
+            validate_dag(&f),
+            Err(DagError::InvalidLoopConfig { step, .. }) if step == "l"
+        ),
+        "max_iterations=0 must be rejected"
+    );
+}
+
+#[test]
+fn loop_empty_body_rejected() {
+    let f = flow(
+        "empty_body_loop",
+        vec![StepDefinition {
+            name: "l".to_string(),
+            depends_on: vec![],
+            condition: None,
+            input_mapping: None,
+            timeout_ms: None,
+            retry: None,
+            kind: StepKind::Loop(LoopConfig {
+                body: vec![],
+                max_iterations: 3,
+                until: None,
+            }),
+        }],
+    );
+    assert!(
+        matches!(
+            validate_dag(&f),
+            Err(DagError::InvalidLoopConfig { step, .. }) if step == "l"
+        ),
+        "empty body must be rejected"
+    );
+}
+
+#[test]
+fn loop_duplicate_body_step_name_rejected() {
+    let f = flow(
+        "dup_body",
+        vec![StepDefinition {
+            name: "l".to_string(),
+            depends_on: vec![],
+            condition: None,
+            input_mapping: None,
+            timeout_ms: None,
+            retry: None,
+            kind: StepKind::Loop(LoopConfig {
+                body: vec![
+                    BodyStep {
+                        name: "step".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Rune(RuneConfig { rune: "r".into() }),
+                    },
+                    BodyStep {
+                        name: "step".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Rune(RuneConfig { rune: "r2".into() }),
+                    },
+                ],
+                max_iterations: 3,
+                until: None,
+            }),
+        }],
+    );
+    assert!(
+        matches!(
+            validate_dag(&f),
+            Err(DagError::InvalidLoopConfig { step, .. }) if step == "l"
+        ),
+        "duplicate body step name must be rejected"
+    );
 }

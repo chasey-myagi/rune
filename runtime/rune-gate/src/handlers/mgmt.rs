@@ -86,7 +86,7 @@ pub async fn mgmt_casters(State(state): State<GateState>) -> impl IntoResponse {
         std::collections::HashMap::new();
     for (name, _) in state.rune.relay.list() {
         if let Some(entries) = state.rune.relay.find(&name) {
-            for e in entries.value().values() {
+            for e in entries.into_values() {
                 if let Some(ref cid) = e.caster_id {
                     caster_runes
                         .entry(cid.clone())

@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html lang="en" data-lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rune v1.2.0 — Ship Functions, Not Infrastructure</title>
+<meta name="description" content="A protocol-first polyglot framework that turns any function into a sync API, SSE stream, or async task. Zero config. 18 behavioral guarantees. Nanosecond overhead.">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f4f0ec;--bg-alt:#eae4dd;--bg-code:#1e1b18;
+  --fg:#1c1917;--fg-2:#44403c;--fg-3:#78716c;
+  --accent:#dc4a1a;--accent-2:#9a3412;
+  --green:#15803d;--green-bg:#ecfdf5;--red-bg:#fef2f2;
+  --border:#d6d0c8;
+  --tag-bg:rgba(220,74,26,0.08);--tag-fg:var(--accent-2);
+  --quote-bg:rgba(28,25,23,0.03);
+}
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0c0a09;--bg-alt:#1c1917;--bg-code:#0a0908;
+    --fg:#e7e5e4;--fg-2:#a8a29e;--fg-3:#78716c;
+    --accent:#fb923c;--accent-2:#fdba74;
+    --green:#4ade80;--green-bg:rgba(74,222,128,0.08);--red-bg:rgba(248,113,113,0.08);
+    --border:#292524;
+    --tag-bg:rgba(251,146,60,0.12);--tag-fg:var(--accent);
+    --quote-bg:rgba(255,255,255,0.03);
+  }
+}
+[data-theme="dark"]{
+  --bg:#0c0a09;--bg-alt:#1c1917;--bg-code:#0a0908;
+  --fg:#e7e5e4;--fg-2:#a8a29e;--fg-3:#78716c;
+  --accent:#fb923c;--accent-2:#fdba74;
+  --green:#4ade80;--green-bg:rgba(74,222,128,0.08);--red-bg:rgba(248,113,113,0.08);
+  --border:#292524;
+  --tag-bg:rgba(251,146,60,0.12);--tag-fg:var(--accent);
+  --quote-bg:rgba(255,255,255,0.03);
+}
+[data-theme="light"]{
+  --bg:#f4f0ec;--bg-alt:#eae4dd;--bg-code:#1e1b18;
+  --fg:#1c1917;--fg-2:#44403c;--fg-3:#78716c;
+  --accent:#dc4a1a;--accent-2:#9a3412;
+  --green:#15803d;--green-bg:#ecfdf5;--red-bg:#fef2f2;
+  --border:#d6d0c8;
+  --tag-bg:rgba(220,74,26,0.08);--tag-fg:var(--accent-2);
+  --quote-bg:rgba(28,25,23,0.03);
+}
+
+/* ───── Language Toggle ───── */
+[data-lang="en"] .zh{display:none}
+[data-lang="zh"] .en{display:none}
+
+/* ───── Base ───── */
+html{scroll-behavior:smooth;font-size:17px}
+body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--fg-2);background:var(--bg);line-height:1.7;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+img{max-width:100%;display:block}
+code,pre,.mono{font-family:'SF Mono',ui-monospace,'Cascadia Code','Fira Code',monospace}
+.progress{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:999;transition:width .1s}
+
+/* ───── Toolbar ───── */
+.toolbar{position:fixed;top:1rem;right:1rem;z-index:100;display:flex;gap:.5rem}
+.tool-btn{background:var(--bg-alt);border:1px solid var(--border);border-radius:50%;width:2.5rem;height:2.5rem;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:var(--fg-3);transition:all .2s}
+.tool-btn:hover{color:var(--accent);border-color:var(--accent)}
+.lang-btn{border-radius:6px;width:auto;padding:0 .6rem;font-size:.68rem;font-weight:700;letter-spacing:.04em;font-family:'SF Mono',ui-monospace,monospace}
+
+/* ───── Nav ───── */
+.nav{position:sticky;top:0;z-index:90;background:var(--bg);border-bottom:1px solid var(--border);overflow-x:auto;-webkit-overflow-scrolling:touch}
+.nav-inner{display:flex;gap:.2rem;max-width:960px;margin:0 auto;padding:.45rem 1.5rem}
+.nav a{font-size:.72rem;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:var(--fg-3);padding:.35rem .65rem;border-radius:4px;white-space:nowrap;transition:all .15s}
+.nav a:hover,.nav a.active{color:var(--accent);background:var(--tag-bg);text-decoration:none}
+
+/* ───── Layout ───── */
+.wrap{max-width:780px;margin:0 auto;padding:0 1.5rem}
+.wrap-wide{max-width:960px;margin:0 auto;padding:0 1.5rem}
+section{padding:4rem 0 3.5rem}
+section:nth-child(odd){background:var(--bg)}
+section:nth-child(even){background:var(--bg-alt)}
+
+/* ───── Typography ───── */
+h1{font-size:clamp(2.6rem,6vw,4rem);font-weight:900;color:var(--fg);line-height:1.08;letter-spacing:-.03em}
+h2{font-size:clamp(1.7rem,3.5vw,2.3rem);font-weight:800;color:var(--fg);line-height:1.15;margin-bottom:1.2rem}
+h3{font-size:1.08rem;font-weight:700;color:var(--fg);margin-bottom:.6rem}
+h4{font-size:.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;font-family:'SF Mono',ui-monospace,monospace;color:var(--accent);margin-bottom:.5rem}
+p{max-width:65ch;margin-bottom:1rem}
+.sn{font-size:4.5rem;font-weight:900;color:var(--accent);opacity:.35;line-height:1;margin-bottom:.3rem;font-variant-numeric:tabular-nums}
+
+/* ───── Hero ───── */
+.hero{padding:6rem 0 4rem;background:var(--bg)}
+.hero-tag{font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);font-family:'SF Mono',ui-monospace,monospace;margin-bottom:1.2rem;opacity:0;animation:fadeUp .5s .1s forwards}
+h1 .highlight{color:var(--accent)}
+.hero h1{opacity:0;animation:fadeUp .5s .2s forwards}
+.hero-deck{font-size:1.15rem;color:var(--fg-2);max-width:60ch;margin:1.2rem 0 1.8rem;line-height:1.6;opacity:0;animation:fadeUp .5s .3s forwards}
+.hero-meta{display:flex;flex-wrap:wrap;gap:1.5rem;font-size:.82rem;color:var(--fg-3);opacity:0;animation:fadeUp .5s .4s forwards}
+.hero-meta b{color:var(--fg);margin-right:.3rem}
+
+/* ───── Stats ───── */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1.2rem;margin:2rem 0}
+.stat{text-align:center;padding:1.3rem .8rem}
+.stat-val{font-size:2.2rem;font-weight:900;color:var(--accent);line-height:1.1;font-variant-numeric:tabular-nums;transition:transform .2s}
+.stat:hover .stat-val{transform:scale(1.08)}
+.stat-lbl{font-size:.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-3);margin-top:.35rem;font-family:'SF Mono',ui-monospace,monospace}
+
+/* ───── Code ───── */
+pre{background:var(--bg-code);color:#e7e5e4;padding:1.3rem 1.5rem;border-radius:8px;overflow-x:auto;font-size:.82rem;line-height:1.65;margin:1.2rem 0 1.5rem;border:1px solid rgba(255,255,255,.06)}
+pre code{background:none;padding:0;font-size:inherit}
+code{background:var(--tag-bg);color:var(--tag-fg);padding:.15rem .4rem;border-radius:3px;font-size:.82rem}
+.code-label{font-size:.62rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--fg-3);font-family:'SF Mono',ui-monospace,monospace;margin-bottom:.4rem}
+.code-group{display:grid;gap:1rem;margin:1.5rem 0}
+@media(min-width:768px){.code-group.cols-3{grid-template-columns:1fr 1fr 1fr}}
+
+/* ───── Flow ───── */
+.flow{margin:1.5rem 0}
+.flow-step{display:flex;gap:1rem;min-height:3.5rem}
+.flow-rail{display:flex;flex-direction:column;align-items:center;width:1.5rem;flex-shrink:0}
+.flow-dot{width:10px;height:10px;border-radius:50%;background:var(--accent);flex-shrink:0;margin-top:.35rem}
+.flow-line{width:2px;flex:1;background:var(--border);margin:4px 0}
+.flow-body{padding-bottom:1.2rem}
+.flow-title{font-weight:700;color:var(--fg);font-size:.95rem}
+.flow-desc{color:var(--fg-3);font-size:.85rem;margin-top:.15rem}
+.flow-mono{font-family:'SF Mono',ui-monospace,monospace;font-size:.75rem;color:var(--accent)}
+
+/* ───── Table ───── */
+.table-wrap{overflow-x:auto;margin:1.5rem 0;border-radius:8px;border:1px solid var(--border)}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th{text-align:left;padding:.7rem 1rem;font-size:.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-3);border-bottom:2px solid var(--border);font-family:'SF Mono',ui-monospace,monospace}
+td{padding:.65rem 1rem;border-bottom:1px solid var(--border);color:var(--fg-2);vertical-align:top}
+tr:last-child td{border-bottom:none}
+.row-hl{background:var(--tag-bg)}
+.row-hl td{color:var(--fg);font-weight:600}
+td:first-child{color:var(--fg);font-weight:600}
+.check{color:var(--green)}.cross{color:var(--accent)}
+
+/* ───── Callout ───── */
+.callout{padding:1.2rem 1.5rem;border-radius:8px;margin:1.5rem 0;font-size:.92rem;line-height:1.6}
+.callout-green{background:var(--green-bg);border-left:3px solid var(--green)}
+.callout-green strong{color:var(--green)}
+.callout-accent{background:var(--tag-bg);border-left:3px solid var(--accent)}
+.callout-accent strong{color:var(--accent)}
+
+/* ───── Quote ───── */
+.quote{border-left:3px solid var(--accent);padding:1rem 1.5rem;margin:1.5rem 0;background:var(--quote-bg);border-radius:0 8px 8px 0}
+.quote p{font-style:italic;color:var(--fg-2);margin:0;max-width:60ch}
+.quote cite{display:block;font-size:.78rem;color:var(--fg-3);margin-top:.5rem;font-style:normal}
+
+/* ───── Card ───── */
+.card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin:1.5rem 0}
+.card{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.3rem;transition:border-color .2s}
+.card:hover{border-color:var(--accent)}
+.card-name{font-weight:700;color:var(--fg);margin-bottom:.3rem}
+.card-sub{font-size:.72rem;color:var(--accent);font-family:'SF Mono',ui-monospace,monospace;font-weight:600;margin-bottom:.5rem}
+.card-desc{font-size:.85rem;color:var(--fg-3);line-height:1.5}
+section:nth-child(even) .card{background:var(--bg)}
+
+/* ───── Verdict ───── */
+.verdict{border:2px solid var(--accent);border-radius:8px;padding:1.8rem 2rem;margin:2rem 0}
+.verdict h3{color:var(--accent);margin-bottom:.8rem}
+.verdict p{color:var(--fg-2)}
+
+/* ───── Guarantee ───── */
+.guarantee{display:flex;gap:1rem;margin:1.2rem 0;padding:1rem 1.2rem;background:var(--quote-bg);border-radius:8px;border:1px solid var(--border);transition:border-color .2s}
+.guarantee:hover{border-color:var(--accent)}
+.guarantee-num{font-size:1.6rem;font-weight:900;color:var(--accent);opacity:.6;flex-shrink:0;width:2.2rem;text-align:center;line-height:1.2;font-variant-numeric:tabular-nums}
+.guarantee-body{flex:1}
+.guarantee-title{font-weight:700;color:var(--fg);font-size:.92rem;margin-bottom:.25rem}
+.guarantee-desc{font-size:.85rem;color:var(--fg-3);line-height:1.55}
+.guarantee-vs{font-size:.78rem;color:var(--accent);margin-top:.3rem;font-family:'SF Mono',ui-monospace,monospace}
+
+/* ───── DAG ───── */
+.dag{display:flex;align-items:center;justify-content:center;gap:.5rem;margin:2rem 0;flex-wrap:wrap;font-family:'SF Mono',ui-monospace,monospace;font-size:.82rem;font-weight:600}
+.dag-node{background:var(--tag-bg);color:var(--tag-fg);padding:.5rem 1rem;border-radius:6px;border:1px solid var(--border);white-space:nowrap}
+.dag-node.active{border-color:var(--accent);background:var(--accent);color:var(--bg)}
+.dag-arrow{color:var(--fg-3);font-size:.9rem}
+.dag-branch{display:flex;flex-direction:column;gap:.4rem}
+
+/* ───── Shell ───── */
+.shell{background:var(--bg-code);color:#a8a29e;padding:1rem 1.3rem;border-radius:8px;font-family:'SF Mono',ui-monospace,monospace;font-size:.78rem;line-height:1.8;margin:1rem 0;border:1px solid rgba(255,255,255,.06);overflow-x:auto}
+.shell .cmd{color:#e7e5e4}.shell .prompt{color:var(--accent);user-select:none}.shell .comment{color:#78716c}
+
+/* ───── Back to top ───── */
+.back-top{position:fixed;bottom:2rem;right:2rem;z-index:90;background:var(--bg-alt);border:1px solid var(--border);border-radius:50%;width:2.5rem;height:2.5rem;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--fg-3);font-size:1rem;opacity:0;pointer-events:none;transition:all .2s}
+.back-top.show{opacity:1;pointer-events:auto}
+.back-top:hover{color:var(--accent);border-color:var(--accent)}
+
+/* ───── Animations ───── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+.reveal{opacity:0.08;transform:translateY(20px);transition:opacity .5s,transform .5s}
+.reveal.visible{opacity:1;transform:translateY(0)}
+.reveal:nth-child(2){transition-delay:.05s}
+.reveal:nth-child(3){transition-delay:.1s}
+.reveal:nth-child(4){transition-delay:.15s}
+.reveal:nth-child(5){transition-delay:.2s}
+.reveal:nth-child(6){transition-delay:.25s}
+@media(prefers-reduced-motion:reduce){
+  .reveal{opacity:1;transform:none;transition:none}
+  .hero-tag,.hero h1,.hero-deck,.hero-meta{opacity:1;animation:none}
+}
+@media(max-width:640px){
+  section{padding:3rem 0 2.5rem}
+  .hero{padding:4rem 0 3rem}
+  .sn{font-size:3rem}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .nav-inner{padding:.35rem 1rem}
+  .dag{flex-direction:column}
+  pre{font-size:.75rem;padding:1rem}
+}
+</style>
+</head>
+<body>
+
+<div class="progress" id="progress"></div>
+
+<!-- Toolbar: Lang + Theme -->
+<div class="toolbar">
+  <button class="tool-btn lang-btn" id="langToggle" aria-label="Switch language">EN</button>
+  <button class="tool-btn" id="themeToggle" aria-label="Toggle theme"><span id="themeIcon">&#9790;</span></button>
+</div>
+
+<button class="back-top" id="backTop" aria-label="Back to top">&uarr;</button>
+
+<!-- Nav -->
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="#problem"><span class="en">The Problem</span><span class="zh">痛点</span></a>
+    <a href="#code"><span class="en">Show Me Code</span><span class="zh">看代码</span></a>
+    <a href="#architecture"><span class="en">Architecture</span><span class="zh">架构</span></a>
+    <a href="#polyglot"><span class="en">Polyglot</span><span class="zh">多语言</span></a>
+    <a href="#guarantees"><span class="en">Guarantees</span><span class="zh">协议保证</span></a>
+    <a href="#workflows"><span class="en">Workflows</span><span class="zh">工作流</span></a>
+    <a href="#performance"><span class="en">Performance</span><span class="zh">性能</span></a>
+    <a href="#comparison"><span class="en">Comparison</span><span class="zh">对比</span></a>
+    <a href="#start"><span class="en">Get Started</span><span class="zh">快速上手</span></a>
+  </div>
+</nav>
+
+<!-- Hero -->
+<header class="hero">
+  <div class="wrap">
+    <div class="hero-tag">Rune Framework &middot; v1.2.0 &middot; April 2026</div>
+    <h1>
+      <span class="en">Ship Functions,<br>Not <span class="highlight">Infrastructure</span></span>
+      <span class="zh">交付函数，<br>而非<span class="highlight">基础设施</span></span>
+    </h1>
+    <p class="hero-deck">
+      <span class="en">A protocol-first polyglot framework that turns any function into a sync API, SSE stream, or async task. One decorator. Three invocation modes. 18 behavioral guarantees. Nanosecond overhead.</span>
+      <span class="zh">协议优先的多语言分布式函数执行框架。一个装饰器，三种调用模式，18 条行为保证，纳秒级开销。将任意函数变为同步 API、SSE 流或异步任务。</span>
+    </p>
+    <div class="hero-meta">
+      <span><b>Runtime</b> Rust</span>
+      <span><b>SDKs</b> Python &middot; TypeScript &middot; Rust</span>
+      <span><b>License</b> MIT</span>
+      <span><b>Crates</b> 10</span>
+    </div>
+  </div>
+</header>
+
+<!-- 01. The Problem -->
+<section id="problem">
+  <div class="wrap">
+    <div class="sn reveal">01</div>
+    <h2 class="reveal">
+      <span class="en">You have a function.<br>Now you have 12 problems.</span>
+      <span class="zh">你写了一个函数。<br>然后你多了 12 个问题。</span>
+    </h2>
+    <p class="reveal">
+      <span class="en">You wrote a Python function. It does one useful thing. Now you need it accessible over HTTP. And you want streaming for real-time output. And async for long-running jobs. And backpressure. And schema validation. And orchestration.</span>
+      <span class="zh">你写了一个 Python 函数，它干一件有用的事。但现在你需要它能通过 HTTP 访问。你还想要流式输出、异步执行、背压控制、Schema 校验、还有编排能力。</span>
+    </p>
+    <p class="reveal">
+      <span class="en">The traditional path: API Gateway + Lambda + SQS + Step Functions + cold start tuning + IAM roles + Dockerfile + 47 YAML files. Each layer adds latency, complexity, and a new set of failure modes you didn't sign up for. You spend more time wiring infrastructure than writing the thing you actually care about.</span>
+      <span class="zh">传统路径：API Gateway + Lambda + SQS + Step Functions + 冷启动调优 + IAM 角色 + Dockerfile + 47 个 YAML 文件。每一层都增加延迟和复杂度，引入一组你并不想面对的故障模式。你花在拼接基础设施上的时间，比写业务逻辑还多。</span>
+    </p>
+    <p class="reveal">
+      <span class="en">What if the infrastructure disappeared? What if deploying a function was 7 lines of code and a single command?</span>
+      <span class="zh">如果基础设施消失了呢？如果部署一个函数只需要 7 行代码和一条命令呢？</span>
+    </p>
+    <div class="callout callout-accent reveal">
+      <span class="en"><strong>That's Rune.</strong> Write the function. Decorate it. Run <code>rune start --dev</code>. Your function is now a sync API, an SSE stream, and an async task &mdash; simultaneously. You didn't write a Dockerfile, choose a cloud provider, or configure a gateway.</span>
+      <span class="zh"><strong>这就是 Rune。</strong> 写函数，加装饰器，运行 <code>rune start --dev</code>。你的函数同时变成了同步 API、SSE 流和异步任务。你没写 Dockerfile，没选云厂商，没配网关。</span>
+    </div>
+  </div>
+</section>
+
+<!-- 02. Show Me Code -->
+<section id="code">
+  <div class="wrap">
+    <div class="sn reveal">02</div>
+    <h2 class="reveal">
+      <span class="en">7 lines. 3 modes. Zero config.</span>
+      <span class="zh">7 行代码。3 种模式。零配置。</span>
+    </h2>
+    <p class="reveal">
+      <span class="en">Here's the complete code. Not a snippet &mdash; the <em>entire</em> caster.</span>
+      <span class="zh">这是完整代码。不是片段 &mdash; 是<em>整个</em> Caster。</span>
+    </p>
+
+    <div class="reveal">
+      <div class="code-label">Python &middot; my_caster.py</div>
+<pre><code><span style="color:#78716c">from</span> <span style="color:#fb923c">rune</span> <span style="color:#78716c">import</span> Caster, RuneContext
+
+caster = Caster(<span style="color:#a3e635">"localhost:50070"</span>)
+
+<span style="color:#fb923c">@caster.rune</span>(<span style="color:#a3e635">"echo"</span>, gate=<span style="color:#a3e635">"/echo"</span>)
+<span style="color:#78716c">async def</span> <span style="color:#e7e5e4">echo</span>(ctx: RuneContext, input: <span style="color:#78716c">bytes</span>) -> <span style="color:#78716c">bytes</span>:
+    <span style="color:#78716c">return</span> input
+
+caster.run()</code></pre>
+    </div>
+
+    <p class="reveal">
+      <span class="en">That <code>@caster.rune("echo", gate="/echo")</code> decorator does everything: registers with the runtime via gRPC, declares the HTTP route, and makes the function available in all three modes. Here's the proof:</span>
+      <span class="zh">这个 <code>@caster.rune("echo", gate="/echo")</code> 装饰器做了所有事：通过 gRPC 注册到 Runtime、声明 HTTP 路由、让函数以三种模式可用。以下是证明：</span>
+    </p>
+
+    <div class="reveal">
+      <h4><span class="en">Sync &mdash; immediate response</span><span class="zh">同步 &mdash; 立即响应</span></h4>
+      <div class="shell"><span class="prompt">$ </span><span class="cmd">curl -X POST localhost:50060/echo -d '{"message":"hello rune"}'</span>
+<span class="comment"># {"message":"hello rune"}</span></div>
+    </div>
+
+    <div class="reveal">
+      <h4><span class="en">Stream &mdash; SSE events as they're produced</span><span class="zh">流式 &mdash; SSE 事件实时产出</span></h4>
+      <div class="shell"><span class="prompt">$ </span><span class="cmd">curl -X POST "localhost:50060/echo?stream=true" -d '{"message":"hello rune"}'</span>
+<span class="comment"># event: stream
+# data: {"message":"hello rune"}
+# event: end
+# data: {}</span></div>
+    </div>
+
+    <div class="reveal">
+      <h4><span class="en">Async &mdash; fire and poll</span><span class="zh">异步 &mdash; 提交后轮询</span></h4>
+      <div class="shell"><span class="prompt">$ </span><span class="cmd">curl -X POST "localhost:50060/echo?async=true" -d '{"message":"hello rune"}'</span>
+<span class="comment"># {"task_id":"a1b2c3d4-...","status":"pending"}</span>
+
+<span class="prompt">$ </span><span class="cmd">curl localhost:50060/api/v1/tasks/a1b2c3d4-...</span>
+<span class="comment"># {"task_id":"a1b2c3d4-...","status":"completed","result":{"message":"hello rune"}}</span></div>
+    </div>
+
+    <div class="callout callout-green reveal">
+      <span class="en"><strong>Same function. Same config. Same error handling.</strong> The runtime handles the protocol mechanics. Your code doesn't even know which mode it's running in.</span>
+      <span class="zh"><strong>同一个函数。同一份配置。同一套错误处理。</strong> Runtime 处理协议机制。你的代码甚至不知道自己在以哪种模式运行。</span>
+    </div>
+  </div>
+</section>
+
+<!-- 03. Architecture -->
+<section id="architecture">
+  <div class="wrap">
+    <div class="sn reveal">03</div>
+    <h2 class="reveal">
+      <span class="en">What's in the box</span>
+      <span class="zh">盒子里是什么</span>
+    </h2>
+    <p class="reveal">
+      <span class="en">Rune is a Rust runtime of 10 crates, layered by protocol boundaries. Here's the request path:</span>
+      <span class="zh">Rune 是由 10 个 Rust crate 组成的运行时，按协议边界分层。以下是请求路径：</span>
+    </p>
+
+    <div class="flow reveal">
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div><div class="flow-line"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">Client</div>
+          <div class="flow-desc"><span class="en">Any HTTP client &mdash; curl, browser, your service. Sends a POST request.</span><span class="zh">任意 HTTP 客户端 &mdash; curl、浏览器、你的服务。发送 POST 请求。</span></div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div><div class="flow-line"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">Gate</div>
+          <div class="flow-desc"><span class="en">Axum-based HTTP layer. Auth, rate limiting, schema validation, file uploads. Routes to the right Rune.</span><span class="zh">基于 Axum 的 HTTP 层。认证、限流、Schema 校验、文件上传。路由到正确的 Rune。</span></div>
+          <div class="flow-mono">rune-gate &middot; rune-schema</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div><div class="flow-line"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">Relay</div>
+          <div class="flow-desc"><span class="en">Global registry. Maps rune names to live invokers. Maintains routing indexes for business routes and label-based filtering.</span><span class="zh">全局注册表。将 Rune 名称映射到活跃的 Invoker。维护业务路由索引和标签过滤。</span></div>
+          <div class="flow-mono">rune-core::relay</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div><div class="flow-line"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">Resolver</div>
+          <div class="flow-desc"><span class="en">Picks the target from multiple Casters registered under the same rune name. Strategies: round-robin, random, least-load, priority, label-match.</span><span class="zh">从同名 Rune 的多个 Caster 实例中选择目标。策略：轮询、随机、最小负载、优先级、标签匹配。</span></div>
+          <div class="flow-mono">rune-core::resolver</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div><div class="flow-line"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">Invoker</div>
+          <div class="flow-desc"><span class="en">Sends the execution request over the bidirectional gRPC stream. Manages timeouts, cancellation, and semaphore permits.</span><span class="zh">通过双向 gRPC 流发送执行请求。管理超时、取消和信号量许可。</span></div>
+          <div class="flow-mono">rune-core::invoker</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-rail"><div class="flow-dot"></div></div>
+        <div class="flow-body">
+          <div class="flow-title">Caster</div>
+          <div class="flow-desc"><span class="en">Your code. A Python/TypeScript/Rust process running your handler functions. Connected via Rune Wire Protocol (gRPC bidirectional stream).</span><span class="zh">你的代码。一个运行你处理函数的 Python/TypeScript/Rust 进程。通过 Rune Wire Protocol（gRPC 双向流）连接。</span></div>
+          <div class="flow-mono">SDK &middot; rune-proto</div>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="reveal"><span class="en">Naming isn't an accident</span><span class="zh">命名不是偶然</span></h3>
+    <p class="reveal">
+      <span class="en">Every name has intent. A <strong>Rune</strong> is a symbol of power &mdash; a function unit with declared capabilities. A <strong>Caster</strong> wields runes. The <strong>Gate</strong> guards entry. The <strong>Relay</strong> knows where everything is. A <strong>Flow</strong> is a spell composed of multiple runes. The metaphor is Norse magic: precise, declarative, compositional.</span>
+      <span class="zh">每个名字都有意图。<strong>Rune</strong>（符文）是力量的符号 &mdash; 具有声明式能力的函数单元。<strong>Caster</strong>（施法者）驾驭符文。<strong>Gate</strong>（门）守护入口。<strong>Relay</strong>（中继）知晓万物位置。<strong>Flow</strong>（流）是由多个符文组成的法术。隐喻来自北欧魔法：精确、声明式、可组合。</span>
+    </p>
+  </div>
+</section>
+
+<!-- 04. Polyglot -->
+<section id="polyglot">
+  <div class="wrap">
+    <div class="sn reveal">04</div>
+    <h2 class="reveal">
+      <span class="en">True polyglot.<br>Not "we have a REST API."</span>
+      <span class="zh">真正的多语言。<br>不是"我们有 REST API"那种。</span>
+    </h2>
+    <p class="reveal">
+      <span class="en">"Multi-language support" usually means "you can call our REST API from any language." That's not polyglot &mdash; that's HTTP. Rune's polyglot means your Python function, TypeScript function, and Rust function all connect to the same runtime over the same protocol, with the same semantics. And they can be steps in the same workflow.</span>
+      <span class="zh">"多语言支持"通常意味着"你可以用任意语言调用我们的 REST API"。那不叫多语言 &mdash; 那叫 HTTP。Rune 的多语言是指你的 Python 函数、TypeScript 函数和 Rust 函数全部通过同一协议连接到同一 Runtime，具有相同的语义。它们还可以是同一个工作流中的步骤。</span>
+    </p>
+
+    <div class="code-group cols-3 reveal">
+      <div>
+        <div class="code-label">Python</div>
+<pre><code><span style="color:#fb923c">@caster.rune</span>(<span style="color:#a3e635">"echo"</span>,
+  gate=<span style="color:#a3e635">"/echo"</span>)
+<span style="color:#78716c">async def</span> echo(ctx, input):
+    <span style="color:#78716c">return</span> input</code></pre>
+      </div>
+      <div>
+        <div class="code-label">TypeScript</div>
+<pre><code>caster.<span style="color:#fb923c">rune</span>({
+  name: <span style="color:#a3e635">"ts-echo"</span>,
+  gate: { path: <span style="color:#a3e635">"/ts/echo"</span> },
+}, <span style="color:#78716c">async</span> (ctx, input) <span style="color:#78716c">=></span> {
+  <span style="color:#78716c">return</span> input;
+});</code></pre>
+      </div>
+      <div>
+        <div class="code-label">Rust</div>
+<pre><code>caster.<span style="color:#fb923c">rune</span>(
+  RuneConfig {
+    name: <span style="color:#a3e635">"rs-echo"</span>,
+    gate: <span style="color:#fb923c">Some</span>(<span style="color:#a3e635">"/rs/echo"</span>),
+    ..Default::default()
+  },
+  |_ctx, input| <span style="color:#78716c">async</span> {
+    <span style="color:#fb923c">Ok</span>(input)
+  },
+)?;</code></pre>
+      </div>
+    </div>
+
+    <h3 class="reveal"><span class="en">Mix languages in a single DAG</span><span class="zh">在同一个 DAG 里混排语言</span></h3>
+    <p class="reveal">
+      <span class="en">This isn't theoretical. Here's a real Flow definition that routes <code>step_a</code> to a Python Caster, <code>step_b</code> to a Rust Caster, and <code>step_c</code> back to Python &mdash; because you pick the right tool for each step, not one language for the whole pipeline.</span>
+      <span class="zh">这不是理论。这是一个真实的 Flow 定义：<code>step_a</code> 路由到 Python Caster，<code>step_b</code> 路由到 Rust Caster，<code>step_c</code> 回到 Python &mdash; 每一步选最合适的工具，而不是整条流水线绑死一种语言。</span>
+    </p>
+
+    <div class="reveal">
+      <div class="code-label">Mixed-language Flow</div>
+<pre><code>{
+  <span style="color:#a3e635">"name"</span>: <span style="color:#a3e635">"mixed-pipeline"</span>,
+  <span style="color:#a3e635">"steps"</span>: [
+    { <span style="color:#a3e635">"name"</span>: <span style="color:#a3e635">"step_a"</span>, <span style="color:#a3e635">"rune"</span>: <span style="color:#a3e635">"step_a"</span>, <span style="color:#a3e635">"depends_on"</span>: [] },
+    { <span style="color:#a3e635">"name"</span>: <span style="color:#a3e635">"step_b"</span>, <span style="color:#a3e635">"rune"</span>: <span style="color:#a3e635">"rs-upper"</span>, <span style="color:#a3e635">"depends_on"</span>: [<span style="color:#a3e635">"step_a"</span>] },
+    { <span style="color:#a3e635">"name"</span>: <span style="color:#a3e635">"step_c"</span>, <span style="color:#a3e635">"rune"</span>: <span style="color:#a3e635">"step_c"</span>, <span style="color:#a3e635">"depends_on"</span>: [<span style="color:#a3e635">"step_b"</span>] }
+  ]
+}</code></pre>
+    </div>
+    <p class="reveal" style="font-size:.88rem;color:var(--fg-3)">
+      <span class="en">The Resolver doesn't care what language the Caster speaks. It routes by rune name, not implementation language. All three SDKs implement the identical Rune Wire Protocol.</span>
+      <span class="zh">Resolver 不关心 Caster 用什么语言。它按 Rune 名称路由，不按实现语言。三个 SDK 实现了完全相同的 Rune Wire Protocol。</span>
+    </p>
+  </div>
+</section>
+
+<!-- 05. Guarantees -->
+<section id="guarantees">
+  <div class="wrap">
+    <div class="sn reveal">05</div>
+    <h2 class="reveal">
+      <span class="en">Explicit contracts,<br>not "best effort."</span>
+      <span class="zh">显式契约，<br>而非"尽力而为"。</span>
+    </h2>
+    <p class="reveal">
+      <span class="en">Most runtimes have behaviors. Rune has <strong>guarantees</strong> &mdash; 18 of them, documented, tested, and contractual. If any is violated, it's a bug. Not a known issue, not a trade-off. A bug. Here are the 5 that change how you think about function execution:</span>
+      <span class="zh">大多数运行时有行为。Rune 有<strong>保证</strong> &mdash; 18 条，有文档、有测试、有契约。如果任何一条被违反，那是 bug。不是已知问题，不是权衡，是 bug。以下是改变你对函数执行认知的 5 条：</span>
+    </p>
+
+    <div class="guarantee reveal">
+      <div class="guarantee-num">3</div>
+      <div class="guarantee-body">
+        <div class="guarantee-title"><span class="en">Real streaming</span><span class="zh">真流式</span></div>
+        <div class="guarantee-desc"><span class="en">The first SSE event from a <code>?stream=true</code> request comes from actual handler execution, not from post-completion chunking. If your handler takes 5 seconds to produce its first output, the first event arrives after 5 seconds &mdash; not after the full execution completes.</span><span class="zh"><code>?stream=true</code> 请求的第一个 SSE 事件来自 handler 实际执行，不是执行完再分块。如果你的 handler 需要 5 秒产出第一个输出，第一个事件就在 5 秒后到达 &mdash; 而非全部执行完之后。</span></div>
+        <div class="guarantee-vs">vs. Lambda: no native SSE. vs. Workers: body must complete first.</div>
+      </div>
+    </div>
+
+    <div class="guarantee reveal">
+      <div class="guarantee-num">4</div>
+      <div class="guarantee-body">
+        <div class="guarantee-title"><span class="en">Timeout convergence</span><span class="zh">超时收敛</span></div>
+        <div class="guarantee-desc"><span class="en">After a request times out, the runtime state &mdash; pending map, semaphore permits &mdash; is fully cleaned up. The caller receives a Timeout error. No resource leaks, no phantom permits, no orphaned requests.</span><span class="zh">请求超时后，Runtime 状态 &mdash; pending map、信号量许可 &mdash; 被完全清理。调用方收到 Timeout 错误。没有资源泄漏，没有幽灵许可，没有孤儿请求。</span></div>
+        <div class="guarantee-vs">vs. Lambda: timeout kills container, no state cleanup. vs. Workers: CPU limit just terminates.</div>
+      </div>
+    </div>
+
+    <div class="guarantee reveal">
+      <div class="guarantee-num">8</div>
+      <div class="guarantee-body">
+        <div class="guarantee-title"><span class="en">Strict backpressure</span><span class="zh">严格背压</span></div>
+        <div class="guarantee-desc"><span class="en">The <code>max_concurrent</code> declared by a Caster is enforced via semaphore. If all permits are consumed, new requests return <code>503 Unavailable</code>. Permit count never exceeds the declared maximum, regardless of error paths.</span><span class="zh">Caster 声明的 <code>max_concurrent</code> 通过信号量严格执行。所有许可耗尽时，新请求返回 <code>503 Unavailable</code>。许可数永远不超过声明的最大值，无论走哪条错误路径。</span></div>
+        <div class="guarantee-vs">vs. Lambda: throttling is account-wide, not per-function. vs. Workers: no built-in concurrency limit.</div>
+      </div>
+    </div>
+
+    <div class="guarantee reveal">
+      <div class="guarantee-num">11</div>
+      <div class="guarantee-body">
+        <div class="guarantee-title"><span class="en">Route conflicts are hard errors</span><span class="zh">路由冲突是硬错误</span></div>
+        <div class="guarantee-desc"><span class="en">Two different rune names declaring the same <code>gate.path + method</code> causes a registration failure. The runtime won't silently pick one. Same rune name from multiple Casters is fine &mdash; they share the route via the Resolver strategy.</span><span class="zh">两个不同的 Rune 声明相同的 <code>gate.path + method</code> 会导致注册失败。Runtime 不会静默选一个。同名 Rune 来自多个 Caster 没问题 &mdash; 它们通过 Resolver 策略共享路由。</span></div>
+        <div class="guarantee-vs">vs. Lambda: API Gateway overwrites silently. vs. Workers: last deploy wins.</div>
+      </div>
+    </div>
+
+    <div class="guarantee reveal">
+      <div class="guarantee-num">18</div>
+      <div class="guarantee-body">
+        <div class="guarantee-title"><span class="en">Graceful drain</span><span class="zh">优雅关停</span></div>
+        <div class="guarantee-desc"><span class="en">On shutdown signal: <code>/health</code> returns 503 (signal load balancers), new requests are rejected, in-flight requests complete up to the drain timeout. No request is silently dropped during deployment.</span><span class="zh">收到关停信号：<code>/health</code> 返回 503（通知负载均衡器），拒绝新请求，在途请求在 drain 超时内完成。部署期间不会静默丢弃任何请求。</span></div>
+        <div class="guarantee-vs">vs. Lambda: cold restart is a new container. vs. Workers: no drain mode.</div>
+      </div>
+    </div>
+
+    <div class="callout callout-accent reveal">
+      <span class="en"><strong>All 18 guarantees</strong> are documented in <code>docs/protocol-guarantees.md</code> and locked by regression tests. Execution semantics, state convergence, backpressure, routing, flow isolation, schema gate, upload gate, label strictness &mdash; each with a clear contract and a test that breaks if the contract is violated.</span>
+      <span class="zh"><strong>全部 18 条保证</strong>记录在 <code>docs/protocol-guarantees.md</code>，由回归测试锁定。执行语义、状态收敛、背压、路由、Flow 隔离、Schema 门控、上传门控、标签严格性 &mdash; 每条都有清晰契约和对应的断言测试。</span>
+    </div>
+  </div>
+</section>
+
+<!-- 06. Workflows -->
+<section id="workflows">
+  <div class="wrap">
+    <div class="sn reveal">06</div>
+    <h2 class="reveal">
+      <span class="en">DAG workflows, built in.</span>
+      <span class="zh">内置 DAG 工作流。</span>
+    </h2>
+    <p class="reveal">
+      <span class="en">You don't need Step Functions or a separate orchestration tool. Rune's Flow engine executes DAG workflows natively, using the same Invoker interface as direct calls. A Rune behaves identically whether called directly or as a flow step.</span>
+      <span class="zh">你不需要 Step Functions 或单独的编排工具。Rune 的 Flow 引擎原生执行 DAG 工作流，使用与直接调用相同的 Invoker 接口。一个 Rune 无论直接调用还是作为 Flow 步骤，行为完全一致。</span>
+    </p>
+
+    <div class="dag reveal">
+      <div class="dag-node">extract</div>
+      <div class="dag-arrow">&rarr;</div>
+      <div class="dag-branch">
+        <div class="dag-node">analyze</div>
+        <div class="dag-node">translate</div>
+      </div>
+      <div class="dag-arrow">&rarr;</div>
+      <div class="dag-node active">merge</div>
+    </div>
+
+    <div class="reveal">
+      <div class="code-label">ETL Pipeline Definition</div>
+<pre><code>{
+  <span style="color:#a3e635">"name"</span>: <span style="color:#a3e635">"etl-pipeline"</span>,
+  <span style="color:#a3e635">"steps"</span>: [
+    { <span style="color:#a3e635">"name"</span>: <span style="color:#a3e635">"extract"</span>,   <span style="color:#a3e635">"rune"</span>: <span style="color:#a3e635">"extract"</span>,   <span style="color:#a3e635">"depends_on"</span>: [] },
+    { <span style="color:#a3e635">"name"</span>: <span style="color:#a3e635">"analyze"</span>,   <span style="color:#a3e635">"rune"</span>: <span style="color:#a3e635">"analyze"</span>,   <span style="color:#a3e635">"depends_on"</span>: [<span style="color:#a3e635">"extract"</span>] },
+    { <span style="color:#a3e635">"name"</span>: <span style="color:#a3e635">"translate"</span>, <span style="color:#a3e635">"rune"</span>: <span style="color:#a3e635">"translate"</span>, <span style="color:#a3e635">"depends_on"</span>: [<span style="color:#a3e635">"extract"</span>] },
+    {
+      <span style="color:#a3e635">"name"</span>: <span style="color:#a3e635">"merge"</span>,
+      <span style="color:#a3e635">"rune"</span>: <span style="color:#a3e635">"merge"</span>,
+      <span style="color:#a3e635">"depends_on"</span>: [<span style="color:#a3e635">"analyze"</span>, <span style="color:#a3e635">"translate"</span>],
+      <span style="color:#a3e635">"input_mapping"</span>: {
+        <span style="color:#a3e635">"analysis"</span>: <span style="color:#a3e635">"analyze"</span>,
+        <span style="color:#a3e635">"translation"</span>: <span style="color:#a3e635">"translate"</span>
+      }
+    }
+  ],
+  <span style="color:#a3e635">"gate_path"</span>: <span style="color:#a3e635">"/pipeline/etl"</span>
+}</code></pre>
+    </div>
+
+    <div class="card-grid reveal">
+      <div class="card">
+        <div class="card-name"><span class="en">Parallel execution</span><span class="zh">并行执行</span></div>
+        <div class="card-sub">automatic</div>
+        <div class="card-desc"><span class="en"><code>analyze</code> and <code>translate</code> both depend on <code>extract</code> &mdash; the engine runs them in parallel automatically.</span><span class="zh"><code>analyze</code> 和 <code>translate</code> 都依赖 <code>extract</code> &mdash; 引擎自动并行执行。</span></div>
+      </div>
+      <div class="card">
+        <div class="card-name"><span class="en">Input mapping</span><span class="zh">输入映射</span></div>
+        <div class="card-sub">fan-in</div>
+        <div class="card-desc"><span class="en"><code>merge</code> receives outputs from both upstream steps, keyed by name. No manual plumbing.</span><span class="zh"><code>merge</code> 接收上游两个步骤的输出，按名称索引。无需手动拼接。</span></div>
+      </div>
+      <div class="card">
+        <div class="card-name"><span class="en">Failure isolation</span><span class="zh">故障隔离</span></div>
+        <div class="card-sub">guarantee #17</div>
+        <div class="card-desc"><span class="en">If <code>analyze</code> fails, <code>translate</code>'s completed result is preserved. Only downstream dependents are skipped.</span><span class="zh"><code>analyze</code> 失败时，<code>translate</code> 已完成的结果保留。只跳过下游依赖。</span></div>
+      </div>
+      <div class="card">
+        <div class="card-name"><span class="en">Same invoker</span><span class="zh">同一 Invoker</span></div>
+        <div class="card-sub">guarantee #12</div>
+        <div class="card-desc"><span class="en">Flow steps use the same RuneInvoker as direct calls. Routing, backpressure, timeouts &mdash; all identical.</span><span class="zh">Flow 步骤使用与直接调用相同的 RuneInvoker。路由、背压、超时 &mdash; 完全一致。</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 07. Performance -->
+<section id="performance">
+  <div class="wrap">
+    <div class="sn reveal">07</div>
+    <h2 class="reveal">
+      <span class="en">Nanoseconds, not milliseconds.</span>
+      <span class="zh">纳秒级，不是毫秒级。</span>
+    </h2>
+    <p class="reveal">
+      <span class="en">Rune's runtime overhead is measured in nanoseconds. These benchmarks are from the Rust test suite &mdash; the cost of the framework itself, not network or handler execution time.</span>
+      <span class="zh">Rune 的运行时开销以纳秒计。这些基准测试来自 Rust 测试套件 &mdash; 衡量的是框架本身的成本，不包含网络或 handler 执行时间。</span>
+    </p>
+
+    <div class="stats reveal">
+      <div class="stat">
+        <div class="stat-val" data-target="36">36</div>
+        <div class="stat-lbl">ns &middot; Relay Resolve</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" data-target="119">119</div>
+        <div class="stat-lbl">ns &middot; Local Invoke</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" data-target="22">22</div>
+        <div class="stat-lbl">&micro;s &middot; DAG Execute</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" data-target="377">377</div>
+        <div class="stat-lbl">ns &middot; Schema Validate</div>
+      </div>
+    </div>
+
+    <div class="table-wrap reveal">
+      <table>
+        <thead>
+          <tr>
+            <th><span class="en">Operation</span><span class="zh">操作</span></th>
+            <th><span class="en">Latency</span><span class="zh">延迟</span></th>
+            <th><span class="en">What it measures</span><span class="zh">衡量内容</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Relay resolve</td>
+            <td><code>36 ns</code></td>
+            <td><span class="en">Look up a rune by name in the DashMap registry</span><span class="zh">在 DashMap 注册表中按名称查找 Rune</span></td>
+          </tr>
+          <tr>
+            <td>Local invoke</td>
+            <td><code>119 ns</code></td>
+            <td><span class="en">Full local invocation path (resolve + dispatch + return)</span><span class="zh">完整本地调用路径（解析 + 分发 + 返回）</span></td>
+          </tr>
+          <tr>
+            <td>DAG execute</td>
+            <td><code>22 &micro;s</code></td>
+            <td><span class="en">Topo-sort + parallel step dispatch for a 4-step DAG</span><span class="zh">4 步 DAG 的拓扑排序 + 并行步骤分发</span></td>
+          </tr>
+          <tr>
+            <td>Schema validate</td>
+            <td><code>377 ns</code></td>
+            <td><span class="en">JSON Schema validation with compiled/cached schema</span><span class="zh">使用编译/缓存的 JSON Schema 校验</span></td>
+          </tr>
+          <tr>
+            <td>Gate routing</td>
+            <td><code>&lt;1 &micro;s</code></td>
+            <td><span class="en">HTTP path &rarr; rune name lookup via Axum router</span><span class="zh">HTTP 路径 &rarr; 通过 Axum 路由查找 Rune 名称</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="reveal" style="font-size:.88rem;color:var(--fg-3)">
+      <span class="en">The runtime adds nanoseconds, not milliseconds. Your bottleneck is your code and the network &mdash; never the framework. All benchmarks run on <code>cargo bench</code> with criterion.</span>
+      <span class="zh">Runtime 增加的是纳秒，不是毫秒。你的瓶颈是你的代码和网络 &mdash; 永远不是框架。所有基准测试通过 <code>cargo bench</code> + criterion 运行。</span>
+    </p>
+  </div>
+</section>
+
+<!-- 08. Comparison -->
+<section id="comparison">
+  <div class="wrap-wide">
+    <div class="sn reveal">08</div>
+    <h2 class="reveal">
+      <span class="en">Honest comparison.</span>
+      <span class="zh">诚实对比。</span>
+    </h2>
+    <p class="reveal" style="max-width:65ch">
+      <span class="en">Rune isn't trying to replace everything. Here's where it fits &mdash; and where it doesn't.</span>
+      <span class="zh">Rune 不试图替代一切。以下是它适合的地方 &mdash; 和不适合的地方。</span>
+    </p>
+
+    <div class="table-wrap reveal">
+      <table>
+        <thead>
+          <tr>
+            <th><span class="en">Dimension</span><span class="zh">维度</span></th>
+            <th class="row-hl">Rune</th>
+            <th>Lambda</th>
+            <th>Workers</th>
+            <th>Temporal</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="en">Invocation modes</span><span class="zh">调用模式</span></td>
+            <td><strong><span class="en">3 from 1 function</span><span class="zh">1 个函数 3 种模式</span></strong></td>
+            <td><span class="en">1 (sync)</span><span class="zh">1（同步）</span></td>
+            <td><span class="en">1 (sync)</span><span class="zh">1（同步）</span></td>
+            <td>N/A</td>
+          </tr>
+          <tr>
+            <td><span class="en">Protocol guarantees</span><span class="zh">协议保证</span></td>
+            <td><strong><span class="en">18 explicit</span><span class="zh">18 条显式</span></strong></td>
+            <td><span class="en">Best effort</span><span class="zh">尽力而为</span></td>
+            <td><span class="en">Best effort</span><span class="zh">尽力而为</span></td>
+            <td><span class="en">Strong (different domain)</span><span class="zh">强（不同领域）</span></td>
+          </tr>
+          <tr>
+            <td><span class="en">Multi-language</span><span class="zh">多语言</span></td>
+            <td><strong><span class="en">Same DAG, mixed</span><span class="zh">同 DAG 混排</span></strong></td>
+            <td><span class="en">Single per function</span><span class="zh">每函数单语言</span></td>
+            <td>JS / Wasm</td>
+            <td><span class="en">Multi-language</span><span class="zh">多语言</span></td>
+          </tr>
+          <tr>
+            <td><span class="en">Self-hosted</span><span class="zh">自托管</span></td>
+            <td><strong><span class="en">Native</span><span class="zh">原生</span></strong></td>
+            <td><span class="en">No</span><span class="zh">否</span></td>
+            <td><span class="en">No</span><span class="zh">否</span></td>
+            <td><span class="en">Yes</span><span class="zh">是</span></td>
+          </tr>
+          <tr>
+            <td><span class="en">Workflows</span><span class="zh">工作流</span></td>
+            <td><strong><span class="en">Built-in Flow</span><span class="zh">内置 Flow</span></strong></td>
+            <td>Step Functions ($$$)</td>
+            <td><span class="en">None</span><span class="zh">无</span></td>
+            <td><span class="en">Core capability</span><span class="zh">核心能力</span></td>
+          </tr>
+          <tr>
+            <td><span class="en">Cold start</span><span class="zh">冷启动</span></td>
+            <td><strong><span class="en">None</span><span class="zh">无</span></strong></td>
+            <td>100ms - 10s</td>
+            <td>~0ms</td>
+            <td><span class="en">None</span><span class="zh">无</span></td>
+          </tr>
+          <tr>
+            <td><span class="en">Real SSE streaming</span><span class="zh">真 SSE 流式</span></td>
+            <td class="check"><strong>&#10003;</strong></td>
+            <td class="cross">&#10007;</td>
+            <td class="cross">&#10007;</td>
+            <td class="cross">&#10007;</td>
+          </tr>
+          <tr>
+            <td><span class="en">Runtime overhead</span><span class="zh">运行时开销</span></td>
+            <td><strong>~100ns</strong></td>
+            <td>~10ms</td>
+            <td>~1ms</td>
+            <td>~5ms</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="reveal" style="margin-top:2rem"><span class="en">What Rune is NOT</span><span class="zh">Rune 不是什么</span></h3>
+    <div class="two-col reveal" style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin:1rem 0">
+      <div>
+        <h4 style="color:var(--green)">Rune is</h4>
+        <ul style="list-style:none;font-size:.88rem;line-height:2">
+          <li style="color:var(--fg-2)"><span style="color:var(--green);font-weight:700">+</span> <span class="en">Self-hosted runtime you control</span><span class="zh">你掌控的自托管运行时</span></li>
+          <li style="color:var(--fg-2)"><span style="color:var(--green);font-weight:700">+</span> <span class="en">Protocol-first with explicit guarantees</span><span class="zh">协议优先 + 显式保证</span></li>
+          <li style="color:var(--fg-2)"><span style="color:var(--green);font-weight:700">+</span> <span class="en">Zero cold start, nanosecond overhead</span><span class="zh">零冷启动，纳秒级开销</span></li>
+          <li style="color:var(--fg-2)"><span style="color:var(--green);font-weight:700">+</span> <span class="en">True polyglot with mixed-language DAGs</span><span class="zh">真多语言 + 混排 DAG</span></li>
+          <li style="color:var(--fg-2)"><span style="color:var(--green);font-weight:700">+</span> <span class="en">Built-in workflows, streaming, async</span><span class="zh">内置工作流、流式、异步</span></li>
+        </ul>
+      </div>
+      <div>
+        <h4 style="color:var(--accent)"><span class="en">Rune is not</span><span class="zh">Rune 不是</span></h4>
+        <ul style="list-style:none;font-size:.88rem;line-height:2">
+          <li style="color:var(--fg-2)"><span style="color:var(--accent);font-weight:700">&minus;</span> <span class="en">A managed cloud service</span><span class="zh">托管云服务</span></li>
+          <li style="color:var(--fg-2)"><span style="color:var(--accent);font-weight:700">&minus;</span> <span class="en">An event-source integration (no SQS/Kafka triggers)</span><span class="zh">事件源集成（无 SQS/Kafka 触发器）</span></li>
+          <li style="color:var(--fg-2)"><span style="color:var(--accent);font-weight:700">&minus;</span> <span class="en">A durable execution engine (that's Temporal's job)</span><span class="zh">持久化执行引擎（那是 Temporal 的活）</span></li>
+          <li style="color:var(--fg-2)"><span style="color:var(--accent);font-weight:700">&minus;</span> <span class="en">A full workflow platform (no retry policies yet)</span><span class="zh">完整的工作流平台（暂无重试策略）</span></li>
+          <li style="color:var(--fg-2)"><span style="color:var(--accent);font-weight:700">&minus;</span> <span class="en">Zero-ops &mdash; you run the infrastructure</span><span class="zh">零运维 &mdash; 基础设施你得自己跑</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 09. Get Started -->
+<section id="start">
+  <div class="wrap">
+    <div class="sn reveal">09</div>
+    <h2 class="reveal">
+      <span class="en">60 seconds to running.</span>
+      <span class="zh">60 秒跑起来。</span>
+    </h2>
+
+    <h3 class="reveal"><span class="en">Start the runtime</span><span class="zh">启动 Runtime</span></h3>
+    <div class="shell reveal">
+<span class="comment"># Option A: Docker (fastest)</span>
+<span class="prompt">$ </span><span class="cmd">docker run -p 50060:50060 -p 50070:50070 ghcr.io/chasey-myagi/rune-server:latest --dev</span>
+
+<span class="comment"># Option B: From source</span>
+<span class="prompt">$ </span><span class="cmd">cargo install rune-server</span>
+<span class="prompt">$ </span><span class="cmd">rune start --dev</span>
+    </div>
+
+    <h3 class="reveal"><span class="en">Write a Caster</span><span class="zh">编写 Caster</span></h3>
+    <div class="code-group cols-3 reveal">
+      <div>
+        <div class="code-label">Python</div>
+        <div class="shell" style="font-size:.72rem">
+<span class="prompt">$ </span><span class="cmd">pip install rune-framework</span>
+<span class="prompt">$ </span><span class="cmd">python my_caster.py</span>
+        </div>
+      </div>
+      <div>
+        <div class="code-label">TypeScript</div>
+        <div class="shell" style="font-size:.72rem">
+<span class="prompt">$ </span><span class="cmd">npm i @rune-framework/caster</span>
+<span class="prompt">$ </span><span class="cmd">npx tsx my_caster.ts</span>
+        </div>
+      </div>
+      <div>
+        <div class="code-label">Rust</div>
+        <div class="shell" style="font-size:.72rem">
+<span class="comment"># Cargo.toml</span>
+<span class="cmd">rune-framework = "1.2.0"</span>
+<span class="prompt">$ </span><span class="cmd">cargo run</span>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="reveal"><span class="en">Call your function</span><span class="zh">调用你的函数</span></h3>
+    <div class="shell reveal">
+<span class="prompt">$ </span><span class="cmd">curl -X POST localhost:50060/echo -d '{"message":"hello rune"}'</span>
+<span class="comment"># {"message":"hello rune"}</span>
+    </div>
+
+    <div class="callout callout-green reveal">
+      <span class="en"><strong>That's it.</strong> No YAML. No Dockerfile. No IAM role. No cold start. Your function is live, and it already supports sync, streaming, and async modes.</span>
+      <span class="zh"><strong>就这样。</strong>没有 YAML。没有 Dockerfile。没有 IAM 角色。没有冷启动。你的函数已经上线，同时支持同步、流式和异步三种模式。</span>
+    </div>
+  </div>
+</section>
+
+<!-- 10. What's Next -->
+<section id="next">
+  <div class="wrap">
+    <div class="sn reveal">10</div>
+    <h2 class="reveal"><span class="en">What's next</span><span class="zh">接下来</span></h2>
+
+    <div class="card-grid reveal">
+      <div class="card">
+        <div class="card-name">Sage</div>
+        <div class="card-sub">AI Agent Framework</div>
+        <div class="card-desc"><span class="en">An AI agent framework built on Rune. Agents as Casters, tools as Runes, orchestration as Flows. Coming soon.</span><span class="zh">基于 Rune 构建的 AI Agent 框架。Agent 即 Caster，工具即 Rune，编排即 Flow。即将推出。</span></div>
+      </div>
+      <div class="card">
+        <div class="card-name">Go SDK</div>
+        <div class="card-sub">in development</div>
+        <div class="card-desc"><span class="en">Fourth language SDK. Same protocol, same guarantees, same wire format.</span><span class="zh">第四种语言 SDK。同协议、同保证、同线路格式。</span></div>
+      </div>
+      <div class="card">
+        <div class="card-name">Runeforge</div>
+        <div class="card-sub">management UI</div>
+        <div class="card-desc"><span class="en">Visual management console for Rune deployments. Monitor Casters, inspect Flows, browse invocation logs.</span><span class="zh">Rune 部署的可视化管理控制台。监控 Caster、查看 Flow、浏览调用日志。</span></div>
+      </div>
+      <div class="card">
+        <div class="card-name">Event Sources</div>
+        <div class="card-sub">roadmap</div>
+        <div class="card-desc"><span class="en">Trigger Runes from external events &mdash; webhooks, message queues, cron schedules.</span><span class="zh">通过外部事件触发 Rune &mdash; Webhook、消息队列、定时调度。</span></div>
+      </div>
+    </div>
+
+    <div class="verdict reveal">
+      <h3><span class="en">Rune v1.2.0 is available now.</span><span class="zh">Rune v1.2.0 现已发布。</span></h3>
+      <p>
+        <span class="en">10 Rust crates. 3 SDKs. 18 guarantees. Zero cold start. If you're tired of gluing together managed services to run a function, give Rune 60 seconds. Write the function. Decorate it. Ship it.</span>
+        <span class="zh">10 个 Rust crate。3 个 SDK。18 条保证。零冷启动。如果你厌倦了为跑一个函数而拼接各种托管服务，给 Rune 60 秒。写函数。加装饰器。发布。</span>
+      </p>
+      <p style="margin-top:1rem">
+        <a href="https://github.com/chasey-myagi/rune" style="font-weight:700">GitHub</a> &nbsp;&middot;&nbsp;
+        <a href="https://pypi.org/project/rune-framework/">PyPI</a> &nbsp;&middot;&nbsp;
+        <a href="https://www.npmjs.com/package/@rune-framework/caster">npm</a> &nbsp;&middot;&nbsp;
+        <a href="https://crates.io/crates/rune-framework">crates.io</a> &nbsp;&middot;&nbsp;
+        <a href="https://ghcr.io/chasey-myagi/rune-server">Docker</a>
+      </p>
+    </div>
+
+    <div class="quote reveal">
+      <p>
+        <span class="en">"If any of these guarantees is violated, it's a bug. Not a known issue, not a trade-off. A bug."</span>
+        <span class="zh">"如果任何一条保证被违反，那是 bug。不是已知问题，不是权衡，是 bug。"</span>
+      </p>
+      <cite>Rune Protocol Guarantees &mdash; docs/protocol-guarantees.md</cite>
+    </div>
+  </div>
+</section>
+
+<footer style="padding:2rem 0;text-align:center;font-size:.75rem;color:var(--fg-3);background:var(--bg)">
+  <div class="wrap">Rune v1.2.0 &middot; MIT License &middot; Built with Rust</div>
+</footer>
+
+<script>
+// Theme toggle
+const toggle = document.getElementById('themeToggle');
+const icon = document.getElementById('themeIcon');
+function getTheme() {
+  return document.documentElement.getAttribute('data-theme') ||
+    (window.matchMedia('(prefers-color-scheme:dark)').matches ? 'dark' : 'light');
+}
+function setTheme(t) {
+  document.documentElement.setAttribute('data-theme', t);
+  icon.textContent = t === 'dark' ? '\u2600' : '\u263E';
+  try { localStorage.setItem('rune-theme', t); } catch(e) {}
+}
+toggle.addEventListener('click', () => setTheme(getTheme() === 'dark' ? 'light' : 'dark'));
+try {
+  const saved = localStorage.getItem('rune-theme');
+  if (saved) setTheme(saved); else icon.textContent = getTheme() === 'dark' ? '\u2600' : '\u263E';
+} catch(e) {}
+
+// Language toggle
+const langBtn = document.getElementById('langToggle');
+function setLang(lang) {
+  document.documentElement.setAttribute('data-lang', lang);
+  document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+  langBtn.textContent = lang === 'zh' ? '中' : 'EN';
+  try { localStorage.setItem('rune-lang', lang); } catch(e) {}
+}
+langBtn.addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-lang') || 'en';
+  setLang(cur === 'en' ? 'zh' : 'en');
+});
+try {
+  const savedLang = localStorage.getItem('rune-lang');
+  if (savedLang) setLang(savedLang);
+} catch(e) {}
+
+// Progress bar
+const progress = document.getElementById('progress');
+function updateProgress() {
+  const h = document.documentElement.scrollHeight - window.innerHeight;
+  progress.style.width = h > 0 ? (window.scrollY / h * 100) + '%' : '0%';
+}
+window.addEventListener('scroll', updateProgress, { passive: true });
+
+// Back to top
+const backTop = document.getElementById('backTop');
+window.addEventListener('scroll', () => {
+  backTop.classList.toggle('show', window.scrollY > 600);
+}, { passive: true });
+backTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+
+// Scroll reveal
+const reveals = document.querySelectorAll('.reveal');
+const revealObs = new IntersectionObserver((entries) => {
+  entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('visible'); revealObs.unobserve(e.target); } });
+}, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+reveals.forEach(el => revealObs.observe(el));
+
+// Nav active tracking
+const navLinks = document.querySelectorAll('.nav a');
+const sections = document.querySelectorAll('section[id]');
+const navObs = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      navLinks.forEach(a => a.classList.remove('active'));
+      const link = document.querySelector('.nav a[href="#' + e.target.id + '"]');
+      if (link) link.classList.add('active');
+    }
+  });
+}, { threshold: 0.3, rootMargin: '-60px 0px -40% 0px' });
+sections.forEach(s => navObs.observe(s));
+
+// Stat counter animation
+const motionOk = !window.matchMedia('(prefers-reduced-motion:reduce)').matches;
+if (motionOk) {
+  const statVals = document.querySelectorAll('.stat-val[data-target]');
+  const statObs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (!e.isIntersecting) return;
+      const el = e.target;
+      const target = parseInt(el.dataset.target);
+      const duration = 800;
+      const start = performance.now();
+      function tick(now) {
+        const t = Math.min((now - start) / duration, 1);
+        const ease = 1 - Math.pow(1 - t, 4);
+        el.textContent = Math.round(target * ease);
+        if (t < 1) requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+      statObs.unobserve(el);
+    });
+  }, { threshold: 0.5 });
+  statVals.forEach(el => statObs.observe(el));
+}
+</script>
+</body>
+</html>

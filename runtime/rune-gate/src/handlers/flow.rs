@@ -10,7 +10,7 @@ use axum::{
 use bytes::Bytes;
 use rune_core::trace::TRACE_ID_KEY;
 use rune_flow::dag::FlowDefinition;
-use rune_flow::engine::FlowRunner;
+use rune_flow::engine::{FlowProgressEvent, FlowRunner};
 use rune_store::{StoreError, TaskStatus};
 use tokio::sync::mpsc;
 
@@ -350,10 +350,13 @@ pub async fn run_flow_async(
         Err(_) => format!("hex:{}", hex::encode(&body)),
     };
 
+    // Insert task and mark it Running atomically.  A single transaction
+    // prevents a crash between the two steps from leaving the task in
+    // a permanently-pending state.
     if let Err(e) = state
         .admin
         .store
-        .insert_task(&task_id, &format!("flow:{}", flow_name), Some(&input_str))
+        .insert_task_and_start(&task_id, &format!("flow:{}", flow_name), Some(&input_str))
         .await
     {
         return traced_response(
@@ -367,11 +370,6 @@ pub async fn run_flow_async(
             &trace_context,
         );
     }
-    let _ = state
-        .admin
-        .store
-        .update_task_status(&task_id, TaskStatus::Running, None, None)
-        .await;
 
     let store = Arc::clone(&state.admin.store);
     let tid = task_id.clone();
@@ -440,10 +438,25 @@ pub async fn run_flow_stream(
     trace_context: std::collections::HashMap<String, String>,
     request_id: String,
 ) -> axum::response::Response {
-    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
+    let (event_tx, event_rx) = mpsc::channel::<Result<Event, Infallible>>(64);
     let response_trace_context = trace_context.clone();
     let response_request_id = request_id.clone();
 
+    // progress 转发 task：把 FlowProgressEvent 序列化为 SSE "flow_progress" 事件
+    let (progress_tx, mut progress_rx) = mpsc::channel::<FlowProgressEvent>(64);
+    let fwd_tx = event_tx.clone();
+    tokio::spawn(async move {
+        while let Some(evt) = progress_rx.recv().await {
+            let data = serde_json::to_string(&evt).unwrap_or_default();
+            let sse_evt = Event::default().event("flow_progress").data(data);
+            if fwd_tx.send(Ok(sse_evt)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // 主执行 task
+    let runner = runner.with_progress(progress_tx);
     tokio::spawn(async move {
         match runner
             .execute_flow_with_context(&flow_def, body, trace_context.clone(), Some(request_id))
@@ -456,22 +469,22 @@ pub async fn run_flow_stream(
                     "output": output_json,
                     "steps_executed": result.steps_executed,
                 });
-                let _ = tx
+                let _ = event_tx
                     .send(Ok(Event::default().event("result").data(msg.to_string())))
                     .await;
-                let _ = tx
+                let _ = event_tx
                     .send(Ok(Event::default().event("done").data("[DONE]")))
                     .await;
             }
             Err(e) => {
-                let _ = tx
+                let _ = event_tx
                     .send(Ok(Event::default().event("error").data(e.to_string())))
                     .await;
             }
         }
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx);
     let mut response = Sse::new(stream).into_response();
     apply_trace_response_headers(&mut response, &response_request_id, &response_trace_context);
     response

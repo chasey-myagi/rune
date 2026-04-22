@@ -1,11 +1,49 @@
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, middleware::Next};
+use axum::{
+    extract::State,
+    http::{HeaderValue, StatusCode},
+    middleware::Next,
+};
 use sha2::{Digest, Sha256};
 
 use crate::error::error_response;
 use crate::handlers::rune::parse_labels_header;
 use crate::state::GateState;
+
+/// Append hardened security response headers to every reply.
+///
+/// These headers are defence-in-depth; they do not replace proper CORS /
+/// authentication configuration but prevent a class of browser-based attacks
+/// when the API is accessed from a web context.
+pub async fn security_headers_middleware(
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let h = response.headers_mut();
+    // Prevent MIME-type sniffing (mitigates XSS via uploaded files).
+    h.insert(
+        axum::http::header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    // Forbid embedding in frames (clickjacking).
+    h.insert(
+        axum::http::header::HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    // Legacy XSS filter hint for older browsers.
+    h.insert(
+        axum::http::header::HeaderName::from_static("x-xss-protection"),
+        HeaderValue::from_static("1; mode=block"),
+    );
+    // Don't leak Referer to third parties.
+    h.insert(
+        axum::http::header::HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    response
+}
 
 /// Zero-allocation exempt route check.
 /// Matches exact path or path prefix followed by '/'.

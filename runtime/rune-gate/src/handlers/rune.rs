@@ -3,6 +3,26 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Emit a single request's business metrics after execution completes.
+fn record_rune_metrics(rune_name: &str, mode: &'static str, status_code: i32, latency_ms: i64) {
+    let status: &'static str = if status_code < 400 { "ok" } else { "error" };
+    let labels = vec![
+        metrics::Label::new("rune", rune_name.to_owned()),
+        metrics::Label::new("mode", mode),
+        metrics::Label::new("status", status),
+    ];
+    metrics::histogram!("rune_request_duration_seconds", labels.clone())
+        .record(latency_ms.max(0) as f64 / 1000.0);
+    metrics::counter!("rune_requests_total", labels).increment(1);
+    if status_code >= 400 {
+        let err_labels = vec![
+            metrics::Label::new("rune", rune_name.to_owned()),
+            metrics::Label::new("mode", mode),
+        ];
+        metrics::counter!("rune_errors_total", err_labels).increment(1);
+    }
+}
+
 use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
@@ -358,9 +378,10 @@ pub async fn execute_rune(req: ExecuteRequest<'_>) -> axum::response::Response {
         sync_execute(invoker, ctx, rune_input, output_schema).await
     };
 
-    // Record call log (best-effort)
+    // Record call log (best-effort) and emit metrics.
     let latency_ms = start.elapsed().as_millis() as i64;
     let status_code = response.status().as_u16() as i32;
+    record_rune_metrics(&rune_name_owned, mode, status_code, latency_ms);
     let _ = state
         .admin
         .store
@@ -564,8 +585,9 @@ pub async fn stream_execute(
             }
         }
 
-        // Record call log for stream mode (best-effort)
+        // Record call log for stream mode (best-effort) and emit metrics.
         let latency_ms = start.elapsed().as_millis() as i64;
+        record_rune_metrics(&rune_name_log, "stream", status_code, latency_ms);
         let _ = state_clone
             .admin
             .store
@@ -606,28 +628,13 @@ pub async fn async_execute(
         Err(_) => format!("hex:{}", hex::encode(&body)),
     };
 
-    // Insert task into store
+    // Insert task and mark it Running atomically.  A single transaction
+    // prevents a crash between the two steps from leaving the task in
+    // a permanently-pending state.
     if let Err(e) = state
         .admin
         .store
-        .insert_task(&task_id, &rune_name, Some(&input_str))
-        .await
-    {
-        return traced_response(
-            error_response_with_id(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL",
-                &e.to_string(),
-                Some(&request_id),
-            ),
-            &request_id,
-            &trace_context,
-        );
-    }
-    if let Err(e) = state
-        .admin
-        .store
-        .update_task_status(&task_id, TaskStatus::Running, None, None)
+        .insert_task_and_start(&task_id, &rune_name, Some(&input_str))
         .await
     {
         return traced_response(
@@ -690,8 +697,9 @@ pub async fn async_execute(
             }
         };
 
-        // Record call log
+        // Record call log and emit metrics.
         let latency_ms = start.elapsed().as_millis() as i64;
+        record_rune_metrics(&rune_name_log, "async", status, latency_ms);
         let _ = store
             .insert_log(&CallLog {
                 id: 0,
