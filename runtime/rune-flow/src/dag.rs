@@ -502,14 +502,7 @@ pub fn validate_dag(flow: &FlowDefinition) -> Result<(), DagError> {
     let operators = ["==", "!=", ">=", "<=", ">", "<"];
     for s in steps {
         validate_condition_syntax(&s.name, &s.condition, &operators)?;
-        if let Some(r) = &s.retry {
-            if r.max_attempts == 0 {
-                return Err(DagError::InvalidRetryConfig {
-                    step: s.name.clone(),
-                    reason: "max_attempts must be >= 1 (includes the initial attempt)".into(),
-                });
-            }
-        }
+        validate_retry_config(&s.name, &s.retry)?;
         match &s.kind {
             StepKind::Loop(lc) => validate_loop_config(&s.name, lc, &operators)?,
             StepKind::Map(mc) => validate_map_config(&s.name, mc, &operators)?,
