@@ -5,7 +5,14 @@ use std::time::{Duration, Instant};
 
 /// Emit a single request's business metrics after execution completes.
 fn record_rune_metrics(rune_name: &str, mode: &'static str, status_code: i32, latency_ms: i64) {
-    let status: &'static str = if status_code < 400 { "ok" } else { "error" };
+    let status: &'static str = if status_code < 400 {
+        "ok"
+    } else if status_code == 499 {
+        // 499 Client Closed Request — client-side disconnect, not a server error.
+        "client_disconnect"
+    } else {
+        "error"
+    };
     let labels = vec![
         metrics::Label::new("rune", rune_name.to_owned()),
         metrics::Label::new("mode", mode),
@@ -14,7 +21,8 @@ fn record_rune_metrics(rune_name: &str, mode: &'static str, status_code: i32, la
     metrics::histogram!("rune_request_duration_seconds", labels.clone())
         .record(latency_ms.max(0) as f64 / 1000.0);
     metrics::counter!("rune_requests_total", labels).increment(1);
-    if status_code >= 400 {
+    // Exclude 499 from rune_errors_total: client disconnects are not server faults.
+    if status_code >= 400 && status_code != 499 {
         let err_labels = vec![
             metrics::Label::new("rune", rune_name.to_owned()),
             metrics::Label::new("mode", mode),

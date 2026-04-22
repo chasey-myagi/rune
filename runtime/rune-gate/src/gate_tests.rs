@@ -970,9 +970,10 @@ mod tests {
     }
 
     // =======================================================================
-    // #3  HTTP method mismatch — GET on POST-only gate_path (dynamic fallback)
-    //     The dynamic_rune_handler does not enforce method; it simply matches
-    //     path. This test documents actual behavior.
+    // #3  HTTP method mismatch — GET on POST-only gate_path
+    //     Routing key includes the HTTP method (resolve_by_gate_path uses
+    //     "<METHOD>:<path>"), so GET /echo does not match the POST:/echo entry
+    //     and returns 404.
     // =======================================================================
 
     #[tokio::test]
@@ -4363,16 +4364,18 @@ mod tests {
     // Issue Fix: FileBroker memory leak — complete_request must clean up files
     // =======================================================================
 
-    #[test]
-    fn test_fix_file_broker_cleans_up_files_on_complete() {
+    #[tokio::test]
+    async fn test_fix_file_broker_cleans_up_files_on_complete() {
         // FileBroker should release file data after complete_request
         let broker = FileBroker::new();
-        let file_id = broker.store(
-            "test.txt".into(),
-            "text/plain".into(),
-            Bytes::from("data"),
-            "req-1",
-        );
+        let file_id = broker
+            .store(
+                "test.txt".into(),
+                "text/plain".into(),
+                Bytes::from("data"),
+                "req-1",
+            )
+            .await;
 
         // File should exist
         assert!(broker.get(&file_id).is_some());
@@ -4388,22 +4391,26 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_fix_file_broker_complete_only_removes_own_files() {
+    #[tokio::test]
+    async fn test_fix_file_broker_complete_only_removes_own_files() {
         // complete_request should only clean up files for that request
         let broker = FileBroker::new();
-        let _id1 = broker.store(
-            "a.txt".into(),
-            "text/plain".into(),
-            Bytes::from("aaa"),
-            "req-1",
-        );
-        let id2 = broker.store(
-            "b.txt".into(),
-            "text/plain".into(),
-            Bytes::from("bbb"),
-            "req-2",
-        );
+        let _id1 = broker
+            .store(
+                "a.txt".into(),
+                "text/plain".into(),
+                Bytes::from("aaa"),
+                "req-1",
+            )
+            .await;
+        let id2 = broker
+            .store(
+                "b.txt".into(),
+                "text/plain".into(),
+                Bytes::from("bbb"),
+                "req-2",
+            )
+            .await;
 
         broker.complete_request("req-1");
 
@@ -8042,12 +8049,16 @@ mod tests {
 
         // Manually store a file in the broker as if uploaded via multipart
         let request_id = "test-req-cleanup";
-        let _file_id = state.rune.file_broker.store(
-            "test.txt".into(),
-            "text/plain".into(),
-            Bytes::from("file content"),
-            request_id,
-        );
+        let _file_id = state
+            .rune
+            .file_broker
+            .store(
+                "test.txt".into(),
+                "text/plain".into(),
+                Bytes::from("file content"),
+                request_id,
+            )
+            .await;
 
         // Verify file is stored
         assert_eq!(state.rune.file_broker.files.len(), 1);
@@ -8247,20 +8258,22 @@ mod tests {
     // Issue Fix: FileBroker evict_expired throttling
     // ========================================================================
 
-    #[test]
-    fn test_filebroker_evict_throttled() {
+    #[tokio::test]
+    async fn test_filebroker_evict_throttled() {
         // With a very long eviction interval, expired entries should NOT be cleaned
         // by store() calls within the interval — proving eviction is throttled.
         // TTL = 1s, evict_interval = 3600s (1 hour — effectively never during this test)
         let broker = FileBroker::with_ttl(1, 3600);
 
         // Store a file
-        let id1 = broker.store(
-            "a.txt".into(),
-            "text/plain".into(),
-            Bytes::from("aaa"),
-            "req-1",
-        );
+        let id1 = broker
+            .store(
+                "a.txt".into(),
+                "text/plain".into(),
+                Bytes::from("aaa"),
+                "req-1",
+            )
+            .await;
 
         // Wait for the file to expire
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -8268,12 +8281,14 @@ mod tests {
         // The first store() triggered eviction (last_eviction_secs was 0, epoch was just created).
         // But now, the eviction interval hasn't elapsed yet (3600s), so subsequent store()
         // calls should NOT trigger eviction.
-        let _id2 = broker.store(
-            "b.txt".into(),
-            "text/plain".into(),
-            Bytes::from("bbb"),
-            "req-2",
-        );
+        let _id2 = broker
+            .store(
+                "b.txt".into(),
+                "text/plain".into(),
+                Bytes::from("bbb"),
+                "req-2",
+            )
+            .await;
 
         // The expired file (id1) should still be in the DashMap because eviction was throttled.
         // entry_count includes both the expired entry and the new entry.
@@ -8290,31 +8305,35 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_filebroker_evict_runs_when_interval_elapsed() {
+    #[tokio::test]
+    async fn test_filebroker_evict_runs_when_interval_elapsed() {
         // With a very short eviction interval, expired entries SHOULD be cleaned up.
         // TTL = 1s, evict_interval = 0s (always evict)
         let broker = FileBroker::with_ttl(1, 0);
 
         // Store a file
-        let _id1 = broker.store(
-            "a.txt".into(),
-            "text/plain".into(),
-            Bytes::from("aaa"),
-            "req-1",
-        );
+        let _id1 = broker
+            .store(
+                "a.txt".into(),
+                "text/plain".into(),
+                Bytes::from("aaa"),
+                "req-1",
+            )
+            .await;
         assert_eq!(broker.entry_count(), 1);
 
         // Wait for it to expire
         std::thread::sleep(std::time::Duration::from_millis(1100));
 
         // Next store() should trigger eviction because interval is 0
-        let _id2 = broker.store(
-            "b.txt".into(),
-            "text/plain".into(),
-            Bytes::from("bbb"),
-            "req-2",
-        );
+        let _id2 = broker
+            .store(
+                "b.txt".into(),
+                "text/plain".into(),
+                Bytes::from("bbb"),
+                "req-2",
+            )
+            .await;
 
         // Expired entry should have been evicted
         assert_eq!(
@@ -8333,12 +8352,16 @@ mod tests {
         let state = test_state();
 
         // Store a file whose name contains a double-quote character
-        let file_id = state.rune.file_broker.store(
-            r#"evil"name.txt"#.to_string(),
-            "application/octet-stream".to_string(),
-            bytes::Bytes::from_static(b"data"),
-            "req-esc",
-        );
+        let file_id = state
+            .rune
+            .file_broker
+            .store(
+                r#"evil"name.txt"#.to_string(),
+                "application/octet-stream".to_string(),
+                bytes::Bytes::from_static(b"data"),
+                "req-esc",
+            )
+            .await;
 
         let app = build_router(state, None);
         let resp = app
@@ -8754,12 +8777,16 @@ mod tests {
         // After removing .to_vec(), download should still return correct data
         let state = test_state();
         let data = Bytes::from("file content here");
-        let file_id = state.rune.file_broker.store(
-            "test.txt".into(),
-            "text/plain".into(),
-            data.clone(),
-            "req-1",
-        );
+        let file_id = state
+            .rune
+            .file_broker
+            .store(
+                "test.txt".into(),
+                "text/plain".into(),
+                data.clone(),
+                "req-1",
+            )
+            .await;
 
         let app = build_router(state, None);
         let resp = app

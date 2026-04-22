@@ -125,7 +125,7 @@ impl FileBroker {
     }
 
     /// Store a file and return its unique file_id.
-    pub fn store(
+    pub async fn store(
         &self,
         filename: String,
         mime_type: String,
@@ -140,14 +140,18 @@ impl FileBroker {
         let storage = if data.len() > DISK_THRESHOLD {
             if let Some(dir) = &self.disk_dir {
                 let path = dir.join(&file_id);
-                // Write to disk. For large files this is blocking I/O, but store()
-                // is called synchronously from multipart parsing which already has
-                // the full body in memory. The write latency is bounded by file size
-                // and is a one-time cost per upload.
-                match std::fs::write(&path, &data) {
-                    Ok(()) => FileStorage::Disk { path },
-                    Err(e) => {
+                let data_clone = data.clone();
+                match tokio::task::spawn_blocking(move || std::fs::write(&path, &data_clone)).await
+                {
+                    Ok(Ok(())) => FileStorage::Disk {
+                        path: dir.join(&file_id),
+                    },
+                    Ok(Err(e)) => {
                         tracing::warn!(file_id = %file_id, error = %e, "disk spill failed, keeping in memory");
+                        FileStorage::Memory(data)
+                    }
+                    Err(e) => {
+                        tracing::warn!(file_id = %file_id, error = %e, "disk spill task panicked, keeping in memory");
                         FileStorage::Memory(data)
                     }
                 }
@@ -273,12 +277,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let broker = FileBroker::with_disk_dir(dir.path().to_path_buf());
         let data = Bytes::from(vec![0u8; 1024]); // 1KB — 小文件
-        let file_id = broker.store(
-            "small.txt".into(),
-            "text/plain".into(),
-            data.clone(),
-            "req1",
-        );
+        let file_id = broker
+            .store(
+                "small.txt".into(),
+                "text/plain".into(),
+                data.clone(),
+                "req1",
+            )
+            .await;
 
         let stored = broker.get(&file_id).unwrap();
         assert_eq!(stored.data().unwrap(), data);
@@ -292,12 +298,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let broker = FileBroker::with_disk_dir(dir.path().to_path_buf());
         let data = Bytes::from(vec![42u8; 5 * 1024 * 1024]); // 5MB — 大文件
-        let file_id = broker.store(
-            "large.bin".into(),
-            "application/octet-stream".into(),
-            data.clone(),
-            "req2",
-        );
+        let file_id = broker
+            .store(
+                "large.bin".into(),
+                "application/octet-stream".into(),
+                data.clone(),
+                "req2",
+            )
+            .await;
 
         let stored = broker.get(&file_id).unwrap();
         assert_eq!(stored.data().unwrap(), data);
@@ -314,24 +322,28 @@ mod tests {
         broker.evict_interval_secs = 0; // 不限制 evict 频率
 
         let data = Bytes::from(vec![42u8; 5 * 1024 * 1024]); // 5MB
-        let file_id = broker.store(
-            "large.bin".into(),
-            "application/octet-stream".into(),
-            data,
-            "req3",
-        );
+        let file_id = broker
+            .store(
+                "large.bin".into(),
+                "application/octet-stream".into(),
+                data,
+                "req3",
+            )
+            .await;
 
         // 文件应已过期
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert!(broker.get(&file_id).is_none());
 
         // 触发一次 store 来触发 eviction
-        let _ = broker.store(
-            "trigger.txt".into(),
-            "text/plain".into(),
-            Bytes::from("x"),
-            "req4",
-        );
+        let _ = broker
+            .store(
+                "trigger.txt".into(),
+                "text/plain".into(),
+                Bytes::from("x"),
+                "req4",
+            )
+            .await;
 
         // spawn_blocking 是 fire-and-forget，需要等待删除完成
         tokio::task::yield_now().await;
@@ -347,12 +359,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let broker = FileBroker::with_disk_dir(dir.path().to_path_buf());
         let data = Bytes::from(vec![42u8; 5 * 1024 * 1024]); // 5MB
-        let _file_id = broker.store(
-            "large.bin".into(),
-            "application/octet-stream".into(),
-            data,
-            "req5",
-        );
+        let _file_id = broker
+            .store(
+                "large.bin".into(),
+                "application/octet-stream".into(),
+                data,
+                "req5",
+            )
+            .await;
 
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 
