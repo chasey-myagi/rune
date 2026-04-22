@@ -296,6 +296,15 @@ impl FlowRunner {
         // 解析 flow 原始输入为 JSON（用于 $input 引用和 condition 上下文）
         let flow_input_json: Option<serde_json::Value> = serde_json::from_slice(&input).ok();
         let mut first_error: Option<FlowError> = None;
+        let flow_start = std::time::Instant::now();
+
+        tracing::debug!(
+            flow = %flow.name,
+            request_id = %flow_request_id,
+            steps = flow.steps.len(),
+            layers = layers.len(),
+            "flow execution started"
+        );
 
         for layer in &layers {
             // 确定每个 step 是否 skip
@@ -621,6 +630,12 @@ impl FlowRunner {
                 match result {
                     Ok(Ok((idx, output))) => {
                         let step_def = &flow.steps[idx];
+                        tracing::debug!(
+                            flow = %flow.name,
+                            step = %step_def.name,
+                            output_bytes = output.len(),
+                            "step completed"
+                        );
                         step_statuses.insert(
                             step_def.name.clone(),
                             StepStatus::Completed {
@@ -632,6 +647,12 @@ impl FlowRunner {
                     }
                     Ok(Err((idx, rune_err))) => {
                         let step_def = &flow.steps[idx];
+                        tracing::warn!(
+                            flow = %flow.name,
+                            step = %step_def.name,
+                            error = %rune_err,
+                            "step failed"
+                        );
                         step_statuses.insert(
                             step_def.name.clone(),
                             StepStatus::Failed {
@@ -682,15 +703,47 @@ impl FlowRunner {
                 )
             });
 
+        let duration_ms = flow_start.elapsed().as_millis();
         if terminal_succeeded {
+            tracing::debug!(
+                flow = %flow.name,
+                duration_ms,
+                steps_executed,
+                "flow completed"
+            );
+            metrics::counter!("flow_executions_total", "flow" => flow.name.clone(), "status" => "ok")
+                .increment(1);
+            metrics::histogram!("flow_duration_ms", "flow" => flow.name.clone())
+                .record(duration_ms as f64);
             Ok(FlowResult {
                 output,
                 steps: step_statuses,
                 steps_executed,
             })
         } else if let Some(err) = first_error {
+            tracing::warn!(
+                flow = %flow.name,
+                duration_ms,
+                steps_executed,
+                error = %err,
+                "flow failed"
+            );
+            metrics::counter!("flow_executions_total", "flow" => flow.name.clone(), "status" => "error")
+                .increment(1);
+            metrics::histogram!("flow_duration_ms", "flow" => flow.name.clone())
+                .record(duration_ms as f64);
             Err(err)
         } else {
+            tracing::debug!(
+                flow = %flow.name,
+                duration_ms,
+                steps_executed,
+                "flow completed (no terminal step output)"
+            );
+            metrics::counter!("flow_executions_total", "flow" => flow.name.clone(), "status" => "ok")
+                .increment(1);
+            metrics::histogram!("flow_duration_ms", "flow" => flow.name.clone())
+                .record(duration_ms as f64);
             Ok(FlowResult {
                 output,
                 steps: step_statuses,

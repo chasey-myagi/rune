@@ -2545,6 +2545,7 @@ name = "rune-flow"
 version = "1.2.0"
 dependencies = [
  "bytes",
+ "metrics",
  "rune-core",
  "serde",
  "serde_json",
@@ -2584,6 +2585,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "hyper",
+ "metrics",
  "rune-core",
  "rune-flow",
  "rune-proto",

@@ -111,20 +111,22 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Key Verifier ──
     let key_verifier: Arc<dyn KeyVerifier> = if config.auth.enabled {
-        let hmac_secret = config.auth.hmac_secret.clone().unwrap_or_else(|| {
-            if config.server.dev_mode {
+        let hmac_secret = match config.auth.hmac_secret.clone() {
+            Some(s) => s,
+            None if config.server.dev_mode => {
                 tracing::info!("dev mode: using fixed HMAC secret for key hashing");
                 "dev-hmac-secret".to_string()
-            } else {
-                let secret = hex::encode(rand::random::<[u8; 32]>());
-                tracing::warn!(
-                    "no HMAC secret configured (auth.hmac_secret); generated a random \
-                     ephemeral secret — keys created now will NOT survive a restart. \
-                     Set RUNE_AUTH__HMAC_SECRET or auth.hmac_secret in config."
-                );
-                secret
             }
-        });
+            None => {
+                anyhow::bail!(
+                    "auth is enabled but auth.hmac_secret is not configured.\n\
+                     API keys use HMAC-SHA256 and will NOT survive a restart without a \
+                     stable secret.\n\
+                     Set RUNE_AUTH__HMAC_SECRET or auth.hmac_secret in rune.toml.\n\
+                     To disable auth (development only), use --dev."
+                );
+            }
+        };
         Arc::new(StoreKeyVerifier::with_hmac_secret(
             store.clone(),
             hmac_secret.into_bytes(),

@@ -36,6 +36,58 @@ impl RuneStore {
         .await?
     }
 
+    /// Insert a task and immediately mark it as Running in a single transaction.
+    ///
+    /// The caller is responsible for dispatching the actual execution. Using a
+    /// single atomic write prevents a crash between insert+update from leaving
+    /// a task permanently stuck in the `pending` state.
+    pub async fn insert_task_and_start(
+        &self,
+        task_id: &str,
+        rune_name: &str,
+        input: Option<&str>,
+    ) -> StoreResult<TaskRecord> {
+        let pool = self.pool.clone();
+        let task_id = task_id.to_string();
+        let rune_name = rune_name.to_string();
+        let input = input.map(|s| s.to_string());
+        tokio::task::spawn_blocking(move || {
+            let now = timestamp_now();
+            let conn = pool.writer();
+            conn.execute_batch("BEGIN")?;
+            let result = (|| {
+                conn.execute(
+                    "INSERT INTO tasks \
+                     (task_id, rune_name, status, input, created_at, started_at) \
+                     VALUES (?1, ?2, 'running', ?3, ?4, ?4)",
+                    rusqlite::params![task_id, rune_name, input, now],
+                )?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    conn.execute_batch("COMMIT")?;
+                    Ok(TaskRecord {
+                        task_id,
+                        rune_name,
+                        status: TaskStatus::Running,
+                        input,
+                        output: None,
+                        error: None,
+                        created_at: now.clone(),
+                        started_at: Some(now),
+                        completed_at: None,
+                    })
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            }
+        })
+        .await?
+    }
+
     pub async fn get_task(&self, task_id: &str) -> StoreResult<Option<TaskRecord>> {
         let pool = self.pool.clone();
         let task_id = task_id.to_string();
