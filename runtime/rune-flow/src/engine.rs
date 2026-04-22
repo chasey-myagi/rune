@@ -449,9 +449,29 @@ impl FlowRunner {
                         let loop_step_name = step_def.name.clone();
                         let retry = step_def.retry.clone();
                         join_set.spawn(async move {
-                            let max = retry.as_ref().map(|r| r.max_attempts).unwrap_or(1);
-                            let backoff = retry.as_ref().map(|r| r.backoff_ms).unwrap_or(0);
-                            retry_op(max, backoff, || {
+                            use crate::dag::RetryCondition;
+                            let default_config = crate::dag::RetryConfig {
+                                max_attempts: 1,
+                                backoff_ms: 0,
+                                backoff_strategy: crate::dag::BackoffStrategy::Fixed,
+                                max_delay_ms: None,
+                                retry_on: vec![],
+                            };
+                            let config = retry.as_ref().unwrap_or(&default_config);
+                            let should_retry = |e: &RuneError| -> bool {
+                                if config.retry_on.is_empty()
+                                    || config.retry_on.contains(&RetryCondition::Any)
+                                {
+                                    return true;
+                                }
+                                config.retry_on.iter().any(|cond| {
+                                    matches!(
+                                        (cond, e),
+                                        (RetryCondition::Timeout, RuneError::Timeout)
+                                    )
+                                })
+                            };
+                            retry_op(config, should_retry, || {
                                 let runner = runner.clone();
                                 let lc = lc.clone();
                                 let si = si.clone();
@@ -1510,32 +1530,75 @@ fn uuid_simple() -> String {
     rune_core::time_utils::unique_request_id()
 }
 
+/// 根据 RetryConfig 和当前 attempt（0-based）计算退避延迟毫秒数。
+fn compute_backoff_ms(config: &crate::dag::RetryConfig, attempt: u32) -> u64 {
+    use crate::dag::BackoffStrategy;
+    let base = config.backoff_ms;
+    if base == 0 {
+        return 0;
+    }
+    let delay = match config.backoff_strategy {
+        BackoffStrategy::Fixed => base,
+        BackoffStrategy::Exponential => base.saturating_mul(1u64 << attempt.min(62)),
+        BackoffStrategy::ExponentialJitter => {
+            let exp = base.saturating_mul(1u64 << attempt.min(62));
+            // ±25% jitter：确定性伪随机，基于 attempt，无需 rand crate
+            let jitter_range = exp / 4;
+            let jitter = if attempt.is_multiple_of(2) {
+                jitter_range / 2
+            } else {
+                jitter_range.wrapping_mul(3) / 4
+            };
+            if (attempt / 2).is_multiple_of(2) {
+                exp.saturating_add(jitter)
+            } else {
+                exp.saturating_sub(jitter)
+            }
+        }
+    };
+    if let Some(max_delay) = config.max_delay_ms {
+        delay.min(max_delay)
+    } else {
+        delay
+    }
+}
+
 /// Generic retry helper used by both Rune steps and Loop steps.
 /// Calls `op` up to `max_attempts` times (min 1). On failure, waits
-/// `backoff_ms` before retrying. Returns the last error if all attempts fail.
+/// computed backoff before retrying. `should_retry` predicate controls
+/// whether a given error triggers a retry; returning false exits immediately.
 ///
 /// Callers spawning this inside `tokio::spawn` must ensure `F: Send` and
 /// `Fut: Send`; the generic bounds here do not enforce it so the helper can
 /// also be used in non-Send async contexts.
-async fn retry_op<F, Fut, T, E>(max_attempts: u32, backoff_ms: u64, mut op: F) -> Result<T, E>
+async fn retry_op<F, Fut, T, E, P>(
+    config: &crate::dag::RetryConfig,
+    should_retry: P,
+    mut op: F,
+) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
+    P: Fn(&E) -> bool,
 {
-    let max = max_attempts.max(1);
-    let mut last_err: Option<E> = None;
+    let max = config.max_attempts.max(1);
     for attempt in 0..max {
         match op().await {
             Ok(out) => return Ok(out),
             Err(e) => {
-                last_err = Some(e);
-                if attempt + 1 < max && backoff_ms > 0 {
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                if attempt + 1 < max && should_retry(&e) {
+                    let delay = compute_backoff_ms(config, attempt);
+                    if delay > 0 {
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    }
+                } else {
+                    return Err(e);
                 }
             }
         }
     }
-    Err(last_err.unwrap())
+    // 不可达，但需要满足编译器
+    unreachable!("retry_op loop exhausted without returning")
 }
 
 /// 按 RetryConfig 执行 invoker.invoke_once，失败时 backoff 后重试。
@@ -1546,12 +1609,25 @@ async fn invoke_with_retry(
     input: Bytes,
     retry: Option<&crate::dag::RetryConfig>,
 ) -> Result<Bytes, RuneError> {
-    let max = retry.map(|r| r.max_attempts).unwrap_or(1);
-    let backoff = retry.map(|r| r.backoff_ms).unwrap_or(0);
-    retry_op(max, backoff, || {
-        invoker.invoke_once(ctx.clone(), input.clone())
-    })
-    .await
+    use crate::dag::RetryCondition;
+    match retry {
+        None => invoker.invoke_once(ctx, input).await,
+        Some(config) => {
+            let should_retry = |e: &RuneError| -> bool {
+                if config.retry_on.is_empty() || config.retry_on.contains(&RetryCondition::Any) {
+                    return true;
+                }
+                config
+                    .retry_on
+                    .iter()
+                    .any(|cond| matches!((cond, e), (RetryCondition::Timeout, RuneError::Timeout)))
+            };
+            retry_op(config, should_retry, || {
+                invoker.invoke_once(ctx.clone(), input.clone())
+            })
+            .await
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1618,5 +1694,111 @@ mod tests {
         assert!(result.is_ok());
         // 无依赖无 mapping，应该 passthrough flow input
         assert_eq!(result.unwrap(), flow_input);
+    }
+
+    // ─── RetryConfig / compute_backoff_ms 测试 ────────────────────────────────
+
+    fn make_retry(
+        max_attempts: u32,
+        backoff_ms: u64,
+        strategy: crate::dag::BackoffStrategy,
+        max_delay_ms: Option<u64>,
+        retry_on: Vec<crate::dag::RetryCondition>,
+    ) -> crate::dag::RetryConfig {
+        crate::dag::RetryConfig {
+            max_attempts,
+            backoff_ms,
+            backoff_strategy: strategy,
+            max_delay_ms,
+            retry_on,
+        }
+    }
+
+    /// Fixed 策略下每次延迟相同
+    #[test]
+    fn retry_fixed_backoff_unchanged() {
+        use crate::dag::BackoffStrategy;
+        let cfg = make_retry(3, 100, BackoffStrategy::Fixed, None, vec![]);
+        assert_eq!(compute_backoff_ms(&cfg, 0), 100);
+        assert_eq!(compute_backoff_ms(&cfg, 1), 100);
+        assert_eq!(compute_backoff_ms(&cfg, 2), 100);
+    }
+
+    /// Exponential 策略下延迟翻倍
+    #[test]
+    fn retry_exponential_doubles() {
+        use crate::dag::BackoffStrategy;
+        let cfg = make_retry(4, 100, BackoffStrategy::Exponential, None, vec![]);
+        assert_eq!(compute_backoff_ms(&cfg, 0), 100);
+        assert_eq!(compute_backoff_ms(&cfg, 1), 200);
+        assert_eq!(compute_backoff_ms(&cfg, 2), 400);
+        assert_eq!(compute_backoff_ms(&cfg, 3), 800);
+    }
+
+    /// max_delay_ms 正确截断退避值
+    #[test]
+    fn retry_max_delay_caps_backoff() {
+        use crate::dag::BackoffStrategy;
+        let cfg = make_retry(5, 100, BackoffStrategy::Exponential, Some(300), vec![]);
+        assert_eq!(compute_backoff_ms(&cfg, 0), 100);
+        assert_eq!(compute_backoff_ms(&cfg, 1), 200);
+        assert_eq!(compute_backoff_ms(&cfg, 2), 300); // 400 capped → 300
+        assert_eq!(compute_backoff_ms(&cfg, 3), 300); // 800 capped → 300
+    }
+
+    /// retry_on=[Timeout] 时非 Timeout 错误不重试（直接返回错误，尝试次数 < max）
+    #[tokio::test]
+    async fn retry_on_timeout_skips_other_errors() {
+        use crate::dag::BackoffStrategy;
+        use rune_core::rune::RuneError;
+        let cfg = make_retry(
+            3,
+            0,
+            BackoffStrategy::Fixed,
+            None,
+            vec![crate::dag::RetryCondition::Timeout],
+        );
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let cc = call_count.clone();
+        let result = retry_op(
+            &cfg,
+            |e: &RuneError| matches!(e, RuneError::Timeout),
+            || {
+                let cc = cc.clone();
+                async move {
+                    cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err::<bytes::Bytes, RuneError>(RuneError::Unavailable)
+                }
+            },
+        )
+        .await;
+        // 非 Timeout 错误不应重试，只调用 1 次
+        assert!(result.is_err());
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// retry_on=[] 时所有错误都重试，应达到 max_attempts 次调用
+    #[tokio::test]
+    async fn retry_on_any_retries_all_errors() {
+        use crate::dag::BackoffStrategy;
+        use rune_core::rune::RuneError;
+        let cfg = make_retry(3, 0, BackoffStrategy::Fixed, None, vec![]);
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let cc = call_count.clone();
+        let result = retry_op(
+            &cfg,
+            |_: &RuneError| true,
+            || {
+                let cc = cc.clone();
+                async move {
+                    cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err::<bytes::Bytes, RuneError>(RuneError::Unavailable)
+                }
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        // 应调用 3 次（max_attempts=3）
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 }
