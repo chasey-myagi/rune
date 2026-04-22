@@ -5,7 +5,7 @@ use crate::resolver::Resolver;
 use crate::retry::RetryInvoker;
 use crate::rune::RuneConfig;
 use dashmap::DashMap;
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -30,10 +30,9 @@ pub struct Relay {
     /// Monotonic generation per caster — set during handle_attach, checked by
     /// remove_caster_if_gen to avoid deleting a reconnected session's entries.
     caster_generation: DashMap<String, u64>,
-    // Serializes multi-map writes during register/remove_caster.
-    // Read paths (resolve, relay_entries, etc.) do NOT acquire this lock —
-    // DashMap's own shard-level locking provides concurrent read safety.
-    write_lock: RwLock<()>,
+    /// Serializes multi-map writes (register/remove_caster).
+    /// Read paths do not acquire this lock — DashMap shard locks are sufficient.
+    write_lock: Mutex<()>,
     local_key_counter: AtomicU64,
     circuit_breaker_registry: Option<Arc<CircuitBreakerRegistry>>,
     retry_config: Option<RetryConfig>,
@@ -52,7 +51,7 @@ impl Relay {
             gate_path_index: DashMap::new(),
             caster_index: DashMap::new(),
             caster_generation: DashMap::new(),
-            write_lock: RwLock::new(()),
+            write_lock: Mutex::new(()),
             local_key_counter: AtomicU64::new(0),
             circuit_breaker_registry: None,
             retry_config: None,
@@ -75,7 +74,7 @@ impl Relay {
         invoker: Arc<dyn RuneInvoker>,
         caster_id: Option<String>,
     ) -> Result<(), String> {
-        let _guard = self.write_lock.write();
+        let _guard = self.write_lock.lock();
 
         // Check gate.path conflict: different rune_name with same path+method is a hard error
         // Uses gate_path_index for O(1) lookup instead of iterating all entries.
@@ -158,7 +157,7 @@ impl Relay {
 
     /// 移除某个 Caster 的所有 Rune
     pub fn remove_caster(&self, caster_id: &str) {
-        let _guard = self.write_lock.write();
+        let _guard = self.write_lock.lock();
 
         let rune_names = self
             .caster_index
@@ -229,7 +228,7 @@ impl Relay {
     /// Used by `cleanup_session` to avoid wiping a reconnected session's
     /// relay entries.
     pub fn remove_caster_if_gen(&self, caster_id: &str, gen: u64) -> bool {
-        let _guard = self.write_lock.write();
+        let _guard = self.write_lock.lock();
 
         // Check generation under write_lock — prevents TOCTOU with
         // a concurrent remove_caster + set_caster_generation + register
@@ -320,7 +319,6 @@ impl Relay {
     }
 
     /// Convenience: find + pick using a resolver.
-    // No write_lock needed here: DashMap shard locks are sufficient for reads.
     pub fn resolve(
         &self,
         rune_name: &str,

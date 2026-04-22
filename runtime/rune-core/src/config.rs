@@ -559,9 +559,12 @@ impl AppConfig {
             match val.to_lowercase().as_str() {
                 "json" => self.log.format = LogFormat::Json,
                 "text" => self.log.format = LogFormat::Text,
-                _ => {
-                    tracing::warn!(value = %val, "unknown RUNE_LOG__FORMAT value, using current setting")
-                }
+                // eprintln! used intentionally: apply_env_overrides runs before
+                // init_telemetry, so tracing is not yet initialized here.
+                _ => eprintln!(
+                    "WARN: unknown RUNE_LOG__FORMAT value '{}', using current setting",
+                    val
+                ),
             }
         }
         if let Ok(v) = std::env::var("RUNE_LOG__FILE") {

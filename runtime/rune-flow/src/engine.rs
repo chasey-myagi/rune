@@ -1548,7 +1548,7 @@ fn compute_backoff_ms(config: &crate::dag::RetryConfig, attempt: u32) -> u64 {
                 exp
             } else {
                 use rand::Rng as _;
-                let offset = rand::rng().random_range(0..=half_range * 2);
+                let offset = rand::rng().random_range(0..=half_range.saturating_mul(2));
                 exp.saturating_sub(half_range).saturating_add(offset)
             }
         }
