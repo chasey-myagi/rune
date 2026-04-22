@@ -25,6 +25,11 @@ cargo test -p rune-cli
 # 运行单个测试函数
 cargo test -p rune-core -- test_name
 
+# 更快的测试（推荐，需先安装：cargo install cargo-nextest）
+cargo nextest run                    # 运行所有测试
+cargo nextest run -p rune-flow       # 运行单个 crate
+cargo nextest run --profile ci       # CI 模式（限并发、快速失败）
+
 # 性能基准测试
 cargo bench
 
