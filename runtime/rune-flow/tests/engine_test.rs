@@ -3730,3 +3730,416 @@ async fn retry_loop_step_on_failure() {
         "called once (fail) + once (success) = 2"
     );
 }
+
+// ============================================================
+// Boundary / coverage supplement tests
+// ============================================================
+
+/// Map over empty array yields empty JSON array output
+#[tokio::test]
+async fn map_over_empty_array_returns_empty() {
+    let relay = test_relay();
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "empty_map",
+            vec![StepDefinition {
+                name: "m".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Map(MapConfig {
+                    over: "$input.items".to_string(),
+                    body: Box::new(BodyStep {
+                        name: "proc".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Rune(FlowRuneConfig {
+                            rune: "echo".into(),
+                        }),
+                    }),
+                    concurrency: None,
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("empty_map", Bytes::from(r#"{"items":[]}"#))
+        .await
+        .unwrap();
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(&result.output).unwrap();
+    assert!(arr.is_empty(), "empty items → empty output array");
+}
+
+/// Map body references a rune not registered in relay → StepFailed
+#[tokio::test]
+async fn map_body_rune_not_found_returns_step_failed() {
+    let relay = test_relay();
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "missing_rune_map",
+            vec![StepDefinition {
+                name: "m".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Map(MapConfig {
+                    over: "$input.items".to_string(),
+                    body: Box::new(BodyStep {
+                        name: "proc".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Rune(FlowRuneConfig {
+                            rune: "no-such-rune".into(),
+                        }),
+                    }),
+                    concurrency: None,
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let err = engine
+        .execute("missing_rune_map", Bytes::from(r#"{"items":[1,2,3]}"#))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FlowError::StepFailed { .. }),
+        "missing rune in map body must produce StepFailed, got: {err:?}"
+    );
+}
+
+/// Map with concurrency=1 processes all items correctly (serialized execution)
+#[tokio::test]
+async fn map_concurrency_one_serializes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let relay = test_relay();
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    let active2 = Arc::clone(&active);
+    let peak2 = Arc::clone(&peak);
+
+    relay
+        .register(
+            rune_config("serial-task"),
+            Arc::new(LocalInvoker::new(make_handler(move |_ctx, input| {
+                let active2 = Arc::clone(&active2);
+                let peak2 = Arc::clone(&peak2);
+                async move {
+                    let current = active2.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak2.fetch_max(current, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    active2.fetch_sub(1, Ordering::SeqCst);
+                    Ok(input)
+                }
+            }))),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "serial_map",
+            vec![StepDefinition {
+                name: "m".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Map(MapConfig {
+                    over: "$input.items".to_string(),
+                    body: Box::new(BodyStep {
+                        name: "t".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Rune(FlowRuneConfig {
+                            rune: "serial-task".into(),
+                        }),
+                    }),
+                    concurrency: Some(1),
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("serial_map", Bytes::from(r#"{"items":[1,2,3,4,5]}"#))
+        .await
+        .unwrap();
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(arr.len(), 5);
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        1,
+        "concurrency=1 must never run more than 1 item at a time"
+    );
+}
+
+/// per_step timeout_ms + retry: timeout wraps the whole retry sequence, first sleep exhausts it
+#[tokio::test]
+async fn per_step_timeout_with_retry_all_timeout() {
+    let relay = test_relay();
+
+    relay
+        .register(
+            rune_config("slow-always"),
+            Arc::new(LocalInvoker::new(make_handler(|_ctx, _input| async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Ok(Bytes::from(r#"{"done":true}"#))
+            }))),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "timeout_retry_flow",
+            vec![StepDefinition {
+                name: "s".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: Some(50),
+                retry: Some(rune_flow::dag::RetryConfig {
+                    max_attempts: 3,
+                    backoff_ms: 0,
+                }),
+                kind: StepKind::Rune(FlowRuneConfig {
+                    rune: "slow-always".into(),
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let err = engine
+        .execute("timeout_retry_flow", Bytes::from(r#"{}"#))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FlowError::StepFailed { .. }),
+        "timeout wrapping retry must yield StepFailed, got: {err:?}"
+    );
+}
+
+/// Switch `on` path resolves to null (missing key) → no case matches → Skipped
+#[tokio::test]
+async fn switch_on_path_missing_skipped() {
+    let relay = test_relay();
+
+    relay
+        .register(
+            rune_config("should-not-run"),
+            Arc::new(LocalInvoker::new(make_handler(|_ctx, _input| async move {
+                panic!("this rune must not execute");
+                #[allow(unreachable_code)]
+                Ok(Bytes::from(r#"{}"#))
+            }))),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "null_switch",
+            vec![StepDefinition {
+                name: "sw".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Switch(SwitchConfig {
+                    on: "$input.missing_key".to_string(),
+                    cases: vec![SwitchCase {
+                        when: serde_json::json!("expected"),
+                        body: BodyStep {
+                            name: "case_body".to_string(),
+                            condition: None,
+                            input_mapping: None,
+                            timeout_ms: None,
+                            retry: None,
+                            kind: BodyStepKind::Rune(FlowRuneConfig {
+                                rune: "should-not-run".into(),
+                            }),
+                        },
+                    }],
+                    default: None,
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("null_switch", Bytes::from(r#"{"other":"value"}"#))
+        .await
+        .unwrap();
+    assert!(
+        matches!(result.steps.get("sw"), Some(StepStatus::Skipped)),
+        "missing 'on' path resolves to null, no case matches → Skipped"
+    );
+}
+
+/// Loop step with false condition is Skipped; dependent step is also Skipped
+#[tokio::test]
+async fn loop_step_condition_false_cascades_downstream() {
+    let relay = test_relay();
+
+    relay
+        .register(
+            rune_config("downstream-rune"),
+            Arc::new(LocalInvoker::new(make_handler(|_ctx, input| async move {
+                Ok(input)
+            }))),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "loop_skip_cascade",
+            vec![
+                StepDefinition {
+                    name: "loop_step".to_string(),
+                    depends_on: vec![],
+                    condition: Some("1 == 2".to_string()),
+                    input_mapping: None,
+                    timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Loop(LoopConfig {
+                        body: vec![BodyStep {
+                            name: "b".to_string(),
+                            condition: None,
+                            input_mapping: None,
+                            timeout_ms: None,
+                            retry: None,
+                            kind: BodyStepKind::Rune(FlowRuneConfig {
+                                rune: "echo".into(),
+                            }),
+                        }],
+                        max_iterations: 3,
+                        until: None,
+                    }),
+                },
+                StepDefinition {
+                    name: "after".to_string(),
+                    depends_on: vec!["loop_step".to_string()],
+                    condition: None,
+                    input_mapping: None,
+                    timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: "downstream-rune".into(),
+                    }),
+                },
+            ],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("loop_skip_cascade", Bytes::from(r#"{}"#))
+        .await
+        .unwrap();
+    assert!(
+        matches!(result.steps.get("loop_step"), Some(StepStatus::Skipped)),
+        "loop step with false condition must be Skipped"
+    );
+    assert!(
+        matches!(result.steps.get("after"), Some(StepStatus::Skipped)),
+        "downstream step with all-skipped upstreams must be Skipped"
+    );
+}
+
+/// Retry with non-zero backoff_ms adds measurable delay between attempts
+#[tokio::test]
+async fn retry_backoff_adds_measurable_delay() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let relay = test_relay();
+    let attempts = Arc::new(AtomicU32::new(0));
+    let attempts2 = Arc::clone(&attempts);
+
+    relay
+        .register(
+            rune_config("always-err"),
+            Arc::new(LocalInvoker::new(make_handler(move |_ctx, _input| {
+                let attempts2 = Arc::clone(&attempts2);
+                async move {
+                    attempts2.fetch_add(1, Ordering::SeqCst);
+                    Err::<Bytes, RuneError>(RuneError::ExecutionFailed {
+                        code: "E".into(),
+                        message: "fail".into(),
+                    })
+                }
+            }))),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "backoff_flow",
+            vec![StepDefinition {
+                name: "s".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: Some(rune_flow::dag::RetryConfig {
+                    max_attempts: 3,
+                    backoff_ms: 80,
+                }),
+                kind: StepKind::Rune(FlowRuneConfig {
+                    rune: "always-err".into(),
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let start = Instant::now();
+    let _ = engine.execute("backoff_flow", Bytes::from(r#"{}"#)).await;
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        3,
+        "must attempt exactly 3 times"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(120),
+        "2 backoff intervals of 80ms each must add ≥ 160ms total; elapsed: {elapsed:?}"
+    );
+}
