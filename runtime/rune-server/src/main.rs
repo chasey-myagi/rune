@@ -39,6 +39,14 @@ async fn main() -> anyhow::Result<()> {
     config.apply_env_overrides();
     config.validate()?;
 
+    if config.server.dev_mode {
+        eprintln!(
+            "\n\
+             ⚠️  DEV MODE ACTIVE — auth disabled, rate limiting disabled\n\
+             \x20   DO NOT USE IN PRODUCTION\n"
+        );
+    }
+
     // ── Telemetry (tracing + metrics) ──
     let _tracer_provider = init_telemetry(&config.telemetry);
 

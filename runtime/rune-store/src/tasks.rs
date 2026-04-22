@@ -53,44 +53,26 @@ impl RuneStore {
         let input = input.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || {
             let now = timestamp_now();
-            let conn = pool.writer();
-            conn.execute_batch("BEGIN")?;
-            let result = (|| {
-                conn.execute(
-                    "INSERT INTO tasks \
-                     (task_id, rune_name, status, input, created_at, started_at) \
-                     VALUES (?1, ?2, 'running', ?3, ?4, ?4)",
-                    rusqlite::params![task_id, rune_name, input, now],
-                )?;
-                Ok(())
-            })();
-            match result {
-                Ok(()) => {
-                    conn.execute_batch("COMMIT")?;
-                    Ok(TaskRecord {
-                        task_id,
-                        rune_name,
-                        status: TaskStatus::Running,
-                        input,
-                        output: None,
-                        error: None,
-                        created_at: now.clone(),
-                        started_at: Some(now),
-                        completed_at: None,
-                    })
-                }
-                Err(e) => {
-                    if let Err(rb_err) = conn.execute_batch("ROLLBACK") {
-                        tracing::error!(
-                            task_id = %task_id,
-                            error = %rb_err,
-                            "ROLLBACK failed after insert_task_and_start error; \
-                             DB connection may have a dangling transaction"
-                        );
-                    }
-                    Err(e)
-                }
-            }
+            let mut conn = pool.writer();
+            let tx = conn.transaction()?;
+            tx.execute(
+                "INSERT INTO tasks \
+                 (task_id, rune_name, status, input, created_at, started_at) \
+                 VALUES (?1, ?2, 'running', ?3, ?4, ?4)",
+                rusqlite::params![task_id, rune_name, input, now],
+            )?;
+            tx.commit()?;
+            Ok(TaskRecord {
+                task_id,
+                rune_name,
+                status: TaskStatus::Running,
+                input,
+                output: None,
+                error: None,
+                created_at: now.clone(),
+                started_at: Some(now),
+                completed_at: None,
+            })
         })
         .await?
     }

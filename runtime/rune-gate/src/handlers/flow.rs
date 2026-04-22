@@ -350,10 +350,13 @@ pub async fn run_flow_async(
         Err(_) => format!("hex:{}", hex::encode(&body)),
     };
 
+    // Insert task and mark it Running atomically.  A single transaction
+    // prevents a crash between the two steps from leaving the task in
+    // a permanently-pending state.
     if let Err(e) = state
         .admin
         .store
-        .insert_task(&task_id, &format!("flow:{}", flow_name), Some(&input_str))
+        .insert_task_and_start(&task_id, &format!("flow:{}", flow_name), Some(&input_str))
         .await
     {
         return traced_response(
@@ -367,11 +370,6 @@ pub async fn run_flow_async(
             &trace_context,
         );
     }
-    let _ = state
-        .admin
-        .store
-        .update_task_status(&task_id, TaskStatus::Running, None, None)
-        .await;
 
     let store = Arc::clone(&state.admin.store);
     let tid = task_id.clone();
