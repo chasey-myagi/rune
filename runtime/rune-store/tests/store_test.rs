@@ -848,6 +848,62 @@ async fn test_task_duplicate_insert_returns_error() {
     assert_eq!(task.input.as_deref(), Some("first"));
 }
 
+// ------ insert_task_and_start ------
+
+#[tokio::test]
+async fn test_insert_task_and_start_returns_running() {
+    let store = new_store();
+    let task = store
+        .insert_task_and_start("ias-1", "rune_a", Some("{}"))
+        .await
+        .unwrap();
+
+    assert_eq!(task.task_id, "ias-1");
+    assert_eq!(task.rune_name, "rune_a");
+    assert_eq!(task.status, TaskStatus::Running);
+    assert_eq!(task.input.as_deref(), Some("{}"));
+    assert!(task.started_at.is_some(), "started_at should be set");
+    assert_eq!(task.created_at, task.started_at.as_deref().unwrap_or(""));
+
+    // Verify DB state matches returned record.
+    let fetched = store.get_task("ias-1").await.unwrap().unwrap();
+    assert_eq!(fetched.status, TaskStatus::Running);
+    assert!(fetched.started_at.is_some());
+}
+
+#[tokio::test]
+async fn test_insert_task_and_start_no_input() {
+    let store = new_store();
+    let task = store
+        .insert_task_and_start("ias-no-input", "rune_b", None)
+        .await
+        .unwrap();
+
+    assert_eq!(task.status, TaskStatus::Running);
+    assert!(task.input.is_none());
+}
+
+#[tokio::test]
+async fn test_insert_task_and_start_duplicate_rolls_back() {
+    let store = new_store();
+    store
+        .insert_task_and_start("ias-dup", "rune_a", None)
+        .await
+        .unwrap();
+
+    // Second insert with the same task_id must fail (UNIQUE constraint).
+    let result = store.insert_task_and_start("ias-dup", "rune_b", None).await;
+    assert!(
+        result.is_err(),
+        "duplicate task_id should fail and leave DB consistent"
+    );
+
+    // The original row must be unchanged (not corrupted by a partial write).
+    let task = store.get_task("ias-dup").await.unwrap().unwrap();
+    assert_eq!(task.rune_name, "rune_a");
+    assert_eq!(task.status, TaskStatus::Running);
+}
+
 // ------ 3. Task illegal state transition: Completed → Running ------
 
 #[tokio::test]

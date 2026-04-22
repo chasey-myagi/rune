@@ -372,7 +372,6 @@ impl Caster {
                                             .into(),
                                         details: vec![],
                                     }),
-                                    attachments: vec![],
                                 })),
                             })
                             .await;
@@ -612,7 +611,6 @@ async fn execute_handler(
                         message: format!("rune '{}' not found", req.rune_name),
                         details: vec![],
                     }),
-                    attachments: vec![],
                 })),
             })
             .await;
@@ -627,15 +625,7 @@ async fn execute_handler(
     };
 
     let input = Bytes::from(req.input);
-    let files: Vec<FileAttachment> = req
-        .attachments
-        .iter()
-        .map(|a| FileAttachment {
-            filename: a.filename.clone(),
-            data: Bytes::from(a.data.clone()),
-            mime_type: a.mime_type.clone(),
-        })
-        .collect();
+    let files: Vec<FileAttachment> = vec![];
 
     match &registered.handler {
         HandlerKind::Unary(handler) => {
@@ -647,7 +637,6 @@ async fn execute_handler(
                         status: rune_proto::Status::Completed.into(),
                         output: output.to_vec(),
                         error: None,
-                        attachments: vec![],
                     })),
                 },
                 Err(e) => SessionMessage {
@@ -660,7 +649,6 @@ async fn execute_handler(
                             message: e.to_string(),
                             details: vec![],
                         }),
-                        attachments: vec![],
                     })),
                 },
             };
@@ -675,7 +663,6 @@ async fn execute_handler(
                         status: rune_proto::Status::Completed.into(),
                         output: output.to_vec(),
                         error: None,
-                        attachments: vec![],
                     })),
                 },
                 Err(e) => SessionMessage {
@@ -688,7 +675,6 @@ async fn execute_handler(
                             message: e.to_string(),
                             details: vec![],
                         }),
-                        attachments: vec![],
                     })),
                 },
             };

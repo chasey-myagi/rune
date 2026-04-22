@@ -1,6 +1,6 @@
 [package]
 name = "rune-proto"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 description = "Protocol Buffer generated code for Rune Wire Protocol"
 license = "MIT"

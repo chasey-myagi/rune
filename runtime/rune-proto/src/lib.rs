@@ -91,61 +91,6 @@ mod tests {
     }
 
     // ========================================================================
-    // ExecuteRequest with attachments round-trip
-    // ========================================================================
-
-    #[test]
-    fn execute_request_with_attachments_round_trip() {
-        let req = ExecuteRequest {
-            request_id: "req-42".into(),
-            rune_name: "processor".into(),
-            input: b"binary data here".to_vec(),
-            context: [
-                ("user".to_string(), "alice".to_string()),
-                ("trace".to_string(), "tr-99".to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            timeout_ms: 60000,
-            attachments: vec![
-                FileAttachment {
-                    filename: "doc.pdf".into(),
-                    data: vec![0x25, 0x50, 0x44, 0x46], // %PDF
-                    mime_type: "application/pdf".into(),
-                },
-                FileAttachment {
-                    filename: "img.png".into(),
-                    data: vec![0x89, 0x50, 0x4E, 0x47], // PNG header
-                    mime_type: "image/png".into(),
-                },
-            ],
-        };
-
-        let mut buf = Vec::new();
-        req.encode(&mut buf).unwrap();
-        let decoded = ExecuteRequest::decode(&buf[..]).unwrap();
-
-        assert_eq!(decoded.request_id, "req-42");
-        assert_eq!(decoded.rune_name, "processor");
-        assert_eq!(decoded.input, b"binary data here");
-        assert_eq!(decoded.timeout_ms, 60000);
-        assert_eq!(
-            decoded.context.get("user").map(|s| s.as_str()),
-            Some("alice")
-        );
-        assert_eq!(
-            decoded.context.get("trace").map(|s| s.as_str()),
-            Some("tr-99")
-        );
-        assert_eq!(decoded.attachments.len(), 2);
-        assert_eq!(decoded.attachments[0].filename, "doc.pdf");
-        assert_eq!(decoded.attachments[0].data, vec![0x25, 0x50, 0x44, 0x46]);
-        assert_eq!(decoded.attachments[0].mime_type, "application/pdf");
-        assert_eq!(decoded.attachments[1].filename, "img.png");
-        assert_eq!(decoded.attachments[1].mime_type, "image/png");
-    }
-
-    // ========================================================================
     // RuneDeclaration with schema round-trip
     // ========================================================================
 
@@ -176,44 +121,6 @@ mod tests {
         assert_eq!(decoded.output_schema, r#"{"type":"boolean"}"#);
         assert!(!decoded.supports_stream);
         assert!(decoded.gate.is_none());
-    }
-
-    // ========================================================================
-    // FileAttachment round-trip
-    // ========================================================================
-
-    #[test]
-    fn file_attachment_round_trip() {
-        let attachment = FileAttachment {
-            filename: "report.csv".into(),
-            data: b"col1,col2\nval1,val2\n".to_vec(),
-            mime_type: "text/csv".into(),
-        };
-
-        let mut buf = Vec::new();
-        attachment.encode(&mut buf).unwrap();
-        let decoded = FileAttachment::decode(&buf[..]).unwrap();
-
-        assert_eq!(decoded.filename, "report.csv");
-        assert_eq!(decoded.data, b"col1,col2\nval1,val2\n");
-        assert_eq!(decoded.mime_type, "text/csv");
-    }
-
-    #[test]
-    fn file_attachment_empty_data_round_trip() {
-        let attachment = FileAttachment {
-            filename: "empty.txt".into(),
-            data: Vec::new(),
-            mime_type: "text/plain".into(),
-        };
-
-        let mut buf = Vec::new();
-        attachment.encode(&mut buf).unwrap();
-        let decoded = FileAttachment::decode(&buf[..]).unwrap();
-
-        assert_eq!(decoded.filename, "empty.txt");
-        assert!(decoded.data.is_empty());
-        assert_eq!(decoded.mime_type, "text/plain");
     }
 
     // ========================================================================
@@ -276,7 +183,7 @@ mod tests {
     }
 
     // ========================================================================
-    // ExecuteResult with error and attachments round-trip
+    // ExecuteResult with error round-trip
     // ========================================================================
 
     #[test]
@@ -290,7 +197,6 @@ mod tests {
                 message: "out of memory".into(),
                 details: Vec::new(),
             }),
-            attachments: Vec::new(),
         };
 
         let mut buf = Vec::new();

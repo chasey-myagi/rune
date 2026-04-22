@@ -6,7 +6,9 @@ use axum::{
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::handlers;
-use crate::middleware::{auth_middleware, rate_limit_middleware, shutdown_middleware};
+use crate::middleware::{
+    auth_middleware, rate_limit_middleware, security_headers_middleware, shutdown_middleware,
+};
 use crate::state::GateState;
 
 /// Build the Gate Router with auth middleware, CORS, and management API.
@@ -58,8 +60,14 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
         router = router.merge(extra);
     }
 
-    // Build CORS layer
+    // Build CORS layer. Permissive mode (allow any origin) is a footgun: any
+    // web page can make authenticated requests if the browser stores credentials.
+    // Only use it for local development; configure cors_origins in production.
     let cors = if state.cors_origins.is_empty() {
+        tracing::warn!(
+            "CORS is set to permissive (allow-all origins). \
+             Set cors_origins in configuration to restrict cross-origin access."
+        );
         CorsLayer::permissive()
     } else {
         let origins: Vec<_> = state
@@ -74,8 +82,8 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
     };
 
     // Axum onion model: last-added layer executes first (outermost).
-    // Desired execution order: CORS → shutdown → auth → rate_limit → handler
-    // So we add them in reverse: rate_limit, auth, shutdown, cors.
+    // Desired execution order: security_headers → CORS → shutdown → auth → rate_limit → handler
+    // So we add them in reverse: rate_limit, auth, shutdown, cors, security_headers.
     router
         .fallback(handlers::rune::dynamic_rune_handler)
         .with_state(state.clone())
@@ -89,4 +97,5 @@ pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -
         ))
         .layer(middleware::from_fn_with_state(state, shutdown_middleware))
         .layer(cors)
+        .layer(middleware::from_fn(security_headers_middleware))
 }

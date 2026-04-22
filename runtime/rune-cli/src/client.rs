@@ -122,10 +122,22 @@ impl RuneClient {
         self.send_json(req).await
     }
 
-    /// GET /health
+    /// GET /health — returns plain text "ok", not JSON
     pub async fn health(&self) -> Result<Value> {
         let req = self.request(reqwest::Method::GET, "/health");
-        self.send_json(req).await
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("Failed to connect to Runtime at {}", self.base_url))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .with_context(|| "Failed to read response body")?;
+        if !status.is_success() {
+            anyhow::bail!("Server returned {}: {}", status, text);
+        }
+        Ok(serde_json::json!({ "status": text.trim() }))
     }
 
     // ── Rune ────────────────────────────────────────────────────────────

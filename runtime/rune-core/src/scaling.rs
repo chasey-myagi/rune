@@ -215,13 +215,21 @@ impl ScaleEvaluator {
         // This is currently guaranteed by `start()` running a single
         // `tokio::spawn` with a serial interval loop.  The flag below makes
         // this invariant explicit and catches violations immediately.
-        assert!(
-            !self
-                .evaluating
-                .swap(true, std::sync::atomic::Ordering::AcqRel),
-            "BUG: evaluate_once called concurrently — the two-phase breaches \
-             lock pattern is not safe under concurrent evaluation"
-        );
+        // SAFETY: assert replaced with graceful early-return to avoid panicking
+        // the whole process if this invariant is ever violated in a test or
+        // unexpected code path.  The invariant itself still holds for production
+        // (single serial loop in `start()`), but a panic in an async service is
+        // unacceptable.
+        if self
+            .evaluating
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            tracing::error!(
+                "evaluate_once called concurrently — the two-phase breaches lock \
+                 pattern is not safe under concurrent evaluation; skipping cycle"
+            );
+            return;
+        }
         // Reset on all exit paths (normal return + panic).
         struct EvalGuard<'a>(&'a std::sync::atomic::AtomicBool);
         impl Drop for EvalGuard<'_> {

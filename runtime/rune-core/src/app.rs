@@ -419,7 +419,7 @@ mod tests {
 
         // Both should be registered as candidates
         let entries = app.relay.find("dup").unwrap();
-        assert_eq!(entries.value().len(), 2);
+        assert_eq!(entries.len(), 2);
     }
 
     // ========================================================================

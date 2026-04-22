@@ -66,6 +66,7 @@ impl Default for AuthConfig {
 pub struct StoreConfig {
     pub db_path: String,
     pub log_retention_days: u32,
+    pub task_retention_days: u32,
     pub reader_pool_size: usize,
     pub key_cache_ttl_secs: u64,
     pub key_cache_negative_ttl_secs: u64,
@@ -76,6 +77,7 @@ impl Default for StoreConfig {
         Self {
             db_path: "rune.db".to_string(),
             log_retention_days: 30,
+            task_retention_days: 7,
             reader_pool_size: 4,
             key_cache_ttl_secs: 60,
             key_cache_negative_ttl_secs: 30,
@@ -429,6 +431,11 @@ impl AppConfig {
         env_override!(
             "RUNE_STORE__LOG_RETENTION_DAYS",
             self.store.log_retention_days,
+            u32
+        );
+        env_override!(
+            "RUNE_STORE__TASK_RETENTION_DAYS",
+            self.store.task_retention_days,
             u32
         );
         env_override!(

@@ -1,11 +1,17 @@
-use crate::dag::{topological_layers, validate_dag, DagError, FlowDefinition};
+use crate::dag::{
+    topological_layers, validate_dag, BodyStep, BodyStepKind, DagError, FlowConfig, FlowDefinition,
+    LoopConfig, MapConfig, StepKind,
+};
 use bytes::Bytes;
 use rune_core::relay::Relay;
 use rune_core::resolver::Resolver;
 use rune_core::rune::{RuneContext, RuneError};
 use rune_core::trace;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Step 执行状态
 #[derive(Debug, Clone)]
@@ -25,6 +31,38 @@ pub struct FlowResult {
     pub steps_executed: usize,
 }
 
+/// Loop 执行进度事件，通过可选的 progress_tx channel 推送（非 SSE 路径零开销）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "event_type", rename_all = "snake_case")]
+pub enum FlowProgressEvent {
+    LoopIterationStart {
+        step: String,
+        iteration: u32,
+        max_iterations: u32,
+    },
+    BodyStepDone {
+        step: String,
+        body_step: String,
+        duration_ms: u64,
+    },
+    BodyStepSkipped {
+        step: String,
+        body_step: String,
+    },
+    BodyStepFailed {
+        step: String,
+        body_step: String,
+        error: String,
+        duration_ms: u64,
+    },
+    LoopIterationEnd {
+        step: String,
+        iteration: u32,
+        duration_ms: u64,
+        until_met: bool,
+    },
+}
+
 /// Flow 执行错误
 #[derive(Debug, thiserror::Error)]
 pub enum FlowError {
@@ -38,6 +76,12 @@ pub enum FlowError {
     NoTerminalStep,
     #[error("serialization failed: {0}")]
     SerializationFailed(String),
+    #[error("map step: 'over' path '{0}' did not resolve to a JSON array")]
+    MapItemsNotArray(String),
+    #[error("flow step references unknown flow: '{0}'")]
+    FlowStepNotFound(String),
+    #[error("circular flow reference detected: {0}")]
+    CircularFlowRef(String),
 }
 
 /// Default step timeout when not configured.
@@ -48,10 +92,14 @@ const DEFAULT_STEP_TIMEOUT_SECS: u64 = 30;
 /// Created via [`FlowEngine::runner()`]. Clone the necessary `Arc` fields from
 /// `FlowEngine`, then release the lock and run the (potentially long)
 /// execution on this handle instead.
+#[derive(Clone)]
 pub struct FlowRunner {
     relay: Arc<Relay>,
     resolver: Arc<dyn Resolver>,
-    step_timeout: std::time::Duration,
+    step_timeout: Duration,
+    /// 创建 runner 时的 Flow 快照，供 Flow Step 子流查找（无锁）
+    flows_snapshot: Arc<HashMap<String, FlowDefinition>>,
+    pub progress_tx: Option<tokio::sync::mpsc::Sender<FlowProgressEvent>>,
 }
 
 #[allow(dead_code)]
@@ -92,6 +140,8 @@ impl FlowEngine {
             relay: Arc::clone(&self.relay),
             resolver: Arc::clone(&self.resolver),
             step_timeout: self.step_timeout,
+            flows_snapshot: Arc::new(self.flows.clone()),
+            progress_tx: None,
         }
     }
 
@@ -173,6 +223,13 @@ impl FlowEngine {
 }
 
 impl FlowRunner {
+    /// 设置 progress channel；Loop 执行时会向该 channel 推送迭代事件。
+    /// 失败（满/关闭）时静默丢弃，确保主执行路径不受影响。
+    pub fn with_progress(mut self, tx: tokio::sync::mpsc::Sender<FlowProgressEvent>) -> Self {
+        self.progress_tx = Some(tx);
+        self
+    }
+
     /// Execute a pre-fetched FlowDefinition.
     ///
     /// This is the core execution logic.  Because `FlowRunner` only holds
@@ -191,6 +248,24 @@ impl FlowRunner {
         &self,
         flow: &FlowDefinition,
         input: Bytes,
+        parent_context: HashMap<String, String>,
+        flow_request_id: Option<String>,
+    ) -> Result<FlowResult, FlowError> {
+        self.execute_flow_internal(
+            flow,
+            input,
+            vec![flow.name.clone()],
+            parent_context,
+            flow_request_id,
+        )
+        .await
+    }
+
+    async fn execute_flow_internal(
+        &self,
+        flow: &FlowDefinition,
+        input: Bytes,
+        call_stack: Vec<String>,
         mut parent_context: HashMap<String, String>,
         flow_request_id: Option<String>,
     ) -> Result<FlowResult, FlowError> {
@@ -220,36 +295,41 @@ impl FlowRunner {
 
         // 解析 flow 原始输入为 JSON（用于 $input 引用和 condition 上下文）
         let flow_input_json: Option<serde_json::Value> = serde_json::from_slice(&input).ok();
+        let mut first_error: Option<FlowError> = None;
+        let flow_start = std::time::Instant::now();
+
+        tracing::debug!(
+            flow = %flow.name,
+            request_id = %flow_request_id,
+            steps = flow.steps.len(),
+            layers = layers.len(),
+            "flow execution started"
+        );
 
         for layer in &layers {
-            // 检查该层是否有上游失败
-            let mut has_failed_upstream = false;
-            for &step_idx in layer {
-                let step_def = &flow.steps[step_idx];
-                for dep in &step_def.depends_on {
-                    if matches!(
-                        step_statuses.get(dep.as_str()),
-                        Some(StepStatus::Failed { .. })
-                    ) {
-                        has_failed_upstream = true;
-                        break;
-                    }
-                }
-                if has_failed_upstream {
-                    break;
-                }
-            }
-
-            if has_failed_upstream {
-                // 上游失败，这层不执行
-                break;
-            }
-
             // 确定每个 step 是否 skip
             let mut step_tasks: Vec<(usize, bool)> = Vec::new(); // (step_idx, should_skip)
 
             for &step_idx in layer {
                 let step_def = &flow.steps[step_idx];
+
+                // 检查是否有失败的上游：失败向下游传播，该 step 标记为 Failed 并跳过；
+                // 仅跳过有失败依赖的 step，不影响同层其他独立 step（修正层级粒度 fail-fast bug）
+                let failed_dep = step_def.depends_on.iter().find_map(|dep| {
+                    match step_statuses.get(dep.as_str()) {
+                        Some(StepStatus::Failed { error }) => Some((dep.clone(), error.clone())),
+                        _ => None,
+                    }
+                });
+                if let Some((dep_name, dep_err)) = failed_dep {
+                    step_statuses.insert(
+                        step_def.name.clone(),
+                        StepStatus::Failed {
+                            error: format!("upstream '{}' failed: {}", dep_name, dep_err),
+                        },
+                    );
+                    continue;
+                }
 
                 // 检查是否所有上游都被 skip
                 let all_upstreams_skipped = if step_def.depends_on.is_empty() {
@@ -300,44 +380,237 @@ impl FlowRunner {
                 let step_input =
                     Self::build_step_input(step_def, &input, &step_outputs, &flow_input_json)?;
 
-                // Resolve rune invoker
-                let invoker = self.relay.resolve(&step_def.rune, self.resolver.as_ref());
-
-                let rune_name = step_def.rune.clone();
+                let timeout = step_def
+                    .timeout_ms
+                    .map(Duration::from_millis)
+                    .unwrap_or(self.step_timeout);
                 let si = step_input;
 
-                match invoker {
-                    Some(inv) => {
-                        let timeout = self.step_timeout;
+                match &step_def.kind {
+                    StepKind::Rune(rc) => {
+                        let invoker = self.relay.resolve(&rc.rune, self.resolver.as_ref());
+                        let rune_name = rc.rune.clone();
+                        match invoker {
+                            Some(inv) => {
+                                let parent_context = parent_context.clone();
+                                let flow_request_id = flow_request_id.clone();
+                                let flow_span_id = flow_span_id.clone();
+                                let retry = step_def.retry.clone();
+                                join_set.spawn(async move {
+                                    let mut step_context = parent_context;
+                                    step_context.insert(
+                                        trace::PARENT_REQUEST_ID_KEY.to_string(),
+                                        flow_request_id,
+                                    );
+                                    step_context.insert(
+                                        trace::PARENT_SPAN_ID_KEY.to_string(),
+                                        flow_span_id,
+                                    );
+                                    step_context.insert(
+                                        trace::SPAN_ID_KEY.to_string(),
+                                        rune_core::time_utils::generate_span_id(),
+                                    );
+                                    let ctx = RuneContext {
+                                        rune_name: rune_name.clone(),
+                                        request_id: uuid_simple(),
+                                        context: step_context,
+                                        timeout,
+                                    };
+                                    // engine 层强制 hard deadline（LocalInvoker 无内置 timeout）。
+                                    // RemoteInvoker 经由 RuneContext.timeout 在 session 层同时
+                                    // 发起 cancel，两者使用相同值，互补不冲突。
+                                    // timeout 包裹整个 retry 序列：单次调用 + backoff + 重试，
+                                    // 超出预算时整体失败，避免 retry 把 timeout 变相放大。
+                                    match tokio::time::timeout(
+                                        timeout,
+                                        invoke_with_retry(inv, ctx, si, retry.as_ref()),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(output)) => Ok((step_idx, output)),
+                                        Ok(Err(e)) => Err((step_idx, e)),
+                                        Err(_) => Err((step_idx, RuneError::Timeout)),
+                                    }
+                                });
+                            }
+                            None => {
+                                join_set.spawn(async move {
+                                    Err((step_idx, RuneError::NotFound(rune_name)))
+                                });
+                            }
+                        }
+                    }
+                    StepKind::Loop(lc) => {
+                        let runner = self.clone();
+                        let lc = lc.clone();
                         let parent_context = parent_context.clone();
                         let flow_request_id = flow_request_id.clone();
-                        let flow_span_id = flow_span_id.clone();
+                        let call_stack = call_stack.clone();
+                        let loop_step_name = step_def.name.clone();
+                        let retry = step_def.retry.clone();
                         join_set.spawn(async move {
-                            let mut step_context = parent_context;
-                            step_context
-                                .insert(trace::PARENT_REQUEST_ID_KEY.to_string(), flow_request_id);
-                            step_context
-                                .insert(trace::PARENT_SPAN_ID_KEY.to_string(), flow_span_id);
-                            step_context.insert(
-                                trace::SPAN_ID_KEY.to_string(),
-                                rune_core::time_utils::generate_span_id(),
-                            );
-                            let ctx = RuneContext {
-                                rune_name: rune_name.clone(),
-                                request_id: uuid_simple(),
-                                context: step_context,
+                            let max = retry.as_ref().map(|r| r.max_attempts).unwrap_or(1);
+                            let backoff = retry.as_ref().map(|r| r.backoff_ms).unwrap_or(0);
+                            retry_op(max, backoff, || {
+                                let runner = runner.clone();
+                                let lc = lc.clone();
+                                let si = si.clone();
+                                let parent_context = parent_context.clone();
+                                let flow_request_id = flow_request_id.clone();
+                                let call_stack = call_stack.clone();
+                                let loop_step_name = loop_step_name.clone();
+                                async move {
+                                    match tokio::time::timeout(
+                                        timeout,
+                                        runner.execute_loop(
+                                            &lc,
+                                            si,
+                                            parent_context,
+                                            flow_request_id,
+                                            call_stack,
+                                            loop_step_name,
+                                        ),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(out)) => Ok(out),
+                                        Ok(Err(e)) => Err(RuneError::ExecutionFailed {
+                                            code: "LOOP_FAILED".into(),
+                                            message: e.to_string(),
+                                        }),
+                                        Err(_) => Err(RuneError::Timeout),
+                                    }
+                                }
+                            })
+                            .await
+                            .map(|out| (step_idx, out))
+                            .map_err(|e| (step_idx, e))
+                        });
+                    }
+                    StepKind::Map(mc) => {
+                        let runner = self.clone();
+                        let mc = mc.clone();
+                        let step_outputs_snapshot = step_outputs.clone();
+                        let parent_context = parent_context.clone();
+                        let flow_request_id = flow_request_id.clone();
+                        let call_stack = call_stack.clone();
+                        join_set.spawn(async move {
+                            let result = tokio::time::timeout(
                                 timeout,
-                            };
-                            match inv.invoke_once(ctx, si).await {
-                                Ok(output) => Ok((step_idx, output)),
-                                Err(e) => Err((step_idx, e)),
+                                runner.execute_map(
+                                    &mc,
+                                    si,
+                                    &step_outputs_snapshot,
+                                    parent_context,
+                                    flow_request_id,
+                                    call_stack,
+                                ),
+                            )
+                            .await;
+                            match result {
+                                Ok(Ok(out)) => Ok((step_idx, out)),
+                                Ok(Err(e)) => Err((
+                                    step_idx,
+                                    RuneError::ExecutionFailed {
+                                        code: "MAP_FAILED".into(),
+                                        message: e.to_string(),
+                                    },
+                                )),
+                                Err(_) => Err((step_idx, RuneError::Timeout)),
                             }
                         });
                     }
-                    None => {
-                        // Rune not found
-                        join_set
-                            .spawn(async move { Err((step_idx, RuneError::NotFound(rune_name))) });
+                    StepKind::Switch(sc) => {
+                        // on 表达式在当前 step_outputs 和 flow_input_json 上下文中求值（同步）
+                        let on_val =
+                            resolve_condition_value(&sc.on, &step_outputs, &flow_input_json);
+                        let matched: Option<BodyStep> = sc
+                            .cases
+                            .iter()
+                            .find(|c| c.when == on_val)
+                            .map(|c| c.body.clone())
+                            .or_else(|| sc.default.as_deref().cloned());
+
+                        match matched {
+                            None => {
+                                // 无匹配且无 default → Skipped
+                                skip_indices.push(step_idx);
+                            }
+                            Some(body) => {
+                                let si_json: Option<serde_json::Value> =
+                                    serde_json::from_slice(&si).ok();
+                                let body_input = Self::build_body_step_input(
+                                    &body,
+                                    &si,
+                                    &HashMap::new(),
+                                    &si_json,
+                                )?;
+                                let runner = self.clone();
+                                let parent_context = parent_context.clone();
+                                let flow_request_id = flow_request_id.clone();
+                                let call_stack = call_stack.clone();
+                                join_set.spawn(async move {
+                                    // body.timeout_ms 覆盖 step 级别 timeout；
+                                    // 对内（execute_body_step_kind）和外（hard deadline）使用同一值。
+                                    let effective_timeout = body
+                                        .timeout_ms
+                                        .map(Duration::from_millis)
+                                        .unwrap_or(timeout);
+                                    let body_future = runner.execute_body_step_kind(
+                                        body.kind,
+                                        body.name,
+                                        body_input,
+                                        effective_timeout,
+                                        parent_context,
+                                        flow_request_id,
+                                        call_stack,
+                                    );
+                                    match tokio::time::timeout(effective_timeout, body_future).await
+                                    {
+                                        Ok(Ok(out)) => Ok((step_idx, out)),
+                                        Ok(Err(e)) => Err((
+                                            step_idx,
+                                            RuneError::ExecutionFailed {
+                                                code: "SWITCH_CASE_FAILED".into(),
+                                                message: e.to_string(),
+                                            },
+                                        )),
+                                        Err(_) => Err((step_idx, RuneError::Timeout)),
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    StepKind::Flow(fc) => {
+                        let runner = self.clone();
+                        let fc = fc.clone();
+                        let parent_context = parent_context.clone();
+                        let flow_request_id = flow_request_id.clone();
+                        let call_stack = call_stack.clone();
+                        join_set.spawn(async move {
+                            match tokio::time::timeout(
+                                timeout,
+                                runner.execute_flow_step(
+                                    fc,
+                                    si,
+                                    call_stack,
+                                    parent_context,
+                                    flow_request_id,
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(out)) => Ok((step_idx, out)),
+                                Ok(Err(e)) => Err((
+                                    step_idx,
+                                    RuneError::ExecutionFailed {
+                                        code: "FLOW_STEP_FAILED".into(),
+                                        message: e.to_string(),
+                                    },
+                                )),
+                                Err(_) => Err((step_idx, RuneError::Timeout)),
+                            }
+                        });
                     }
                 }
             }
@@ -356,6 +629,12 @@ impl FlowRunner {
                 match result {
                     Ok(Ok((idx, output))) => {
                         let step_def = &flow.steps[idx];
+                        tracing::debug!(
+                            flow = %flow.name,
+                            step = %step_def.name,
+                            output_bytes = output.len(),
+                            "step completed"
+                        );
                         step_statuses.insert(
                             step_def.name.clone(),
                             StepStatus::Completed {
@@ -367,6 +646,12 @@ impl FlowRunner {
                     }
                     Ok(Err((idx, rune_err))) => {
                         let step_def = &flow.steps[idx];
+                        tracing::warn!(
+                            flow = %flow.name,
+                            step = %step_def.name,
+                            error = %rune_err,
+                            "step failed"
+                        );
                         step_statuses.insert(
                             step_def.name.clone(),
                             StepStatus::Failed {
@@ -384,23 +669,86 @@ impl FlowRunner {
                 }
             }
 
-            // 如果该层有失败 step，终止执行并返回错误
+            // 记录首个失败（不立即返回，允许独立分支继续执行）
             if let Some((step_name, rune_err)) = layer_error {
-                return Err(FlowError::StepFailed {
-                    step: step_name,
-                    source: rune_err,
-                });
+                if first_error.is_none() {
+                    first_error = Some(FlowError::StepFailed {
+                        step: step_name,
+                        source: rune_err,
+                    });
+                }
             }
         }
 
         // 确定最终输出：取最后一层中最后一个完成的 step 的 output
         let output = Self::determine_output(flow, &step_outputs, &input);
 
-        Ok(FlowResult {
-            output,
-            steps: step_statuses,
-            steps_executed,
-        })
+        // 如果任意 terminal step（无后继的 step）成功完成，视为整体成功（部分执行）；
+        // 否则以第一个实际失败的 step 为错误返回。
+        // 使用 step_statuses 而非字节比较，避免 passthrough/echo flow 被误判为失败。
+        let all_deps: std::collections::HashSet<&str> = flow
+            .steps
+            .iter()
+            .flat_map(|s| s.depends_on.iter().map(String::as_str))
+            .collect();
+        let terminal_succeeded = flow
+            .steps
+            .iter()
+            .filter(|s| !all_deps.contains(s.name.as_str()))
+            .any(|s| {
+                matches!(
+                    step_statuses.get(&s.name),
+                    Some(StepStatus::Completed { .. })
+                )
+            });
+
+        let duration_ms = flow_start.elapsed().as_millis();
+        if terminal_succeeded {
+            tracing::debug!(
+                flow = %flow.name,
+                duration_ms,
+                steps_executed,
+                "flow completed"
+            );
+            metrics::counter!("flow_executions_total", "flow" => flow.name.clone(), "status" => "ok")
+                .increment(1);
+            metrics::histogram!("flow_duration_seconds", "flow" => flow.name.clone())
+                .record(duration_ms as f64 / 1000.0);
+            Ok(FlowResult {
+                output,
+                steps: step_statuses,
+                steps_executed,
+            })
+        } else if let Some(err) = first_error {
+            tracing::warn!(
+                flow = %flow.name,
+                duration_ms,
+                steps_executed,
+                error = %err,
+                "flow failed"
+            );
+            metrics::counter!("flow_executions_total", "flow" => flow.name.clone(), "status" => "error")
+                .increment(1);
+            metrics::histogram!("flow_duration_seconds", "flow" => flow.name.clone())
+                .record(duration_ms as f64 / 1000.0);
+            Err(err)
+        } else {
+            tracing::debug!(
+                flow = %flow.name,
+                duration_ms,
+                steps_executed,
+                "flow completed (no terminal step output)"
+            );
+            metrics::counter!("flow_executions_total", "flow" => flow.name.clone(), "status" => "ok")
+                .increment(1);
+            metrics::histogram!("flow_duration_seconds", "flow" => flow.name.clone())
+                .record(duration_ms as f64 / 1000.0);
+            Ok(FlowResult {
+                output,
+                steps: step_statuses,
+                steps_executed,
+            })
+        }
     }
 
     fn build_step_input(
@@ -430,6 +778,464 @@ impl FlowRunner {
         } else {
             // 无依赖，传递 flow 原始输入
             Ok(flow_input.clone())
+        }
+    }
+
+    // ─── Loop 执行 ───────────────────────────────────────────────────────────
+
+    async fn execute_loop(
+        &self,
+        config: &LoopConfig,
+        input: Bytes,
+        parent_context: HashMap<String, String>,
+        flow_request_id: String,
+        call_stack: Vec<String>,
+        loop_step_name: String,
+    ) -> Result<Bytes, FlowError> {
+        let mut current = input;
+
+        let emit = |evt: FlowProgressEvent| {
+            if let Some(tx) = &self.progress_tx {
+                let _ = tx.try_send(evt);
+            }
+        };
+
+        for iter in 0..config.max_iterations {
+            let iter_start = std::time::Instant::now();
+
+            emit(FlowProgressEvent::LoopIterationStart {
+                step: loop_step_name.clone(),
+                iteration: iter,
+                max_iterations: config.max_iterations,
+            });
+
+            let mut body_outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+            let iter_input_json: Option<serde_json::Value> = serde_json::from_slice(&current).ok();
+
+            for body_step in &config.body {
+                // condition 评估（引用本轮 body_outputs）
+                if let Some(cond) = &body_step.condition {
+                    if !evaluate_condition(cond, &HashMap::new(), &body_outputs, &iter_input_json) {
+                        body_outputs.insert(body_step.name.clone(), None); // skipped
+                        emit(FlowProgressEvent::BodyStepSkipped {
+                            step: loop_step_name.clone(),
+                            body_step: body_step.name.clone(),
+                        });
+                        continue;
+                    }
+                }
+
+                let step_input = Self::build_body_step_input(
+                    body_step,
+                    &current,
+                    &body_outputs,
+                    &iter_input_json,
+                )?;
+
+                let effective_timeout = body_step
+                    .timeout_ms
+                    .map(Duration::from_millis)
+                    .unwrap_or(self.step_timeout);
+
+                let body_future = self.execute_body_step_kind(
+                    body_step.kind.clone(),
+                    body_step.name.clone(),
+                    step_input,
+                    effective_timeout,
+                    parent_context.clone(),
+                    flow_request_id.clone(),
+                    call_stack.clone(),
+                );
+
+                let body_start = std::time::Instant::now();
+                let out = match tokio::time::timeout(effective_timeout, body_future).await {
+                    Ok(Ok(o)) => {
+                        let duration_ms = body_start.elapsed().as_millis() as u64;
+                        emit(FlowProgressEvent::BodyStepDone {
+                            step: loop_step_name.clone(),
+                            body_step: body_step.name.clone(),
+                            duration_ms,
+                        });
+                        o
+                    }
+                    Ok(Err(e)) => {
+                        let duration_ms = body_start.elapsed().as_millis() as u64;
+                        emit(FlowProgressEvent::BodyStepFailed {
+                            step: loop_step_name.clone(),
+                            body_step: body_step.name.clone(),
+                            error: e.to_string(),
+                            duration_ms,
+                        });
+                        return Err(FlowError::StepFailed {
+                            step: format!("{loop_step_name}[iter={iter}]/{}", body_step.name),
+                            source: e,
+                        });
+                    }
+                    Err(_) => {
+                        let duration_ms = body_start.elapsed().as_millis() as u64;
+                        emit(FlowProgressEvent::BodyStepFailed {
+                            step: loop_step_name.clone(),
+                            body_step: body_step.name.clone(),
+                            error: "timeout".to_string(),
+                            duration_ms,
+                        });
+                        return Err(FlowError::StepFailed {
+                            step: format!("{loop_step_name}[iter={iter}]/{}", body_step.name),
+                            source: RuneError::Timeout,
+                        });
+                    }
+                };
+
+                body_outputs.insert(body_step.name.clone(), Some(out));
+            }
+
+            // 取本轮最后一个非 skip 的 body step 输出，作为下一轮 current
+            // 必须按 body 顺序（而非 HashMap 顺序）反向查找，以保证语义正确
+            let last = config
+                .body
+                .iter()
+                .rev()
+                .find_map(|s| body_outputs.get(&s.name).and_then(|v| v.as_ref()))
+                .cloned()
+                .unwrap_or_else(|| current.clone());
+
+            // until 条件检查
+            if let Some(until) = &config.until {
+                let last_json: Option<serde_json::Value> = serde_json::from_slice(&last).ok();
+                let met = evaluate_condition(until, &HashMap::new(), &body_outputs, &last_json);
+                emit(FlowProgressEvent::LoopIterationEnd {
+                    step: loop_step_name.clone(),
+                    iteration: iter,
+                    duration_ms: iter_start.elapsed().as_millis() as u64,
+                    until_met: met,
+                });
+                if met {
+                    return Ok(last);
+                }
+            } else {
+                emit(FlowProgressEvent::LoopIterationEnd {
+                    step: loop_step_name.clone(),
+                    iteration: iter,
+                    duration_ms: iter_start.elapsed().as_millis() as u64,
+                    until_met: false,
+                });
+            }
+
+            current = last;
+        }
+
+        Ok(current)
+    }
+
+    // ─── Map 执行 ────────────────────────────────────────────────────────────
+
+    async fn execute_map(
+        &self,
+        config: &MapConfig,
+        input: Bytes,
+        step_outputs: &HashMap<String, Option<Bytes>>,
+        parent_context: HashMap<String, String>,
+        flow_request_id: String,
+        call_stack: Vec<String>,
+    ) -> Result<Bytes, FlowError> {
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+        use tokio::task::JoinSet;
+
+        // 解析 over 路径。$input.* 引用 step 自身入参；steps.X.* 引用前序步骤输出。
+        let input_json: Option<serde_json::Value> = serde_json::from_slice(&input).ok();
+        let items_val = resolve_condition_value(&config.over, step_outputs, &input_json);
+
+        // move out of items_val — 避免 .as_array().clone() 的不必要拷贝
+        let items = match items_val {
+            serde_json::Value::Array(arr) => arr,
+            _ => return Err(FlowError::MapItemsNotArray(config.over.clone())),
+        };
+
+        if items.is_empty() {
+            let empty: &[serde_json::Value] = &[];
+            return Ok(Bytes::from(
+                serde_json::to_vec(empty)
+                    .map_err(|e| FlowError::SerializationFailed(e.to_string()))?,
+            ));
+        }
+
+        let n_items = items.len();
+        let concurrency = config.concurrency.unwrap_or(n_items).max(1);
+        let sem = Arc::new(Semaphore::new(concurrency));
+
+        let mut join_set: JoinSet<Result<(usize, Bytes), (usize, FlowError)>> = JoinSet::new();
+
+        for (i, item) in items.into_iter().enumerate() {
+            let runner = self.clone();
+            let body = *config.body.clone();
+            let item_bytes = Bytes::from(
+                serde_json::to_vec(&item)
+                    .map_err(|e| FlowError::SerializationFailed(e.to_string()))?,
+            );
+            let sem = Arc::clone(&sem);
+            let parent_context = parent_context.clone();
+            let flow_request_id = flow_request_id.clone();
+            let call_stack = call_stack.clone();
+
+            join_set.spawn(async move {
+                let _permit = sem
+                    .acquire_owned()
+                    .await
+                    .expect("map semaphore closed unexpectedly");
+
+                let effective_timeout = body
+                    .timeout_ms
+                    .map(Duration::from_millis)
+                    .unwrap_or(runner.step_timeout);
+
+                let body_future = runner.execute_body_step_kind(
+                    body.kind,
+                    body.name,
+                    item_bytes,
+                    effective_timeout,
+                    parent_context,
+                    flow_request_id,
+                    call_stack,
+                );
+
+                let result = tokio::time::timeout(effective_timeout, body_future).await;
+                match result {
+                    Ok(Ok(out)) => Ok((i, out)),
+                    Ok(Err(e)) => Err((
+                        i,
+                        FlowError::StepFailed {
+                            step: format!("map[{i}]"),
+                            source: e,
+                        },
+                    )),
+                    Err(_) => Err((
+                        i,
+                        FlowError::StepFailed {
+                            step: format!("map[{i}]"),
+                            source: RuneError::Timeout,
+                        },
+                    )),
+                }
+            });
+        }
+
+        // 收集结果，fail-fast：任意子任务失败或 panic 均中止整批
+        let mut results: Vec<Option<serde_json::Value>> = vec![None; n_items];
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok(Ok((i, out))) => {
+                    let val: serde_json::Value =
+                        serde_json::from_slice(&out).unwrap_or(serde_json::Value::Null);
+                    results[i] = Some(val);
+                }
+                Ok(Err((_, e))) => {
+                    join_set.abort_all();
+                    return Err(e);
+                }
+                Err(join_err) => {
+                    // task panic 或被 abort — 不能静默变 null，必须 fail-fast
+                    join_set.abort_all();
+                    return Err(FlowError::SerializationFailed(format!(
+                        "map task panicked or aborted: {join_err}"
+                    )));
+                }
+            }
+        }
+
+        let output: Vec<serde_json::Value> = results
+            .into_iter()
+            .map(|v| v.unwrap_or(serde_json::Value::Null))
+            .collect();
+        let bytes = serde_json::to_vec(&output)
+            .map_err(|e| FlowError::SerializationFailed(e.to_string()))?;
+        Ok(Bytes::from(bytes))
+    }
+
+    /// 执行单个 BodyStep 的 kind（不含 timeout，调用方负责包裹）。
+    /// 返回 Pin<Box<...>> 以支持 BodyStepKind::Loop 的异步递归。
+    #[allow(clippy::too_many_arguments)]
+    fn execute_body_step_kind(
+        &self,
+        kind: BodyStepKind,
+        step_name: String,
+        input: Bytes,
+        effective_timeout: Duration,
+        parent_context: HashMap<String, String>,
+        flow_request_id: String,
+        call_stack: Vec<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<Bytes, RuneError>> + Send>> {
+        let runner = self.clone();
+        Box::pin(async move {
+            match kind {
+                BodyStepKind::Rune(rc) => {
+                    let invoker = runner.relay.resolve(&rc.rune, runner.resolver.as_ref());
+                    match invoker {
+                        Some(inv) => {
+                            let mut step_context = parent_context;
+                            step_context
+                                .insert(trace::PARENT_REQUEST_ID_KEY.to_string(), flow_request_id);
+                            step_context.insert(
+                                trace::SPAN_ID_KEY.to_string(),
+                                rune_core::time_utils::generate_span_id(),
+                            );
+                            let ctx = RuneContext {
+                                rune_name: rc.rune.clone(),
+                                request_id: uuid_simple(),
+                                context: step_context,
+                                // RemoteInvoker 经由 RuneContext.timeout 在 session 层发起
+                                // cancel；外层 execute_loop 的 tokio::time::timeout 是
+                                // LocalInvoker 的 hard deadline。两者使用相同值，互补不冲突。
+                                timeout: effective_timeout,
+                            };
+                            inv.invoke_once(ctx, input).await
+                        }
+                        None => Err(RuneError::NotFound(rc.rune)),
+                    }
+                }
+                BodyStepKind::Loop(lc) => runner
+                    .execute_loop(
+                        &lc,
+                        input,
+                        parent_context,
+                        flow_request_id,
+                        call_stack,
+                        step_name.clone(),
+                    )
+                    .await
+                    .map_err(|e| RuneError::ExecutionFailed {
+                        code: "LOOP_FAILED".into(),
+                        message: e.to_string(),
+                    }),
+                BodyStepKind::Map(mc) => runner
+                    // body step 内 Map 的 over 只能引用 $input.*（当前元素），
+                    // 不能引用外层 flow 的步骤输出，故传空 step_outputs。
+                    .execute_map(
+                        &mc,
+                        input,
+                        &HashMap::new(),
+                        parent_context,
+                        flow_request_id,
+                        call_stack,
+                    )
+                    .await
+                    .map_err(|e| RuneError::ExecutionFailed {
+                        code: "MAP_FAILED".into(),
+                        message: e.to_string(),
+                    }),
+                BodyStepKind::Switch(sc) => {
+                    // body step 内 Switch 同理：on 只能引用 $input.*
+                    let input_json: Option<serde_json::Value> = serde_json::from_slice(&input).ok();
+                    let on_val = resolve_condition_value(&sc.on, &HashMap::new(), &input_json);
+                    let matched: Option<BodyStep> = sc
+                        .cases
+                        .into_iter()
+                        .find(|c| c.when == on_val)
+                        .map(|c| c.body)
+                        .or_else(|| sc.default.map(|b| *b));
+
+                    match matched {
+                        None => Ok(Bytes::copy_from_slice(b"null")),
+                        Some(body) => {
+                            // Switch body 是孤立执行单元，没有前序 body 输出可引用
+                            let body_input = FlowRunner::build_body_step_input(
+                                &body,
+                                &input,
+                                &HashMap::new(),
+                                &input_json,
+                            )
+                            .map_err(|e| {
+                                RuneError::ExecutionFailed {
+                                    code: "SWITCH_INPUT_MAPPING_FAILED".into(),
+                                    message: e.to_string(),
+                                }
+                            })?;
+                            runner
+                                .execute_body_step_kind(
+                                    body.kind,
+                                    body.name,
+                                    body_input,
+                                    effective_timeout,
+                                    parent_context,
+                                    flow_request_id,
+                                    call_stack,
+                                )
+                                .await
+                        }
+                    }
+                }
+                BodyStepKind::Flow(fc) => runner
+                    .execute_flow_step(fc, input, call_stack, parent_context, flow_request_id)
+                    .await
+                    .map_err(|e| RuneError::ExecutionFailed {
+                        code: "FLOW_STEP_FAILED".into(),
+                        message: e.to_string(),
+                    }),
+            }
+        })
+    }
+
+    /// 执行 Flow Step（调用子流）。
+    ///
+    /// 返回 `Pin<Box<dyn Future + Send>>` 而非 `async fn`：这是打破 execute_flow_step →
+    /// execute_flow_internal → execute_flow_step 间接递归循环的必要手段——否则编译器无法
+    /// 确定 future 类型大小，JoinSet::spawn 会因 not-Send 报错。
+    fn execute_flow_step(
+        &self,
+        config: FlowConfig,
+        input: Bytes,
+        call_stack: Vec<String>,
+        parent_context: HashMap<String, String>,
+        flow_request_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<Bytes, FlowError>> + Send>> {
+        let runner = self.clone();
+        Box::pin(async move {
+            // 用 HashSet 做 O(1) 成员检测；call_stack Vec 保留用于生成错误信息里的调用链。
+            let visited: std::collections::HashSet<&str> =
+                call_stack.iter().map(String::as_str).collect();
+            if visited.contains(config.flow.as_str()) {
+                let mut chain = call_stack;
+                chain.push(config.flow.clone());
+                return Err(FlowError::CircularFlowRef(chain.join(" -> ")));
+            }
+            let flow = runner
+                .flows_snapshot
+                .get(&config.flow)
+                .ok_or_else(|| FlowError::FlowStepNotFound(config.flow.clone()))?
+                .clone();
+            let mut new_stack = call_stack;
+            new_stack.push(config.flow.clone());
+            let result = runner
+                .execute_flow_internal(
+                    &flow,
+                    input,
+                    new_stack,
+                    parent_context,
+                    Some(flow_request_id),
+                )
+                .await?;
+            Ok(result.output)
+        })
+    }
+
+    fn build_body_step_input(
+        body_step: &BodyStep,
+        // `iter_input` = 本轮迭代的起始输入（每轮迭代后更新）
+        iter_input: &Bytes,
+        body_outputs: &HashMap<String, Option<Bytes>>,
+        iter_input_json: &Option<serde_json::Value>,
+    ) -> Result<Bytes, FlowError> {
+        if let Some(mapping) = &body_step.input_mapping {
+            let mut result = serde_json::Map::new();
+            for (key, path) in mapping {
+                let value = resolve_condition_value(path, body_outputs, iter_input_json);
+                result.insert(key.clone(), value);
+            }
+            let bytes = serde_json::to_vec(&serde_json::Value::Object(result))
+                .map_err(|e| FlowError::SerializationFailed(e.to_string()))?;
+            Ok(Bytes::from(bytes))
+        } else {
+            Ok(iter_input.clone())
         }
     }
 
@@ -471,20 +1277,20 @@ fn resolve_path(
     step_outputs: &HashMap<String, Option<Bytes>>,
     flow_input_json: &Option<serde_json::Value>,
 ) -> serde_json::Value {
-    if path.starts_with("$input") {
-        // $input.field.subfield...
-        let parts: Vec<&str> = path.splitn(2, '.').collect();
-        if parts.len() < 2 {
-            // just "$input"
-            return flow_input_json.clone().unwrap_or(serde_json::Value::Null);
-        }
-        let field_path = parts[1]; // "field" or "field.subfield"
-        if let Some(input_val) = flow_input_json {
-            resolve_json_path(input_val, field_path)
-        } else {
-            serde_json::Value::Null
-        }
-    } else {
+    // Support both "$input.x" and "input.x" for consistency with condition expressions.
+    if path.starts_with("$input") || path == "input" || path.starts_with("input.") {
+        let field_path = path
+            .strip_prefix("$input.")
+            .or_else(|| path.strip_prefix("input."));
+        return match field_path {
+            None => flow_input_json.clone().unwrap_or(serde_json::Value::Null),
+            Some(fp) => flow_input_json
+                .as_ref()
+                .map(|v| resolve_json_path(v, fp))
+                .unwrap_or(serde_json::Value::Null),
+        };
+    }
+    {
         // step_name.output or step_name.output.field
         let parts: Vec<&str> = path.splitn(3, '.').collect();
         if parts.is_empty() {
@@ -704,6 +1510,50 @@ fn uuid_simple() -> String {
     rune_core::time_utils::unique_request_id()
 }
 
+/// Generic retry helper used by both Rune steps and Loop steps.
+/// Calls `op` up to `max_attempts` times (min 1). On failure, waits
+/// `backoff_ms` before retrying. Returns the last error if all attempts fail.
+///
+/// Callers spawning this inside `tokio::spawn` must ensure `F: Send` and
+/// `Fut: Send`; the generic bounds here do not enforce it so the helper can
+/// also be used in non-Send async contexts.
+async fn retry_op<F, Fut, T, E>(max_attempts: u32, backoff_ms: u64, mut op: F) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let max = max_attempts.max(1);
+    let mut last_err: Option<E> = None;
+    for attempt in 0..max {
+        match op().await {
+            Ok(out) => return Ok(out),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt + 1 < max && backoff_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap())
+}
+
+/// 按 RetryConfig 执行 invoker.invoke_once，失败时 backoff 后重试。
+/// max_attempts 含首次执行；None 等价于 max_attempts=1（不重试）。
+async fn invoke_with_retry(
+    invoker: Arc<dyn rune_core::invoker::RuneInvoker>,
+    ctx: RuneContext,
+    input: Bytes,
+    retry: Option<&crate::dag::RetryConfig>,
+) -> Result<Bytes, RuneError> {
+    let max = retry.map(|r| r.max_attempts).unwrap_or(1);
+    let backoff = retry.map(|r| r.backoff_ms).unwrap_or(0);
+    retry_op(max, backoff, || {
+        invoker.invoke_once(ctx.clone(), input.clone())
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,10 +1569,14 @@ mod tests {
 
         let step_def = crate::dag::StepDefinition {
             name: "test_step".to_string(),
-            rune: "test_rune".to_string(),
             depends_on: vec![],
             condition: None,
             input_mapping: Some(mapping),
+            timeout_ms: None,
+            retry: None,
+            kind: crate::dag::StepKind::Rune(crate::dag::RuneConfig {
+                rune: "test_rune".to_string(),
+            }),
         };
 
         let flow_input = Bytes::from(r#"{"field1": "hello", "field2": 42}"#);
@@ -745,10 +1599,14 @@ mod tests {
     fn test_fix_build_step_input_no_mapping() {
         let step_def = crate::dag::StepDefinition {
             name: "passthrough".to_string(),
-            rune: "test_rune".to_string(),
             depends_on: vec![],
             condition: None,
             input_mapping: None,
+            timeout_ms: None,
+            retry: None,
+            kind: crate::dag::StepKind::Rune(crate::dag::RuneConfig {
+                rune: "test_rune".to_string(),
+            }),
         };
 
         let flow_input = Bytes::from(r#"{"data": "test"}"#);
