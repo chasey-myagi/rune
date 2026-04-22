@@ -8,22 +8,24 @@ use std::collections::HashMap;
 fn step(name: &str, rune: &str) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: vec![],
         condition: None,
         input_mapping: None,
         timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(RuneConfig { rune: rune.into() }),
     }
 }
 
 fn step_with_deps(name: &str, rune: &str, deps: &[&str]) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: None,
         input_mapping: None,
         timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(RuneConfig { rune: rune.into() }),
     }
 }
 
@@ -35,22 +37,24 @@ fn step_with_deps_and_mapping(
 ) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: None,
         input_mapping: Some(mapping),
         timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(RuneConfig { rune: rune.into() }),
     }
 }
 
 fn step_with_condition(name: &str, rune: &str, deps: &[&str], condition: &str) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: Some(condition.to_string()),
         input_mapping: None,
         timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(RuneConfig { rune: rune.into() }),
     }
 }
 
@@ -335,19 +339,25 @@ fn serde_round_trip() {
         steps: vec![
             StepDefinition {
                 name: "A".to_string(),
-                rune: "rune_a".to_string(),
                 depends_on: vec![],
                 condition: None,
                 input_mapping: None,
                 timeout_ms: None,
+                retry: None,
+                kind: StepKind::Rune(RuneConfig {
+                    rune: "rune_a".into(),
+                }),
             },
             StepDefinition {
                 name: "B".to_string(),
-                rune: "rune_b".to_string(),
                 depends_on: vec!["A".to_string()],
                 condition: Some("input.ready == true".to_string()),
                 input_mapping: Some(mapping),
                 timeout_ms: None,
+                retry: None,
+                kind: StepKind::Rune(RuneConfig {
+                    rune: "rune_b".into(),
+                }),
             },
         ],
         gate_path: Some("/api/test".to_string()),

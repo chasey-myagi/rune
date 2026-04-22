@@ -1,10 +1,15 @@
-use crate::dag::{topological_layers, validate_dag, DagError, FlowDefinition};
+use crate::dag::{
+    topological_layers, validate_dag, BodyStep, BodyStepKind, DagError, FlowDefinition, LoopConfig,
+    StepKind,
+};
 use bytes::Bytes;
 use rune_core::relay::Relay;
 use rune_core::resolver::Resolver;
 use rune_core::rune::{RuneContext, RuneError};
 use rune_core::trace;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,10 +54,11 @@ const DEFAULT_STEP_TIMEOUT_SECS: u64 = 30;
 /// Created via [`FlowEngine::runner()`]. Clone the necessary `Arc` fields from
 /// `FlowEngine`, then release the lock and run the (potentially long)
 /// execution on this handle instead.
+#[derive(Clone)]
 pub struct FlowRunner {
     relay: Arc<Relay>,
     resolver: Arc<dyn Resolver>,
-    step_timeout: std::time::Duration,
+    step_timeout: Duration,
 }
 
 #[allow(dead_code)]
@@ -301,51 +307,83 @@ impl FlowRunner {
                 let step_input =
                     Self::build_step_input(step_def, &input, &step_outputs, &flow_input_json)?;
 
-                // Resolve rune invoker
-                let invoker = self.relay.resolve(&step_def.rune, self.resolver.as_ref());
-
-                let rune_name = step_def.rune.clone();
+                let timeout = step_def
+                    .timeout_ms
+                    .map(Duration::from_millis)
+                    .unwrap_or(self.step_timeout);
                 let si = step_input;
 
-                match invoker {
-                    Some(inv) => {
-                        let timeout = step_def
-                            .timeout_ms
-                            .map(Duration::from_millis)
-                            .unwrap_or(self.step_timeout);
+                match &step_def.kind {
+                    StepKind::Rune(rc) => {
+                        let invoker = self.relay.resolve(&rc.rune, self.resolver.as_ref());
+                        let rune_name = rc.rune.clone();
+                        match invoker {
+                            Some(inv) => {
+                                let parent_context = parent_context.clone();
+                                let flow_request_id = flow_request_id.clone();
+                                let flow_span_id = flow_span_id.clone();
+                                join_set.spawn(async move {
+                                    let mut step_context = parent_context;
+                                    step_context.insert(
+                                        trace::PARENT_REQUEST_ID_KEY.to_string(),
+                                        flow_request_id,
+                                    );
+                                    step_context.insert(
+                                        trace::PARENT_SPAN_ID_KEY.to_string(),
+                                        flow_span_id,
+                                    );
+                                    step_context.insert(
+                                        trace::SPAN_ID_KEY.to_string(),
+                                        rune_core::time_utils::generate_span_id(),
+                                    );
+                                    let ctx = RuneContext {
+                                        rune_name: rune_name.clone(),
+                                        request_id: uuid_simple(),
+                                        context: step_context,
+                                        timeout,
+                                    };
+                                    // engine 层强制 hard deadline（LocalInvoker 无内置 timeout）。
+                                    // RemoteInvoker 经由 RuneContext.timeout 在 session 层同时
+                                    // 发起 cancel，两者使用相同值，互补不冲突。
+                                    match tokio::time::timeout(timeout, inv.invoke_once(ctx, si))
+                                        .await
+                                    {
+                                        Ok(Ok(output)) => Ok((step_idx, output)),
+                                        Ok(Err(e)) => Err((step_idx, e)),
+                                        Err(_) => Err((step_idx, RuneError::Timeout)),
+                                    }
+                                });
+                            }
+                            None => {
+                                join_set.spawn(async move {
+                                    Err((step_idx, RuneError::NotFound(rune_name)))
+                                });
+                            }
+                        }
+                    }
+                    StepKind::Loop(lc) => {
+                        let runner = self.clone();
+                        let lc = lc.clone();
                         let parent_context = parent_context.clone();
                         let flow_request_id = flow_request_id.clone();
-                        let flow_span_id = flow_span_id.clone();
                         join_set.spawn(async move {
-                            let mut step_context = parent_context;
-                            step_context
-                                .insert(trace::PARENT_REQUEST_ID_KEY.to_string(), flow_request_id);
-                            step_context
-                                .insert(trace::PARENT_SPAN_ID_KEY.to_string(), flow_span_id);
-                            step_context.insert(
-                                trace::SPAN_ID_KEY.to_string(),
-                                rune_core::time_utils::generate_span_id(),
-                            );
-                            let ctx = RuneContext {
-                                rune_name: rune_name.clone(),
-                                request_id: uuid_simple(),
-                                context: step_context,
+                            let result = tokio::time::timeout(
                                 timeout,
-                            };
-                            // engine 层强制 hard deadline（LocalInvoker 无内置 timeout）。
-                            // RemoteInvoker 会经由 RuneContext.timeout 在 session 层同时发起
-                            // cancel 信号给 caster，两者使用相同的 timeout 值，互补不冲突。
-                            match tokio::time::timeout(timeout, inv.invoke_once(ctx, si)).await {
-                                Ok(Ok(output)) => Ok((step_idx, output)),
-                                Ok(Err(e)) => Err((step_idx, e)),
+                                runner.execute_loop(&lc, si, parent_context, flow_request_id),
+                            )
+                            .await;
+                            match result {
+                                Ok(Ok(out)) => Ok((step_idx, out)),
+                                Ok(Err(e)) => Err((
+                                    step_idx,
+                                    RuneError::ExecutionFailed {
+                                        code: "LOOP_FAILED".into(),
+                                        message: e.to_string(),
+                                    },
+                                )),
                                 Err(_) => Err((step_idx, RuneError::Timeout)),
                             }
                         });
-                    }
-                    None => {
-                        // Rune not found
-                        join_set
-                            .spawn(async move { Err((step_idx, RuneError::NotFound(rune_name))) });
                     }
                 }
             }
@@ -438,6 +476,163 @@ impl FlowRunner {
         } else {
             // 无依赖，传递 flow 原始输入
             Ok(flow_input.clone())
+        }
+    }
+
+    // ─── Loop 执行 ───────────────────────────────────────────────────────────
+
+    async fn execute_loop(
+        &self,
+        config: &LoopConfig,
+        input: Bytes,
+        parent_context: HashMap<String, String>,
+        flow_request_id: String,
+    ) -> Result<Bytes, FlowError> {
+        let mut current = input;
+
+        for _iter in 0..config.max_iterations {
+            let mut body_outputs: HashMap<String, Option<Bytes>> = HashMap::new();
+            let iter_input_json: Option<serde_json::Value> = serde_json::from_slice(&current).ok();
+
+            for body_step in &config.body {
+                // condition 评估（引用本轮 body_outputs）
+                if let Some(cond) = &body_step.condition {
+                    if !evaluate_condition(cond, &HashMap::new(), &body_outputs, &iter_input_json) {
+                        body_outputs.insert(body_step.name.clone(), None); // skipped
+                        continue;
+                    }
+                }
+
+                let step_input = Self::build_body_step_input(
+                    body_step,
+                    &current,
+                    &body_outputs,
+                    &iter_input_json,
+                )?;
+
+                let effective_timeout = body_step
+                    .timeout_ms
+                    .map(Duration::from_millis)
+                    .unwrap_or(self.step_timeout);
+
+                let body_future = self.execute_body_step_kind(
+                    body_step.kind.clone(),
+                    step_input,
+                    effective_timeout,
+                    parent_context.clone(),
+                    flow_request_id.clone(),
+                );
+
+                let out = match tokio::time::timeout(effective_timeout, body_future).await {
+                    Ok(Ok(o)) => o,
+                    Ok(Err(e)) => {
+                        return Err(FlowError::StepFailed {
+                            step: body_step.name.clone(),
+                            source: e,
+                        })
+                    }
+                    Err(_) => {
+                        return Err(FlowError::StepFailed {
+                            step: body_step.name.clone(),
+                            source: RuneError::Timeout,
+                        })
+                    }
+                };
+
+                body_outputs.insert(body_step.name.clone(), Some(out));
+            }
+
+            // 取本轮最后一个非 skip 的 body step 输出，作为下一轮 current
+            // 必须按 body 顺序（而非 HashMap 顺序）反向查找，以保证语义正确
+            let last = config
+                .body
+                .iter()
+                .rev()
+                .find_map(|s| body_outputs.get(&s.name).and_then(|v| v.as_ref()))
+                .cloned()
+                .unwrap_or_else(|| current.clone());
+
+            // until 条件检查
+            if let Some(until) = &config.until {
+                let last_json: Option<serde_json::Value> = serde_json::from_slice(&last).ok();
+                if evaluate_condition(until, &HashMap::new(), &body_outputs, &last_json) {
+                    return Ok(last);
+                }
+            }
+
+            current = last;
+        }
+
+        Ok(current)
+    }
+
+    /// 执行单个 BodyStep 的 kind（不含 timeout，调用方负责包裹）。
+    /// 返回 Pin<Box<...>> 以支持 BodyStepKind::Loop 的异步递归。
+    fn execute_body_step_kind(
+        &self,
+        kind: BodyStepKind,
+        input: Bytes,
+        effective_timeout: Duration,
+        parent_context: HashMap<String, String>,
+        flow_request_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<Bytes, RuneError>> + Send>> {
+        let runner = self.clone();
+        Box::pin(async move {
+            match kind {
+                BodyStepKind::Rune(rc) => {
+                    let invoker = runner.relay.resolve(&rc.rune, runner.resolver.as_ref());
+                    match invoker {
+                        Some(inv) => {
+                            let mut step_context = parent_context;
+                            step_context
+                                .insert(trace::PARENT_REQUEST_ID_KEY.to_string(), flow_request_id);
+                            step_context.insert(
+                                trace::SPAN_ID_KEY.to_string(),
+                                rune_core::time_utils::generate_span_id(),
+                            );
+                            let ctx = RuneContext {
+                                rune_name: rc.rune.clone(),
+                                request_id: uuid_simple(),
+                                context: step_context,
+                                // RemoteInvoker 经由 RuneContext.timeout 在 session 层发起
+                                // cancel；外层 execute_loop 的 tokio::time::timeout 是
+                                // LocalInvoker 的 hard deadline。两者使用相同值，互补不冲突。
+                                timeout: effective_timeout,
+                            };
+                            inv.invoke_once(ctx, input).await
+                        }
+                        None => Err(RuneError::NotFound(rc.rune)),
+                    }
+                }
+                BodyStepKind::Loop(lc) => runner
+                    .execute_loop(&lc, input, parent_context, flow_request_id)
+                    .await
+                    .map_err(|e| RuneError::ExecutionFailed {
+                        code: "LOOP_FAILED".into(),
+                        message: e.to_string(),
+                    }),
+            }
+        })
+    }
+
+    fn build_body_step_input(
+        body_step: &BodyStep,
+        // `iter_input` = 本轮迭代的起始输入（每轮迭代后更新）
+        iter_input: &Bytes,
+        body_outputs: &HashMap<String, Option<Bytes>>,
+        iter_input_json: &Option<serde_json::Value>,
+    ) -> Result<Bytes, FlowError> {
+        if let Some(mapping) = &body_step.input_mapping {
+            let mut result = serde_json::Map::new();
+            for (key, path) in mapping {
+                let value = resolve_condition_value(path, body_outputs, iter_input_json);
+                result.insert(key.clone(), value);
+            }
+            let bytes = serde_json::to_vec(&serde_json::Value::Object(result))
+                .map_err(|e| FlowError::SerializationFailed(e.to_string()))?;
+            Ok(Bytes::from(bytes))
+        } else {
+            Ok(iter_input.clone())
         }
     }
 
@@ -727,11 +922,14 @@ mod tests {
 
         let step_def = crate::dag::StepDefinition {
             name: "test_step".to_string(),
-            rune: "test_rune".to_string(),
             depends_on: vec![],
             condition: None,
             input_mapping: Some(mapping),
             timeout_ms: None,
+            retry: None,
+            kind: crate::dag::StepKind::Rune(crate::dag::RuneConfig {
+                rune: "test_rune".to_string(),
+            }),
         };
 
         let flow_input = Bytes::from(r#"{"field1": "hello", "field2": 42}"#);
@@ -754,11 +952,14 @@ mod tests {
     fn test_fix_build_step_input_no_mapping() {
         let step_def = crate::dag::StepDefinition {
             name: "passthrough".to_string(),
-            rune: "test_rune".to_string(),
             depends_on: vec![],
             condition: None,
             input_mapping: None,
             timeout_ms: None,
+            retry: None,
+            kind: crate::dag::StepKind::Rune(crate::dag::RuneConfig {
+                rune: "test_rune".to_string(),
+            }),
         };
 
         let flow_input = Bytes::from(r#"{"data": "test"}"#);

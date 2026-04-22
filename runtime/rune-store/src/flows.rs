@@ -106,18 +106,21 @@ fn is_unique_constraint(err: &rusqlite::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rune_flow::dag::StepDefinition;
+    use rune_flow::dag::{RuneConfig as FlowRuneConfig, StepDefinition, StepKind};
 
     fn sample_flow(name: &str) -> FlowDefinition {
         FlowDefinition {
             name: name.to_string(),
             steps: vec![StepDefinition {
                 name: "step-a".to_string(),
-                rune: "echo".to_string(),
                 depends_on: Vec::new(),
                 condition: None,
                 input_mapping: None,
                 timeout_ms: None,
+                retry: None,
+                kind: StepKind::Rune(FlowRuneConfig {
+                    rune: "echo".into(),
+                }),
             }],
             gate_path: Some(format!("/{name}")),
         }

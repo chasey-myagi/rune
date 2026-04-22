@@ -272,7 +272,10 @@ fn dag_benchmarks(c: &mut Criterion) {
     use rune_core::relay::Relay;
     use rune_core::resolver::RoundRobinResolver;
     use rune_core::rune::{make_handler, RuneConfig};
-    use rune_flow::dag::{topological_layers, validate_dag, FlowDefinition, StepDefinition};
+    use rune_flow::dag::{
+        topological_layers, validate_dag, FlowDefinition, RuneConfig as FlowRuneConfig,
+        StepDefinition, StepKind,
+    };
     use rune_flow::engine::FlowEngine;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -284,7 +287,6 @@ fn dag_benchmarks(c: &mut Criterion) {
         steps: (0..10)
             .map(|i| StepDefinition {
                 name: format!("step_{}", i),
-                rune: format!("rune_{}", i),
                 depends_on: if i == 0 {
                     vec![]
                 } else {
@@ -293,6 +295,10 @@ fn dag_benchmarks(c: &mut Criterion) {
                 condition: None,
                 input_mapping: None,
                 timeout_ms: None,
+                retry: None,
+                kind: StepKind::Rune(FlowRuneConfig {
+                    rune: format!("rune_{}", i),
+                }),
             })
             .collect(),
         gate_path: None,
@@ -341,7 +347,6 @@ fn dag_benchmarks(c: &mut Criterion) {
             steps: (0..3)
                 .map(|i| StepDefinition {
                     name: format!("step_{}", i),
-                    rune: format!("step_{}", i),
                     depends_on: if i == 0 {
                         vec![]
                     } else {
@@ -350,6 +355,10 @@ fn dag_benchmarks(c: &mut Criterion) {
                     condition: None,
                     input_mapping: None,
                     timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: format!("step_{}", i),
+                    }),
                 })
                 .collect(),
             gate_path: None,
@@ -391,31 +400,39 @@ fn dag_benchmarks(c: &mut Criterion) {
             steps: vec![
                 StepDefinition {
                     name: "start".into(),
-                    rune: "start".into(),
                     depends_on: vec![],
                     condition: None,
                     input_mapping: None,
                     timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: "start".into(),
+                    }),
                 },
                 StepDefinition {
                     name: "left".into(),
-                    rune: "left".into(),
                     depends_on: vec!["start".into()],
                     condition: None,
                     input_mapping: None,
                     timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: "left".into(),
+                    }),
                 },
                 StepDefinition {
                     name: "right".into(),
-                    rune: "right".into(),
                     depends_on: vec!["start".into()],
                     condition: None,
                     input_mapping: None,
                     timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: "right".into(),
+                    }),
                 },
                 StepDefinition {
                     name: "join".into(),
-                    rune: "join".into(),
                     depends_on: vec!["left".into(), "right".into()],
                     condition: None,
                     input_mapping: Some({
@@ -425,6 +442,10 @@ fn dag_benchmarks(c: &mut Criterion) {
                         m
                     }),
                     timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: "join".into(),
+                    }),
                 },
             ],
             gate_path: None,
