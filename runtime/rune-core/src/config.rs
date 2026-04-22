@@ -434,6 +434,11 @@ impl AppConfig {
             u32
         );
         env_override!(
+            "RUNE_STORE__TASK_RETENTION_DAYS",
+            self.store.task_retention_days,
+            u32
+        );
+        env_override!(
             "RUNE_STORE__READER_POOL_SIZE",
             self.store.reader_pool_size,
             usize

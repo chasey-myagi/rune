@@ -54,6 +54,9 @@ impl StoreKeyVerifier {
         let elapsed = start.elapsed();
         let min = Duration::from_millis(MIN_VERIFY_MS);
         if elapsed < min {
+            // NOTE: `tokio::time::pause()` freezes the virtual clock, so this
+            // sleep will never advance in tests that call pause(). Tests for
+            // this function must use real time or avoid calling pause().
             tokio::time::sleep(min - elapsed).await;
         }
         ok

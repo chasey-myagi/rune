@@ -1513,6 +1513,10 @@ fn uuid_simple() -> String {
 /// Generic retry helper used by both Rune steps and Loop steps.
 /// Calls `op` up to `max_attempts` times (min 1). On failure, waits
 /// `backoff_ms` before retrying. Returns the last error if all attempts fail.
+///
+/// Callers spawning this inside `tokio::spawn` must ensure `F: Send` and
+/// `Fut: Send`; the generic bounds here do not enforce it so the helper can
+/// also be used in non-Send async contexts.
 async fn retry_op<F, Fut, T, E>(max_attempts: u32, backoff_ms: u64, mut op: F) -> Result<T, E>
 where
     F: FnMut() -> Fut,

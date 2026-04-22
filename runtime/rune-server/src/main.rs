@@ -143,30 +143,6 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(NoopVerifier)
     };
 
-    // ── Background cleanup task ──
-    {
-        let store_cleanup = store.clone();
-        let log_days = config.store.log_retention_days;
-        let task_days = config.store.task_retention_days;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(24 * 3600));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                let cutoff_logs = chrono_days_ago(log_days);
-                let cutoff_tasks = chrono_days_ago(task_days);
-                match store_cleanup.cleanup_logs_before(&cutoff_logs).await {
-                    Ok(n) => tracing::info!(deleted = n, "cleaned up call_logs"),
-                    Err(e) => tracing::warn!(error = %e, "call_logs cleanup failed"),
-                }
-                match store_cleanup.cleanup_tasks_before(&cutoff_tasks).await {
-                    Ok(n) => tracing::info!(deleted = n, "cleaned up tasks"),
-                    Err(e) => tracing::warn!(error = %e, "tasks cleanup failed"),
-                }
-            }
-        });
-    }
-
     // ── App + Runes ──
     let mut app = App::with_config_and_auth(config.clone(), key_verifier.clone());
 
@@ -427,6 +403,37 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, mut http_shutdown_rx) = tokio::sync::watch::channel(false);
     let mut grpc_shutdown_rx = shutdown_tx.subscribe();
 
+    // ── Background cleanup task ──
+    {
+        let store_cleanup = store.clone();
+        let log_days = config.store.log_retention_days;
+        let task_days = config.store.task_retention_days;
+        let mut cleanup_shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(24 * 3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = cleanup_shutdown_rx.changed() => break,
+                }
+                if *cleanup_shutdown_rx.borrow() {
+                    break;
+                }
+                let cutoff_logs = chrono_days_ago(log_days);
+                let cutoff_tasks = chrono_days_ago(task_days);
+                match store_cleanup.cleanup_logs_before(&cutoff_logs).await {
+                    Ok(n) => tracing::info!(deleted = n, "cleaned up call_logs"),
+                    Err(e) => tracing::warn!(error = %e, "call_logs cleanup failed"),
+                }
+                match store_cleanup.cleanup_tasks_before(&cutoff_tasks).await {
+                    Ok(n) => tracing::info!(deleted = n, "cleaned up tasks"),
+                    Err(e) => tracing::warn!(error = %e, "tasks cleanup failed"),
+                }
+            }
+        });
+    }
+
     let http_addr = running.config.http_addr();
     // Handle for axum-server graceful shutdown (only used in TLS mode)
     let axum_server_handle = axum_server::Handle::new();
@@ -653,6 +660,63 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 
 fn is_leap(y: u64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    use super::{days_to_ymd, is_leap};
+
+    #[test]
+    fn is_leap_rules() {
+        assert!(is_leap(2000)); // divisible by 400 → leap
+        assert!(!is_leap(1900)); // divisible by 100 but not 400 → not leap
+        assert!(is_leap(2024)); // divisible by 4, not 100 → leap
+        assert!(!is_leap(2023)); // not divisible by 4 → not leap
+    }
+
+    #[test]
+    fn epoch_is_1970_jan_01() {
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn year_2000_is_leap_feb_29_exists() {
+        // 2000-02-29: days since epoch for 2000-02-01 = 10988, +28 = 11016
+        // 1970..1999 = 30 years; 7 leaps (72,76,80,84,88,92,96) = 30*365+7 = 10957
+        // Jan 2000 = 31 days → 10957+31 = 10988 → Feb 1
+        // Feb 29 = 10988+28 = 11016
+        assert_eq!(days_to_ymd(11016), (2000, 2, 29));
+    }
+
+    #[test]
+    fn year_1900_has_no_feb_29() {
+        // 1900 is not a leap year: 1900-03-01 must be day-after Feb 28
+        // Days from epoch to 1900 is before epoch (negative), so test via is_leap
+        assert!(!is_leap(1900));
+        // Feb has 28 days in 1900: days_to_ymd on the first day of March in a
+        // non-leap year should land on (y, 3, 1) after 31+28 days in year.
+        // Use 2100 (also not leap) which is after epoch:
+        assert!(!is_leap(2100));
+    }
+
+    #[test]
+    fn month_rollover_leap_day_plus_one() {
+        // 2024-02-29 + 1 day = 2024-03-01
+        // days from epoch to 2024-02-29:
+        // 1970..2023 = 54 years; leaps: 72,76,80,84,88,92,96,00,04,08,12,16,20 = 13
+        // 54*365+13 = 19723 → Jan 1 2024
+        // Jan=31, Feb (leap)=29 → Feb 29 = 19723+31+28 = 19782
+        assert_eq!(days_to_ymd(19782), (2024, 2, 29));
+        assert_eq!(days_to_ymd(19783), (2024, 3, 1));
+    }
+
+    #[test]
+    fn year_boundary_dec_31_to_jan_01() {
+        // 2023-12-31 → 2024-01-01
+        // 2024-01-01 = 19723 (from above test)
+        assert_eq!(days_to_ymd(19722), (2023, 12, 31));
+        assert_eq!(days_to_ymd(19723), (2024, 1, 1));
+    }
 }
 
 // ---------------------------------------------------------------------------

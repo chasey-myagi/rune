@@ -6,17 +6,20 @@ use std::time::{Duration, Instant};
 /// Emit a single request's business metrics after execution completes.
 fn record_rune_metrics(rune_name: &str, mode: &'static str, status_code: i32, latency_ms: i64) {
     let status: &'static str = if status_code < 400 { "ok" } else { "error" };
-    let labels = [
-        ("rune", rune_name.to_owned()),
-        ("mode", mode.to_owned()),
-        ("status", status.to_owned()),
+    let labels = vec![
+        metrics::Label::new("rune", rune_name.to_owned()),
+        metrics::Label::new("mode", mode),
+        metrics::Label::new("status", status),
     ];
-    metrics::counter!("rune_requests_total", &labels).increment(1);
-    metrics::histogram!("rune_request_duration_seconds", &labels)
+    metrics::counter!("rune_requests_total", labels.clone()).increment(1);
+    metrics::histogram!("rune_request_duration_seconds", labels)
         .record(latency_ms.max(0) as f64 / 1000.0);
     if status_code >= 400 {
-        let err_labels = [("rune", rune_name.to_owned()), ("mode", mode.to_owned())];
-        metrics::counter!("rune_errors_total", &err_labels).increment(1);
+        let err_labels = vec![
+            metrics::Label::new("rune", rune_name.to_owned()),
+            metrics::Label::new("mode", mode),
+        ];
+        metrics::counter!("rune_errors_total", err_labels).increment(1);
     }
 }
 
