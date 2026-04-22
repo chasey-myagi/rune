@@ -5,7 +5,7 @@ use bytes::Bytes;
 use clap::Parser;
 use rune_core::app::App;
 use rune_core::auth::{KeyVerifier, NoopVerifier};
-use rune_core::config::AppConfig;
+use rune_core::config::{AppConfig, LogFormat};
 use rune_core::grpc_service::RuneGrpcService;
 use rune_core::rune::{make_handler, GateConfig, RuneConfig, RuneError};
 use rune_core::scaling::ScaleEvaluator;
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Telemetry (tracing + metrics) ──
-    let _tracer_provider = init_telemetry(&config.telemetry);
+    let _tracer_provider = init_telemetry(&config.telemetry, &config.log.format);
 
     if let Some(ref path) = config.log.file {
         tracing::warn!(
@@ -666,7 +666,7 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 #[cfg(test)]
@@ -744,13 +744,19 @@ mod calendar_tests {
 ///
 /// Returns the `SdkTracerProvider` (if created) so the caller can flush spans
 /// on shutdown via `provider.shutdown()`.
-fn init_telemetry(config: &TelemetryConfig) -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
+fn init_telemetry(
+    config: &TelemetryConfig,
+    log_format: &LogFormat,
+) -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_otlp::WithExportConfig as _;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = tracing_subscriber::fmt::layer();
+    let fmt_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = match log_format {
+        LogFormat::Json => Box::new(tracing_subscriber::fmt::layer().json()),
+        LogFormat::Text => Box::new(tracing_subscriber::fmt::layer()),
+    };
 
     let provider = if let Some(ref endpoint) = config.otlp_endpoint {
         // OTLP gRPC exporter -> OpenTelemetry tracing layer

@@ -239,10 +239,20 @@ impl Default for ScalingConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
     pub level: String,
+    #[serde(default)]
+    pub format: LogFormat,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 }
@@ -251,6 +261,7 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             level: "info".to_string(),
+            format: LogFormat::Text,
             file: None,
         }
     }
@@ -544,6 +555,13 @@ impl AppConfig {
 
         // Log
         env_override_string!("RUNE_LOG__LEVEL", self.log.level);
+        if let Ok(val) = std::env::var("RUNE_LOG__FORMAT") {
+            match val.to_lowercase().as_str() {
+                "json" => self.log.format = LogFormat::Json,
+                "text" => self.log.format = LogFormat::Text,
+                _ => {} // 忽略未知值
+            }
+        }
         if let Ok(v) = std::env::var("RUNE_LOG__FILE") {
             self.log.file = if v.is_empty() { None } else { Some(v) };
         }
@@ -691,6 +709,32 @@ http_port = 19999
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.scaling.enabled);
         assert_eq!(config.scaling.eval_interval_secs, 12);
+    }
+
+    #[test]
+    fn test_log_format_default_is_text() {
+        let config = LogConfig::default();
+        assert_eq!(config.format, LogFormat::Text);
+    }
+
+    #[test]
+    fn test_log_format_deserialize_json() {
+        let toml_str = r#"
+        [log]
+        format = "json"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.log.format, LogFormat::Json);
+    }
+
+    #[test]
+    fn test_log_format_deserialize_text() {
+        let toml_str = r#"
+        [log]
+        format = "text"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.log.format, LogFormat::Text);
     }
 
     #[test]

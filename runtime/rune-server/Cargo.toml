@@ -18,7 +18,7 @@ anyhow.workspace = true
 axum.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter", "registry"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "registry", "json"] }
 rand = "0.9"
 hex = "0.4"
 opentelemetry = "0.31.0"
