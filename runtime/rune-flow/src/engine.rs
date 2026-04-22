@@ -1,6 +1,6 @@
 use crate::dag::{
     topological_layers, validate_dag, BodyStep, BodyStepKind, DagError, FlowDefinition, LoopConfig,
-    StepKind,
+    MapConfig, StepKind,
 };
 use bytes::Bytes;
 use rune_core::relay::Relay;
@@ -44,6 +44,8 @@ pub enum FlowError {
     NoTerminalStep,
     #[error("serialization failed: {0}")]
     SerializationFailed(String),
+    #[error("map step: 'over' path '{0}' did not resolve to a JSON array")]
+    MapItemsNotArray(String),
 }
 
 /// Default step timeout when not configured.
@@ -385,6 +387,37 @@ impl FlowRunner {
                             }
                         });
                     }
+                    StepKind::Map(mc) => {
+                        let runner = self.clone();
+                        let mc = mc.clone();
+                        let step_outputs_snapshot = step_outputs.clone();
+                        let parent_context = parent_context.clone();
+                        let flow_request_id = flow_request_id.clone();
+                        join_set.spawn(async move {
+                            let result = tokio::time::timeout(
+                                timeout,
+                                runner.execute_map(
+                                    &mc,
+                                    si,
+                                    &step_outputs_snapshot,
+                                    parent_context,
+                                    flow_request_id,
+                                ),
+                            )
+                            .await;
+                            match result {
+                                Ok(Ok(out)) => Ok((step_idx, out)),
+                                Ok(Err(e)) => Err((
+                                    step_idx,
+                                    RuneError::ExecutionFailed {
+                                        code: "MAP_FAILED".into(),
+                                        message: e.to_string(),
+                                    },
+                                )),
+                                Err(_) => Err((step_idx, RuneError::Timeout)),
+                            }
+                        });
+                    }
                 }
             }
 
@@ -566,6 +599,124 @@ impl FlowRunner {
         Ok(current)
     }
 
+    // ─── Map 执行 ────────────────────────────────────────────────────────────
+
+    async fn execute_map(
+        &self,
+        config: &MapConfig,
+        input: Bytes,
+        step_outputs: &HashMap<String, Option<Bytes>>,
+        parent_context: HashMap<String, String>,
+        flow_request_id: String,
+    ) -> Result<Bytes, FlowError> {
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+        use tokio::task::JoinSet;
+
+        // 解析 over 路径。$input.* 引用 step 自身入参；steps.X.* 引用前序步骤输出。
+        let input_json: Option<serde_json::Value> = serde_json::from_slice(&input).ok();
+        let items_val = resolve_condition_value(&config.over, step_outputs, &input_json);
+
+        // move out of items_val — 避免 .as_array().clone() 的不必要拷贝
+        let items = match items_val {
+            serde_json::Value::Array(arr) => arr,
+            _ => return Err(FlowError::MapItemsNotArray(config.over.clone())),
+        };
+
+        if items.is_empty() {
+            let empty: &[serde_json::Value] = &[];
+            return Ok(Bytes::from(
+                serde_json::to_vec(empty)
+                    .map_err(|e| FlowError::SerializationFailed(e.to_string()))?,
+            ));
+        }
+
+        let n_items = items.len();
+        let concurrency = config.concurrency.unwrap_or(n_items).max(1);
+        let sem = Arc::new(Semaphore::new(concurrency));
+
+        let mut join_set: JoinSet<Result<(usize, Bytes), (usize, FlowError)>> = JoinSet::new();
+
+        for (i, item) in items.into_iter().enumerate() {
+            let runner = self.clone();
+            let body = *config.body.clone();
+            let item_bytes = Bytes::from(
+                serde_json::to_vec(&item)
+                    .map_err(|e| FlowError::SerializationFailed(e.to_string()))?,
+            );
+            let sem = Arc::clone(&sem);
+            let parent_context = parent_context.clone();
+            let flow_request_id = flow_request_id.clone();
+
+            join_set.spawn(async move {
+                let _permit = sem.acquire_owned().await.unwrap();
+
+                let effective_timeout = body
+                    .timeout_ms
+                    .map(Duration::from_millis)
+                    .unwrap_or(runner.step_timeout);
+
+                let body_future = runner.execute_body_step_kind(
+                    body.kind,
+                    item_bytes,
+                    effective_timeout,
+                    parent_context,
+                    flow_request_id,
+                );
+
+                let result = tokio::time::timeout(effective_timeout, body_future).await;
+                match result {
+                    Ok(Ok(out)) => Ok((i, out)),
+                    Ok(Err(e)) => Err((
+                        i,
+                        FlowError::StepFailed {
+                            step: format!("map[{i}]"),
+                            source: e,
+                        },
+                    )),
+                    Err(_) => Err((
+                        i,
+                        FlowError::StepFailed {
+                            step: format!("map[{i}]"),
+                            source: RuneError::Timeout,
+                        },
+                    )),
+                }
+            });
+        }
+
+        // 收集结果，fail-fast：任意子任务失败或 panic 均中止整批
+        let mut results: Vec<Option<serde_json::Value>> = vec![None; n_items];
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok(Ok((i, out))) => {
+                    let val: serde_json::Value =
+                        serde_json::from_slice(&out).unwrap_or(serde_json::Value::Null);
+                    results[i] = Some(val);
+                }
+                Ok(Err((_, e))) => {
+                    join_set.abort_all();
+                    return Err(e);
+                }
+                Err(join_err) => {
+                    // task panic 或被 abort — 不能静默变 null，必须 fail-fast
+                    join_set.abort_all();
+                    return Err(FlowError::SerializationFailed(format!(
+                        "map task panicked or aborted: {join_err}"
+                    )));
+                }
+            }
+        }
+
+        let output: Vec<serde_json::Value> = results
+            .into_iter()
+            .map(|v| v.unwrap_or(serde_json::Value::Null))
+            .collect();
+        let bytes = serde_json::to_vec(&output)
+            .map_err(|e| FlowError::SerializationFailed(e.to_string()))?;
+        Ok(Bytes::from(bytes))
+    }
+
     /// 执行单个 BodyStep 的 kind（不含 timeout，调用方负责包裹）。
     /// 返回 Pin<Box<...>> 以支持 BodyStepKind::Loop 的异步递归。
     fn execute_body_step_kind(
@@ -609,6 +760,15 @@ impl FlowRunner {
                     .await
                     .map_err(|e| RuneError::ExecutionFailed {
                         code: "LOOP_FAILED".into(),
+                        message: e.to_string(),
+                    }),
+                BodyStepKind::Map(mc) => runner
+                    // body step 内 Map 的 over 只能引用 $input.*（当前元素），
+                    // 不能引用外层 flow 的步骤输出，故传空 step_outputs。
+                    .execute_map(&mc, input, &HashMap::new(), parent_context, flow_request_id)
+                    .await
+                    .map_err(|e| RuneError::ExecutionFailed {
+                        code: "MAP_FAILED".into(),
                         message: e.to_string(),
                     }),
             }

@@ -28,6 +28,7 @@ pub struct StepDefinition {
 pub enum StepKind {
     Rune(RuneConfig),
     Loop(LoopConfig),
+    Map(MapConfig),
 }
 
 /// Rune step 配置
@@ -42,6 +43,18 @@ pub struct LoopConfig {
     pub body: Vec<BodyStep>,
     pub max_iterations: u32,
     pub until: Option<String>,
+}
+
+/// Map Step 配置：对数组中每个元素并发执行 body
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapConfig {
+    /// 路径表达式，解析为输入数组（如 "$input.items" 或 "steps.X.output.list"）
+    pub over: String,
+    /// 对每个元素执行的步骤
+    pub body: Box<BodyStep>,
+    /// 最大并发数，None = 全并行
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<usize>,
 }
 
 /// Loop body 中的步骤（有名字、条件、映射）
@@ -60,6 +73,7 @@ pub struct BodyStep {
 pub enum BodyStepKind {
     Rune(RuneConfig),
     Loop(LoopConfig),
+    Map(MapConfig),
 }
 
 /// Step 失败后的重试策略（PR-7 实现执行逻辑）
@@ -113,6 +127,13 @@ impl Serialize for StepDefinition {
                     map.extend(lm);
                 }
             }
+            StepKind::Map(mc) => {
+                map.insert("type".into(), "map".into());
+                let mv = serde_json::to_value(mc).map_err(serde::ser::Error::custom)?;
+                if let serde_json::Value::Object(mm) = mv {
+                    map.extend(mm);
+                }
+            }
         }
         serde_json::Value::Object(map).serialize(s)
     }
@@ -161,6 +182,10 @@ impl TryFrom<serde_json::Value> for StepDefinition {
                 let lc: LoopConfig =
                     serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
                 StepKind::Loop(lc)
+            }
+            "map" => {
+                let mc: MapConfig = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+                StepKind::Map(mc)
             }
             other => return Err(format!("unknown step type: '{other}'")),
         };
@@ -213,6 +238,13 @@ impl Serialize for BodyStep {
                     map.extend(lm);
                 }
             }
+            BodyStepKind::Map(mc) => {
+                map.insert("type".into(), "map".into());
+                let mv = serde_json::to_value(mc).map_err(serde::ser::Error::custom)?;
+                if let serde_json::Value::Object(mm) = mv {
+                    map.extend(mm);
+                }
+            }
         }
         serde_json::Value::Object(map).serialize(s)
     }
@@ -257,6 +289,10 @@ impl TryFrom<serde_json::Value> for BodyStep {
                     serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
                 BodyStepKind::Loop(lc)
             }
+            "map" => {
+                let mc: MapConfig = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+                BodyStepKind::Map(mc)
+            }
             other => return Err(format!("unknown body step type: '{other}'")),
         };
 
@@ -287,6 +323,8 @@ pub enum DagError {
     InvalidCondition { step: String, condition: String },
     #[error("step '{step}' has invalid loop config: {reason}")]
     InvalidLoopConfig { step: String, reason: String },
+    #[error("step '{step}' has invalid map config: {reason}")]
+    InvalidMapConfig { step: String, reason: String },
 }
 
 // ─── 验证 ─────────────────────────────────────────────────────────────────────
@@ -373,12 +411,14 @@ pub fn validate_dag(flow: &FlowDefinition) -> Result<(), DagError> {
         }
     }
 
-    // 5. condition 语法预检 + loop config 验证
+    // 5. condition 语法预检 + loop/map config 验证
     let operators = ["==", "!=", ">=", "<=", ">", "<"];
     for s in steps {
         validate_condition_syntax(&s.name, &s.condition, &operators)?;
-        if let StepKind::Loop(lc) = &s.kind {
-            validate_loop_config(&s.name, lc, &operators)?;
+        match &s.kind {
+            StepKind::Loop(lc) => validate_loop_config(&s.name, lc, &operators)?,
+            StepKind::Map(mc) => validate_map_config(&s.name, mc, &operators)?,
+            StepKind::Rune(_) => {}
         }
     }
 
@@ -436,12 +476,18 @@ fn validate_loop_config(
         }
     }
 
-    // body step condition 预检 + 递归验证嵌套 loop
+    // body step condition 预检 + 递归验证嵌套 loop/map
     let qualified = |bs_name: &str| format!("{step_name}/{bs_name}");
     for bs in &lc.body {
         validate_condition_syntax(&qualified(&bs.name), &bs.condition, operators)?;
-        if let BodyStepKind::Loop(nested) = &bs.kind {
-            validate_loop_config(&qualified(&bs.name), nested, operators)?;
+        match &bs.kind {
+            BodyStepKind::Loop(nested) => {
+                validate_loop_config(&qualified(&bs.name), nested, operators)?
+            }
+            BodyStepKind::Map(nested) => {
+                validate_map_config(&qualified(&bs.name), nested, operators)?
+            }
+            BodyStepKind::Rune(_) => {}
         }
     }
 
@@ -450,6 +496,34 @@ fn validate_loop_config(
         validate_condition_syntax(step_name, &lc.until, operators)?;
     }
 
+    Ok(())
+}
+
+fn validate_map_config(
+    step_name: &str,
+    mc: &MapConfig,
+    operators: &[&str],
+) -> Result<(), DagError> {
+    if mc.over.trim().is_empty() {
+        return Err(DagError::InvalidMapConfig {
+            step: step_name.to_string(),
+            reason: "'over' must not be empty".to_string(),
+        });
+    }
+    if mc.concurrency == Some(0) {
+        return Err(DagError::InvalidMapConfig {
+            step: step_name.to_string(),
+            reason: "'concurrency' must be >= 1".to_string(),
+        });
+    }
+    // 递归验证 body
+    let body_name = format!("{step_name}/{}", mc.body.name);
+    validate_condition_syntax(&body_name, &mc.body.condition, operators)?;
+    match &mc.body.kind {
+        BodyStepKind::Loop(nested) => validate_loop_config(&body_name, nested, operators)?,
+        BodyStepKind::Map(nested) => validate_map_config(&body_name, nested, operators)?,
+        BodyStepKind::Rune(_) => {}
+    }
     Ok(())
 }
 
