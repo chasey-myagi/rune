@@ -82,7 +82,8 @@ impl RuneStore {
         tokio::task::spawn_blocking(move || {
             let conn = pool.reader();
             let mut stmt = conn.prepare(
-                "SELECT id, key_prefix, key_type, label, created_at, revoked_at \
+                "SELECT id, key_prefix, key_type, label, created_at, revoked_at, \
+                        last_used_at, last_used_ip \
                  FROM api_keys ORDER BY id",
             )?;
             let keys = stmt
@@ -103,6 +104,8 @@ impl RuneStore {
                         label: row.get(3)?,
                         created_at: row.get(4)?,
                         revoked_at: row.get(5)?,
+                        last_used_at: row.get(6)?,
+                        last_used_ip: row.get(7)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -143,6 +146,8 @@ impl RuneStore {
                     label,
                     created_at: now,
                     revoked_at: None,
+                    last_used_at: None,
+                    last_used_ip: None,
                 },
             })
         })
@@ -191,6 +196,24 @@ impl RuneStore {
             Ok(())
         })
         .await?
+    }
+
+    /// Update the last_used_at and last_used_ip audit fields for the given key hash.
+    ///
+    /// This is synchronous; callers in async context should wrap in tokio::spawn or
+    /// call fire-and-forget via tokio::spawn(async move { ... }).
+    pub fn update_key_last_used(
+        &self,
+        key_hash: &str,
+        used_at: &str,
+        used_ip: &str,
+    ) -> StoreResult<()> {
+        let conn = self.pool.writer();
+        conn.execute(
+            "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE key_hash = ?3",
+            rusqlite::params![used_at, used_ip, key_hash],
+        )?;
+        Ok(())
     }
 }
 
@@ -252,6 +275,8 @@ fn insert_raw_key(
         label: label.to_string(),
         created_at: now,
         revoked_at: None,
+        last_used_at: None,
+        last_used_ip: None,
     })
 }
 
@@ -302,7 +327,8 @@ fn load_key_by_hashes(
 
 fn query_key_by_hash(conn: &Connection, key_hash: &str) -> rusqlite::Result<Option<ApiKey>> {
     let mut stmt = conn.prepare(
-        "SELECT id, key_prefix, key_hash, key_type, label, created_at, revoked_at \
+        "SELECT id, key_prefix, key_hash, key_type, label, created_at, revoked_at, \
+                last_used_at, last_used_ip \
          FROM api_keys WHERE key_hash = ?1",
     )?;
     let result = stmt.query_row(rusqlite::params![key_hash], parse_api_key_row);
@@ -331,6 +357,8 @@ fn parse_api_key_row(row: &Row<'_>) -> rusqlite::Result<ApiKey> {
         label: row.get(4)?,
         created_at: row.get(5)?,
         revoked_at: row.get(6)?,
+        last_used_at: row.get(7)?,
+        last_used_ip: row.get(8)?,
     })
 }
 

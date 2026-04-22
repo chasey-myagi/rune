@@ -168,6 +168,8 @@ mod tests {
             label: "test".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             revoked_at: None,
+            last_used_at: None,
+            last_used_ip: None,
         }
     }
 

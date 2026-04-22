@@ -13,6 +13,10 @@ pub struct ApiKey {
     pub label: String,
     pub created_at: String,
     pub revoked_at: Option<String>,
+    /// RFC3339 timestamp of the last successful authentication. `None` if never used.
+    pub last_used_at: Option<String>,
+    /// Source IP of the last successful authentication. `None` if never used.
+    pub last_used_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

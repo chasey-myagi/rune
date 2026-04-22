@@ -11,6 +11,16 @@ use crate::error::error_response;
 use crate::handlers::rune::parse_labels_header;
 use crate::state::GateState;
 
+/// Extract the client IP from `X-Forwarded-For` header (first address), or return empty string.
+fn extract_client_ip(req: &axum::extract::Request) -> String {
+    req.headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
 /// Append hardened security response headers to every reply.
 ///
 /// These headers are defence-in-depth; they do not replace proper CORS /
@@ -177,6 +187,8 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
+    let client_ip = extract_client_ip(&req);
+
     let auth_header = req
         .headers()
         .get("authorization")
@@ -187,6 +199,23 @@ pub async fn auth_middleware(
     match auth_header {
         Some(key) => {
             if state.auth.key_verifier.verify_gate_key(&key).await {
+                // Fire-and-forget: update last_used_at / last_used_ip audit fields.
+                // Failure is silently logged at debug level and never blocks the response.
+                let store = state.admin.store.clone();
+                let key_hash = {
+                    let mut hasher = Sha256::new();
+                    hasher.update(key.as_bytes());
+                    hex::encode(hasher.finalize())
+                };
+                let now = rune_core::time_utils::now_iso8601();
+                tokio::spawn(async move {
+                    if let Err(e) = store.update_key_last_used(&key_hash, &now, &client_ip) {
+                        tracing::debug!(
+                            error = %e,
+                            "failed to update key last_used audit fields"
+                        );
+                    }
+                });
                 next.run(req).await
             } else {
                 error_response(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "invalid api key")
