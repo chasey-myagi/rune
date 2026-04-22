@@ -4140,6 +4140,6 @@ async fn retry_backoff_adds_measurable_delay() {
     );
     assert!(
         elapsed >= Duration::from_millis(120),
-        "2 backoff intervals of 80ms each must add ≥ 160ms total; elapsed: {elapsed:?}"
+        "2 backoff intervals of 80ms each must add ≥ 120ms (conservative CI floor); elapsed: {elapsed:?}"
     );
 }
