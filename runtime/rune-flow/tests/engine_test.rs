@@ -2999,3 +2999,279 @@ async fn loop_body_is_switch() {
     let v2: serde_json::Value = serde_json::from_slice(&result2.output).unwrap();
     assert_eq!(v2["n"], 99);
 }
+
+// ─── Module D: Flow Step ─────────────────────────────────────────────────────
+
+/// D-6: 基本子流调用 — 外层 flow 的 Flow Step 正确调用子流并返回其结果
+#[tokio::test]
+async fn flow_step_calls_subflow() {
+    use rune_flow::dag::FlowConfig;
+
+    let relay = test_relay();
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(FlowDefinition {
+            name: "sub".to_string(),
+            gate_path: None,
+            steps: vec![step("a", "step_a"), step_with_deps("b", "step_b", &["a"])],
+        })
+        .unwrap();
+
+    engine
+        .register(FlowDefinition {
+            name: "outer".to_string(),
+            gate_path: None,
+            steps: vec![StepDefinition {
+                name: "call_sub".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Flow(FlowConfig {
+                    flow: "sub".to_string(),
+                }),
+            }],
+        })
+        .unwrap();
+
+    let result = engine.execute("outer", Bytes::from(r#"{}"#)).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(v["a"], true);
+    assert_eq!(v["b"], true);
+}
+
+/// D-7: Flow Step 引用不存在的子流 → 步骤失败（错误信息含 flow 名）
+#[tokio::test]
+async fn flow_step_not_found_error() {
+    use rune_flow::dag::FlowConfig;
+
+    let relay = test_relay();
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(FlowDefinition {
+            name: "outer".to_string(),
+            gate_path: None,
+            steps: vec![StepDefinition {
+                name: "bad_call".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Flow(FlowConfig {
+                    flow: "nonexistent".to_string(),
+                }),
+            }],
+        })
+        .unwrap();
+
+    let err = engine
+        .execute("outer", Bytes::from(r#"{}"#))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FlowError::StepFailed { .. }),
+        "expected StepFailed, got {err:?}"
+    );
+    let FlowError::StepFailed { source, .. } = err else {
+        unreachable!()
+    };
+    assert!(
+        source.to_string().contains("nonexistent"),
+        "error message should mention the missing flow, got: {source}"
+    );
+}
+
+/// D-8: 直接循环引用 — flow A 调用自身 → 步骤失败（内含循环链信息）
+#[tokio::test]
+async fn flow_step_direct_circular_ref() {
+    use rune_flow::dag::FlowConfig;
+
+    let relay = test_relay();
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(FlowDefinition {
+            name: "cycle_a".to_string(),
+            gate_path: None,
+            steps: vec![StepDefinition {
+                name: "self_call".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Flow(FlowConfig {
+                    flow: "cycle_a".to_string(),
+                }),
+            }],
+        })
+        .unwrap();
+
+    let err = engine
+        .execute("cycle_a", Bytes::from(r#"{}"#))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FlowError::StepFailed { .. }),
+        "expected StepFailed, got {err:?}"
+    );
+    let FlowError::StepFailed { source, .. } = err else {
+        unreachable!()
+    };
+    assert!(
+        source.to_string().contains("cycle_a"),
+        "error should contain flow name, got: {source}"
+    );
+}
+
+/// D-9: 间接循环引用 A → B → A → 步骤失败（错误信息含完整调用链）
+#[tokio::test]
+async fn flow_step_indirect_circular_ref() {
+    use rune_flow::dag::FlowConfig;
+
+    let relay = test_relay();
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(FlowDefinition {
+            name: "cycle_a".to_string(),
+            gate_path: None,
+            steps: vec![StepDefinition {
+                name: "call_b".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Flow(FlowConfig {
+                    flow: "cycle_b".to_string(),
+                }),
+            }],
+        })
+        .unwrap();
+
+    engine
+        .register(FlowDefinition {
+            name: "cycle_b".to_string(),
+            gate_path: None,
+            steps: vec![StepDefinition {
+                name: "call_a".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Flow(FlowConfig {
+                    flow: "cycle_a".to_string(),
+                }),
+            }],
+        })
+        .unwrap();
+
+    let err = engine
+        .execute("cycle_a", Bytes::from(r#"{}"#))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FlowError::StepFailed { .. }),
+        "expected StepFailed, got {err:?}"
+    );
+    let FlowError::StepFailed { source, .. } = err else {
+        unreachable!()
+    };
+    let msg = source.to_string();
+    assert!(
+        msg.contains("cycle_a") && msg.contains("cycle_b"),
+        "error should show call chain, got: {msg}"
+    );
+}
+
+/// D-10: Flow Step 在 Loop body 中 — 3 次迭代，每次调用子流递增 count，最终 count == 3
+#[tokio::test]
+async fn flow_step_in_loop_body() {
+    use rune_flow::dag::{BodyStep, BodyStepKind, FlowConfig, LoopConfig};
+
+    let relay = test_relay();
+    let h = rune_core::rune::make_handler(|_ctx, input| async move {
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&input).unwrap_or(serde_json::Value::Object(Default::default()));
+        let n = v["count"].as_i64().unwrap_or(0) + 1;
+        v["count"] = n.into();
+        Ok(bytes::Bytes::from(serde_json::to_vec(&v).unwrap()))
+    });
+    relay
+        .register(
+            rune_config("inc-d10"),
+            Arc::new(rune_core::invoker::LocalInvoker::new(h)),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(FlowDefinition {
+            name: "incrementer".to_string(),
+            gate_path: None,
+            steps: vec![StepDefinition {
+                name: "inc".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Rune(FlowRuneConfig {
+                    rune: "inc-d10".to_string(),
+                }),
+            }],
+        })
+        .unwrap();
+
+    engine
+        .register(FlowDefinition {
+            name: "loop_with_flow".to_string(),
+            gate_path: None,
+            steps: vec![StepDefinition {
+                name: "loop".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Loop(LoopConfig {
+                    max_iterations: 3,
+                    until: None,
+                    body: vec![BodyStep {
+                        name: "call_inc".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Flow(FlowConfig {
+                            flow: "incrementer".to_string(),
+                        }),
+                    }],
+                }),
+            }],
+        })
+        .unwrap();
+
+    let result = engine
+        .execute("loop_with_flow", Bytes::from(r#"{"count": 0}"#))
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(
+        v["count"], 3,
+        "3 loop iterations × 1 increment each = count 3"
+    );
+}

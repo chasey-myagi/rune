@@ -30,6 +30,7 @@ pub enum StepKind {
     Loop(LoopConfig),
     Map(MapConfig),
     Switch(SwitchConfig),
+    Flow(FlowConfig),
 }
 
 /// Rune step 配置
@@ -56,6 +57,13 @@ pub struct MapConfig {
     /// 最大并发数，None = 全并行
     #[serde(skip_serializing_if = "Option::is_none")]
     pub concurrency: Option<usize>,
+}
+
+/// Flow Step 配置：将另一个已注册的 Flow 作为子步骤调用
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowConfig {
+    /// 子 Flow 名称（注册时不验证是否存在，执行时检测）
+    pub flow: String,
 }
 
 /// Switch Step 配置：对表达式求值，按结果路由到对应的 case body
@@ -95,6 +103,7 @@ pub enum BodyStepKind {
     Loop(LoopConfig),
     Map(MapConfig),
     Switch(SwitchConfig),
+    Flow(FlowConfig),
 }
 
 /// Step 失败后的重试策略（PR-7 实现执行逻辑）
@@ -162,6 +171,10 @@ impl Serialize for StepDefinition {
                     map.extend(sm);
                 }
             }
+            StepKind::Flow(fc) => {
+                map.insert("type".into(), "flow".into());
+                map.insert("flow".into(), fc.flow.clone().into());
+            }
         }
         serde_json::Value::Object(map).serialize(s)
     }
@@ -219,6 +232,13 @@ impl TryFrom<serde_json::Value> for StepDefinition {
                 let sc: SwitchConfig =
                     serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
                 StepKind::Switch(sc)
+            }
+            "flow" => {
+                let flow_name = v["flow"]
+                    .as_str()
+                    .ok_or("StepDefinition type=flow missing 'flow' field")?
+                    .to_string();
+                StepKind::Flow(FlowConfig { flow: flow_name })
             }
             other => return Err(format!("unknown step type: '{other}'")),
         };
@@ -285,6 +305,10 @@ impl Serialize for BodyStep {
                     map.extend(sm);
                 }
             }
+            BodyStepKind::Flow(fc) => {
+                map.insert("type".into(), "flow".into());
+                map.insert("flow".into(), fc.flow.clone().into());
+            }
         }
         serde_json::Value::Object(map).serialize(s)
     }
@@ -338,6 +362,13 @@ impl TryFrom<serde_json::Value> for BodyStep {
                     serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
                 BodyStepKind::Switch(sc)
             }
+            "flow" => {
+                let flow_name = v["flow"]
+                    .as_str()
+                    .ok_or("BodyStep type=flow missing 'flow' field")?
+                    .to_string();
+                BodyStepKind::Flow(FlowConfig { flow: flow_name })
+            }
             other => return Err(format!("unknown body step type: '{other}'")),
         };
 
@@ -372,6 +403,8 @@ pub enum DagError {
     InvalidMapConfig { step: String, reason: String },
     #[error("step '{step}' has invalid switch config: {reason}")]
     InvalidSwitchConfig { step: String, reason: String },
+    #[error("step '{step}' has invalid flow config: {reason}")]
+    InvalidFlowConfig { step: String, reason: String },
 }
 
 // ─── 验证 ─────────────────────────────────────────────────────────────────────
@@ -458,7 +491,7 @@ pub fn validate_dag(flow: &FlowDefinition) -> Result<(), DagError> {
         }
     }
 
-    // 5. condition 语法预检 + loop/map/switch config 验证
+    // 5. condition 语法预检 + loop/map/switch/flow config 验证
     let operators = ["==", "!=", ">=", "<=", ">", "<"];
     for s in steps {
         validate_condition_syntax(&s.name, &s.condition, &operators)?;
@@ -466,6 +499,7 @@ pub fn validate_dag(flow: &FlowDefinition) -> Result<(), DagError> {
             StepKind::Loop(lc) => validate_loop_config(&s.name, lc, &operators)?,
             StepKind::Map(mc) => validate_map_config(&s.name, mc, &operators)?,
             StepKind::Switch(sc) => validate_switch_config(&s.name, sc, &operators)?,
+            StepKind::Flow(fc) => validate_flow_config(&s.name, fc)?,
             StepKind::Rune(_) => {}
         }
     }
@@ -524,7 +558,7 @@ fn validate_loop_config(
         }
     }
 
-    // body step condition 预检 + 递归验证嵌套 loop/map/switch
+    // body step condition 预检 + 递归验证嵌套 loop/map/switch/flow
     let qualified = |bs_name: &str| format!("{step_name}/{bs_name}");
     for bs in &lc.body {
         validate_condition_syntax(&qualified(&bs.name), &bs.condition, operators)?;
@@ -538,6 +572,7 @@ fn validate_loop_config(
             BodyStepKind::Switch(nested) => {
                 validate_switch_config(&qualified(&bs.name), nested, operators)?
             }
+            BodyStepKind::Flow(fc) => validate_flow_config(&qualified(&bs.name), fc)?,
             BodyStepKind::Rune(_) => {}
         }
     }
@@ -574,6 +609,7 @@ fn validate_map_config(
         BodyStepKind::Loop(nested) => validate_loop_config(&body_name, nested, operators)?,
         BodyStepKind::Map(nested) => validate_map_config(&body_name, nested, operators)?,
         BodyStepKind::Switch(nested) => validate_switch_config(&body_name, nested, operators)?,
+        BodyStepKind::Flow(fc) => validate_flow_config(&body_name, fc)?,
         BodyStepKind::Rune(_) => {}
     }
     Ok(())
@@ -616,6 +652,7 @@ fn validate_switch_config(
             BodyStepKind::Loop(nested) => validate_loop_config(&body_name, nested, operators)?,
             BodyStepKind::Map(nested) => validate_map_config(&body_name, nested, operators)?,
             BodyStepKind::Switch(nested) => validate_switch_config(&body_name, nested, operators)?,
+            BodyStepKind::Flow(fc) => validate_flow_config(&body_name, fc)?,
             BodyStepKind::Rune(_) => {}
         }
         Ok(())
@@ -625,6 +662,26 @@ fn validate_switch_config(
     }
     if let Some(default_body) = &sc.default {
         validate_body(default_body)?;
+    }
+    Ok(())
+}
+
+fn validate_flow_config(step_name: &str, fc: &FlowConfig) -> Result<(), DagError> {
+    if fc.flow.trim().is_empty() {
+        return Err(DagError::InvalidFlowConfig {
+            step: step_name.to_string(),
+            reason: "'flow' must not be empty".to_string(),
+        });
+    }
+    // 拒绝带前后空格的名字：通过验证但运行时找不到 flow，会产生误导性错误。
+    if fc.flow != fc.flow.trim() {
+        return Err(DagError::InvalidFlowConfig {
+            step: step_name.to_string(),
+            reason: format!(
+                "'flow' must not have leading/trailing whitespace: {:?}",
+                fc.flow
+            ),
+        });
     }
     Ok(())
 }

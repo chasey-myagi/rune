@@ -1,6 +1,6 @@
 use crate::dag::{
-    topological_layers, validate_dag, BodyStep, BodyStepKind, DagError, FlowDefinition, LoopConfig,
-    MapConfig, StepKind,
+    topological_layers, validate_dag, BodyStep, BodyStepKind, DagError, FlowConfig, FlowDefinition,
+    LoopConfig, MapConfig, StepKind,
 };
 use bytes::Bytes;
 use rune_core::relay::Relay;
@@ -46,6 +46,10 @@ pub enum FlowError {
     SerializationFailed(String),
     #[error("map step: 'over' path '{0}' did not resolve to a JSON array")]
     MapItemsNotArray(String),
+    #[error("flow step references unknown flow: '{0}'")]
+    FlowStepNotFound(String),
+    #[error("circular flow reference detected: {0}")]
+    CircularFlowRef(String),
 }
 
 /// Default step timeout when not configured.
@@ -61,6 +65,8 @@ pub struct FlowRunner {
     relay: Arc<Relay>,
     resolver: Arc<dyn Resolver>,
     step_timeout: Duration,
+    /// 创建 runner 时的 Flow 快照，供 Flow Step 子流查找（无锁）
+    flows_snapshot: Arc<HashMap<String, FlowDefinition>>,
 }
 
 #[allow(dead_code)]
@@ -101,6 +107,7 @@ impl FlowEngine {
             relay: Arc::clone(&self.relay),
             resolver: Arc::clone(&self.resolver),
             step_timeout: self.step_timeout,
+            flows_snapshot: Arc::new(self.flows.clone()),
         }
     }
 
@@ -200,6 +207,24 @@ impl FlowRunner {
         &self,
         flow: &FlowDefinition,
         input: Bytes,
+        parent_context: HashMap<String, String>,
+        flow_request_id: Option<String>,
+    ) -> Result<FlowResult, FlowError> {
+        self.execute_flow_internal(
+            flow,
+            input,
+            vec![flow.name.clone()],
+            parent_context,
+            flow_request_id,
+        )
+        .await
+    }
+
+    async fn execute_flow_internal(
+        &self,
+        flow: &FlowDefinition,
+        input: Bytes,
+        call_stack: Vec<String>,
         mut parent_context: HashMap<String, String>,
         flow_request_id: Option<String>,
     ) -> Result<FlowResult, FlowError> {
@@ -368,10 +393,17 @@ impl FlowRunner {
                         let lc = lc.clone();
                         let parent_context = parent_context.clone();
                         let flow_request_id = flow_request_id.clone();
+                        let call_stack = call_stack.clone();
                         join_set.spawn(async move {
                             let result = tokio::time::timeout(
                                 timeout,
-                                runner.execute_loop(&lc, si, parent_context, flow_request_id),
+                                runner.execute_loop(
+                                    &lc,
+                                    si,
+                                    parent_context,
+                                    flow_request_id,
+                                    call_stack,
+                                ),
                             )
                             .await;
                             match result {
@@ -393,6 +425,7 @@ impl FlowRunner {
                         let step_outputs_snapshot = step_outputs.clone();
                         let parent_context = parent_context.clone();
                         let flow_request_id = flow_request_id.clone();
+                        let call_stack = call_stack.clone();
                         join_set.spawn(async move {
                             let result = tokio::time::timeout(
                                 timeout,
@@ -402,6 +435,7 @@ impl FlowRunner {
                                     &step_outputs_snapshot,
                                     parent_context,
                                     flow_request_id,
+                                    call_stack,
                                 ),
                             )
                             .await;
@@ -446,6 +480,7 @@ impl FlowRunner {
                                 let runner = self.clone();
                                 let parent_context = parent_context.clone();
                                 let flow_request_id = flow_request_id.clone();
+                                let call_stack = call_stack.clone();
                                 join_set.spawn(async move {
                                     // body.timeout_ms 覆盖 step 级别 timeout；
                                     // 对内（execute_body_step_kind）和外（hard deadline）使用同一值。
@@ -459,6 +494,7 @@ impl FlowRunner {
                                         effective_timeout,
                                         parent_context,
                                         flow_request_id,
+                                        call_stack,
                                     );
                                     match tokio::time::timeout(effective_timeout, body_future).await
                                     {
@@ -475,6 +511,37 @@ impl FlowRunner {
                                 });
                             }
                         }
+                    }
+                    StepKind::Flow(fc) => {
+                        let runner = self.clone();
+                        let fc = fc.clone();
+                        let parent_context = parent_context.clone();
+                        let flow_request_id = flow_request_id.clone();
+                        let call_stack = call_stack.clone();
+                        join_set.spawn(async move {
+                            match tokio::time::timeout(
+                                timeout,
+                                runner.execute_flow_step(
+                                    fc,
+                                    si,
+                                    call_stack,
+                                    parent_context,
+                                    flow_request_id,
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(out)) => Ok((step_idx, out)),
+                                Ok(Err(e)) => Err((
+                                    step_idx,
+                                    RuneError::ExecutionFailed {
+                                        code: "FLOW_STEP_FAILED".into(),
+                                        message: e.to_string(),
+                                    },
+                                )),
+                                Err(_) => Err((step_idx, RuneError::Timeout)),
+                            }
+                        });
                     }
                 }
             }
@@ -578,6 +645,7 @@ impl FlowRunner {
         input: Bytes,
         parent_context: HashMap<String, String>,
         flow_request_id: String,
+        call_stack: Vec<String>,
     ) -> Result<Bytes, FlowError> {
         let mut current = input;
 
@@ -612,6 +680,7 @@ impl FlowRunner {
                     effective_timeout,
                     parent_context.clone(),
                     flow_request_id.clone(),
+                    call_stack.clone(),
                 );
 
                 let out = match tokio::time::timeout(effective_timeout, body_future).await {
@@ -666,6 +735,7 @@ impl FlowRunner {
         step_outputs: &HashMap<String, Option<Bytes>>,
         parent_context: HashMap<String, String>,
         flow_request_id: String,
+        call_stack: Vec<String>,
     ) -> Result<Bytes, FlowError> {
         use std::sync::Arc;
         use tokio::sync::Semaphore;
@@ -705,6 +775,7 @@ impl FlowRunner {
             let sem = Arc::clone(&sem);
             let parent_context = parent_context.clone();
             let flow_request_id = flow_request_id.clone();
+            let call_stack = call_stack.clone();
 
             join_set.spawn(async move {
                 let _permit = sem.acquire_owned().await.unwrap();
@@ -720,6 +791,7 @@ impl FlowRunner {
                     effective_timeout,
                     parent_context,
                     flow_request_id,
+                    call_stack,
                 );
 
                 let result = tokio::time::timeout(effective_timeout, body_future).await;
@@ -784,6 +856,7 @@ impl FlowRunner {
         effective_timeout: Duration,
         parent_context: HashMap<String, String>,
         flow_request_id: String,
+        call_stack: Vec<String>,
     ) -> Pin<Box<dyn Future<Output = Result<Bytes, RuneError>> + Send>> {
         let runner = self.clone();
         Box::pin(async move {
@@ -814,7 +887,7 @@ impl FlowRunner {
                     }
                 }
                 BodyStepKind::Loop(lc) => runner
-                    .execute_loop(&lc, input, parent_context, flow_request_id)
+                    .execute_loop(&lc, input, parent_context, flow_request_id, call_stack)
                     .await
                     .map_err(|e| RuneError::ExecutionFailed {
                         code: "LOOP_FAILED".into(),
@@ -823,7 +896,14 @@ impl FlowRunner {
                 BodyStepKind::Map(mc) => runner
                     // body step 内 Map 的 over 只能引用 $input.*（当前元素），
                     // 不能引用外层 flow 的步骤输出，故传空 step_outputs。
-                    .execute_map(&mc, input, &HashMap::new(), parent_context, flow_request_id)
+                    .execute_map(
+                        &mc,
+                        input,
+                        &HashMap::new(),
+                        parent_context,
+                        flow_request_id,
+                        call_stack,
+                    )
                     .await
                     .map_err(|e| RuneError::ExecutionFailed {
                         code: "MAP_FAILED".into(),
@@ -863,12 +943,63 @@ impl FlowRunner {
                                     effective_timeout,
                                     parent_context,
                                     flow_request_id,
+                                    call_stack,
                                 )
                                 .await
                         }
                     }
                 }
+                BodyStepKind::Flow(fc) => runner
+                    .execute_flow_step(fc, input, call_stack, parent_context, flow_request_id)
+                    .await
+                    .map_err(|e| RuneError::ExecutionFailed {
+                        code: "FLOW_STEP_FAILED".into(),
+                        message: e.to_string(),
+                    }),
             }
+        })
+    }
+
+    /// 执行 Flow Step（调用子流）。
+    ///
+    /// 返回 `Pin<Box<dyn Future + Send>>` 而非 `async fn`：这是打破 execute_flow_step →
+    /// execute_flow_internal → execute_flow_step 间接递归循环的必要手段——否则编译器无法
+    /// 确定 future 类型大小，JoinSet::spawn 会因 not-Send 报错。
+    fn execute_flow_step(
+        &self,
+        config: FlowConfig,
+        input: Bytes,
+        call_stack: Vec<String>,
+        parent_context: HashMap<String, String>,
+        flow_request_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<Bytes, FlowError>> + Send>> {
+        let runner = self.clone();
+        Box::pin(async move {
+            // 用 HashSet 做 O(1) 成员检测；call_stack Vec 保留用于生成错误信息里的调用链。
+            let visited: std::collections::HashSet<&str> =
+                call_stack.iter().map(String::as_str).collect();
+            if visited.contains(config.flow.as_str()) {
+                let mut chain = call_stack;
+                chain.push(config.flow.clone());
+                return Err(FlowError::CircularFlowRef(chain.join(" -> ")));
+            }
+            let flow = runner
+                .flows_snapshot
+                .get(&config.flow)
+                .ok_or_else(|| FlowError::FlowStepNotFound(config.flow.clone()))?
+                .clone();
+            let mut new_stack = call_stack;
+            new_stack.push(config.flow.clone());
+            let result = runner
+                .execute_flow_internal(
+                    &flow,
+                    input,
+                    new_stack,
+                    parent_context,
+                    Some(flow_request_id),
+                )
+                .await?;
+            Ok(result.output)
         })
     }
 
