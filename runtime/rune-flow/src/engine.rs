@@ -449,43 +449,42 @@ impl FlowRunner {
                         let loop_step_name = step_def.name.clone();
                         let retry = step_def.retry.clone();
                         join_set.spawn(async move {
-                            let max_attempts =
-                                retry.as_ref().map(|r| r.max_attempts).unwrap_or(1).max(1);
+                            let max = retry.as_ref().map(|r| r.max_attempts).unwrap_or(1);
                             let backoff = retry.as_ref().map(|r| r.backoff_ms).unwrap_or(0);
-                            let mut last_err: Option<RuneError> = None;
-                            for attempt in 0..max_attempts {
-                                let result = tokio::time::timeout(
-                                    timeout,
-                                    runner.execute_loop(
-                                        &lc,
-                                        si.clone(),
-                                        parent_context.clone(),
-                                        flow_request_id.clone(),
-                                        call_stack.clone(),
-                                        loop_step_name.clone(),
-                                    ),
-                                )
-                                .await;
-                                let err = match result {
-                                    Ok(Ok(out)) => return Ok((step_idx, out)),
-                                    Ok(Err(e)) => RuneError::ExecutionFailed {
-                                        code: "LOOP_FAILED".into(),
-                                        message: e.to_string(),
-                                    },
-                                    Err(_) => RuneError::Timeout,
-                                };
-                                last_err = Some(err);
-                                if attempt + 1 < max_attempts && backoff > 0 {
-                                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                            retry_op(max, backoff, || {
+                                let runner = runner.clone();
+                                let lc = lc.clone();
+                                let si = si.clone();
+                                let parent_context = parent_context.clone();
+                                let flow_request_id = flow_request_id.clone();
+                                let call_stack = call_stack.clone();
+                                let loop_step_name = loop_step_name.clone();
+                                async move {
+                                    match tokio::time::timeout(
+                                        timeout,
+                                        runner.execute_loop(
+                                            &lc,
+                                            si,
+                                            parent_context,
+                                            flow_request_id,
+                                            call_stack,
+                                            loop_step_name,
+                                        ),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(out)) => Ok(out),
+                                        Ok(Err(e)) => Err(RuneError::ExecutionFailed {
+                                            code: "LOOP_FAILED".into(),
+                                            message: e.to_string(),
+                                        }),
+                                        Err(_) => Err(RuneError::Timeout),
+                                    }
                                 }
-                            }
-                            Err((
-                                step_idx,
-                                last_err.unwrap_or(RuneError::ExecutionFailed {
-                                    code: "LOOP_FAILED".into(),
-                                    message: "no attempts executed".into(),
-                                }),
-                            ))
+                            })
+                            .await
+                            .map(|out| (step_idx, out))
+                            .map_err(|e| (step_idx, e))
                         });
                     }
                     StepKind::Map(mc) => {
@@ -1511,6 +1510,30 @@ fn uuid_simple() -> String {
     rune_core::time_utils::unique_request_id()
 }
 
+/// Generic retry helper used by both Rune steps and Loop steps.
+/// Calls `op` up to `max_attempts` times (min 1). On failure, waits
+/// `backoff_ms` before retrying. Returns the last error if all attempts fail.
+async fn retry_op<F, Fut, T, E>(max_attempts: u32, backoff_ms: u64, mut op: F) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let max = max_attempts.max(1);
+    let mut last_err: Option<E> = None;
+    for attempt in 0..max {
+        match op().await {
+            Ok(out) => return Ok(out),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt + 1 < max && backoff_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap())
+}
+
 /// 按 RetryConfig 执行 invoker.invoke_once，失败时 backoff 后重试。
 /// max_attempts 含首次执行；None 等价于 max_attempts=1（不重试）。
 async fn invoke_with_retry(
@@ -1519,22 +1542,12 @@ async fn invoke_with_retry(
     input: Bytes,
     retry: Option<&crate::dag::RetryConfig>,
 ) -> Result<Bytes, RuneError> {
-    let max_attempts = retry.map(|r| r.max_attempts).unwrap_or(1).max(1);
+    let max = retry.map(|r| r.max_attempts).unwrap_or(1);
     let backoff = retry.map(|r| r.backoff_ms).unwrap_or(0);
-    for attempt in 0..max_attempts {
-        match invoker.invoke_once(ctx.clone(), input.clone()).await {
-            Ok(out) => return Ok(out),
-            Err(e) => {
-                if attempt + 1 >= max_attempts {
-                    return Err(e);
-                }
-                if backoff > 0 {
-                    tokio::time::sleep(Duration::from_millis(backoff)).await;
-                }
-            }
-        }
-    }
-    unreachable!()
+    retry_op(max, backoff, || {
+        invoker.invoke_once(ctx.clone(), input.clone())
+    })
+    .await
 }
 
 #[cfg(test)]
