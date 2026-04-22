@@ -713,8 +713,8 @@ impl FlowRunner {
             );
             metrics::counter!("flow_executions_total", "flow" => flow.name.clone(), "status" => "ok")
                 .increment(1);
-            metrics::histogram!("flow_duration_ms", "flow" => flow.name.clone())
-                .record(duration_ms as f64);
+            metrics::histogram!("flow_duration_seconds", "flow" => flow.name.clone())
+                .record(duration_ms as f64 / 1000.0);
             Ok(FlowResult {
                 output,
                 steps: step_statuses,
@@ -730,8 +730,8 @@ impl FlowRunner {
             );
             metrics::counter!("flow_executions_total", "flow" => flow.name.clone(), "status" => "error")
                 .increment(1);
-            metrics::histogram!("flow_duration_ms", "flow" => flow.name.clone())
-                .record(duration_ms as f64);
+            metrics::histogram!("flow_duration_seconds", "flow" => flow.name.clone())
+                .record(duration_ms as f64 / 1000.0);
             Err(err)
         } else {
             tracing::debug!(
@@ -742,8 +742,8 @@ impl FlowRunner {
             );
             metrics::counter!("flow_executions_total", "flow" => flow.name.clone(), "status" => "ok")
                 .increment(1);
-            metrics::histogram!("flow_duration_ms", "flow" => flow.name.clone())
-                .record(duration_ms as f64);
+            metrics::histogram!("flow_duration_seconds", "flow" => flow.name.clone())
+                .record(duration_ms as f64 / 1000.0);
             Ok(FlowResult {
                 output,
                 steps: step_statuses,
