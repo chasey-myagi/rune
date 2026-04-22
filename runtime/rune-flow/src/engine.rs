@@ -31,6 +31,38 @@ pub struct FlowResult {
     pub steps_executed: usize,
 }
 
+/// Loop 执行进度事件，通过可选的 progress_tx channel 推送（非 SSE 路径零开销）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "event_type", rename_all = "snake_case")]
+pub enum FlowProgressEvent {
+    LoopIterationStart {
+        step: String,
+        iteration: u32,
+        max_iterations: u32,
+    },
+    BodyStepDone {
+        step: String,
+        body_step: String,
+        duration_ms: u64,
+    },
+    BodyStepSkipped {
+        step: String,
+        body_step: String,
+    },
+    BodyStepFailed {
+        step: String,
+        body_step: String,
+        error: String,
+        duration_ms: u64,
+    },
+    LoopIterationEnd {
+        step: String,
+        iteration: u32,
+        duration_ms: u64,
+        until_met: bool,
+    },
+}
+
 /// Flow 执行错误
 #[derive(Debug, thiserror::Error)]
 pub enum FlowError {
@@ -67,6 +99,7 @@ pub struct FlowRunner {
     step_timeout: Duration,
     /// 创建 runner 时的 Flow 快照，供 Flow Step 子流查找（无锁）
     flows_snapshot: Arc<HashMap<String, FlowDefinition>>,
+    pub progress_tx: Option<tokio::sync::mpsc::Sender<FlowProgressEvent>>,
 }
 
 #[allow(dead_code)]
@@ -108,6 +141,7 @@ impl FlowEngine {
             resolver: Arc::clone(&self.resolver),
             step_timeout: self.step_timeout,
             flows_snapshot: Arc::new(self.flows.clone()),
+            progress_tx: None,
         }
     }
 
@@ -189,6 +223,13 @@ impl FlowEngine {
 }
 
 impl FlowRunner {
+    /// 设置 progress channel；Loop 执行时会向该 channel 推送迭代事件。
+    /// 失败（满/关闭）时静默丢弃，确保主执行路径不受影响。
+    pub fn with_progress(mut self, tx: tokio::sync::mpsc::Sender<FlowProgressEvent>) -> Self {
+        self.progress_tx = Some(tx);
+        self
+    }
+
     /// Execute a pre-fetched FlowDefinition.
     ///
     /// This is the core execution logic.  Because `FlowRunner` only holds
@@ -349,6 +390,7 @@ impl FlowRunner {
                                 let parent_context = parent_context.clone();
                                 let flow_request_id = flow_request_id.clone();
                                 let flow_span_id = flow_span_id.clone();
+                                let retry = step_def.retry.clone();
                                 join_set.spawn(async move {
                                     let mut step_context = parent_context;
                                     step_context.insert(
@@ -372,8 +414,13 @@ impl FlowRunner {
                                     // engine 层强制 hard deadline（LocalInvoker 无内置 timeout）。
                                     // RemoteInvoker 经由 RuneContext.timeout 在 session 层同时
                                     // 发起 cancel，两者使用相同值，互补不冲突。
-                                    match tokio::time::timeout(timeout, inv.invoke_once(ctx, si))
-                                        .await
+                                    // timeout 包裹整个 retry 序列：单次调用 + backoff + 重试，
+                                    // 超出预算时整体失败，避免 retry 把 timeout 变相放大。
+                                    match tokio::time::timeout(
+                                        timeout,
+                                        invoke_with_retry(inv, ctx, si, retry.as_ref()),
+                                    )
+                                    .await
                                     {
                                         Ok(Ok(output)) => Ok((step_idx, output)),
                                         Ok(Err(e)) => Err((step_idx, e)),
@@ -394,29 +441,46 @@ impl FlowRunner {
                         let parent_context = parent_context.clone();
                         let flow_request_id = flow_request_id.clone();
                         let call_stack = call_stack.clone();
+                        let loop_step_name = step_def.name.clone();
+                        let retry = step_def.retry.clone();
                         join_set.spawn(async move {
-                            let result = tokio::time::timeout(
-                                timeout,
-                                runner.execute_loop(
-                                    &lc,
-                                    si,
-                                    parent_context,
-                                    flow_request_id,
-                                    call_stack,
-                                ),
-                            )
-                            .await;
-                            match result {
-                                Ok(Ok(out)) => Ok((step_idx, out)),
-                                Ok(Err(e)) => Err((
-                                    step_idx,
-                                    RuneError::ExecutionFailed {
+                            let max_attempts =
+                                retry.as_ref().map(|r| r.max_attempts).unwrap_or(1).max(1);
+                            let backoff = retry.as_ref().map(|r| r.backoff_ms).unwrap_or(0);
+                            let mut last_err: Option<RuneError> = None;
+                            for attempt in 0..max_attempts {
+                                let result = tokio::time::timeout(
+                                    timeout,
+                                    runner.execute_loop(
+                                        &lc,
+                                        si.clone(),
+                                        parent_context.clone(),
+                                        flow_request_id.clone(),
+                                        call_stack.clone(),
+                                        loop_step_name.clone(),
+                                    ),
+                                )
+                                .await;
+                                let err = match result {
+                                    Ok(Ok(out)) => return Ok((step_idx, out)),
+                                    Ok(Err(e)) => RuneError::ExecutionFailed {
                                         code: "LOOP_FAILED".into(),
                                         message: e.to_string(),
                                     },
-                                )),
-                                Err(_) => Err((step_idx, RuneError::Timeout)),
+                                    Err(_) => RuneError::Timeout,
+                                };
+                                last_err = Some(err);
+                                if attempt + 1 < max_attempts && backoff > 0 {
+                                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                                }
                             }
+                            Err((
+                                step_idx,
+                                last_err.unwrap_or(RuneError::ExecutionFailed {
+                                    code: "LOOP_FAILED".into(),
+                                    message: "no attempts executed".into(),
+                                }),
+                            ))
                         });
                     }
                     StepKind::Map(mc) => {
@@ -646,10 +710,25 @@ impl FlowRunner {
         parent_context: HashMap<String, String>,
         flow_request_id: String,
         call_stack: Vec<String>,
+        loop_step_name: String,
     ) -> Result<Bytes, FlowError> {
         let mut current = input;
 
+        let emit = |evt: FlowProgressEvent| {
+            if let Some(tx) = &self.progress_tx {
+                let _ = tx.try_send(evt);
+            }
+        };
+
         for _iter in 0..config.max_iterations {
+            let iter_start = std::time::Instant::now();
+
+            emit(FlowProgressEvent::LoopIterationStart {
+                step: loop_step_name.clone(),
+                iteration: _iter,
+                max_iterations: config.max_iterations,
+            });
+
             let mut body_outputs: HashMap<String, Option<Bytes>> = HashMap::new();
             let iter_input_json: Option<serde_json::Value> = serde_json::from_slice(&current).ok();
 
@@ -658,6 +737,10 @@ impl FlowRunner {
                 if let Some(cond) = &body_step.condition {
                     if !evaluate_condition(cond, &HashMap::new(), &body_outputs, &iter_input_json) {
                         body_outputs.insert(body_step.name.clone(), None); // skipped
+                        emit(FlowProgressEvent::BodyStepSkipped {
+                            step: loop_step_name.clone(),
+                            body_step: body_step.name.clone(),
+                        });
                         continue;
                     }
                 }
@@ -683,19 +766,42 @@ impl FlowRunner {
                     call_stack.clone(),
                 );
 
+                let body_start = std::time::Instant::now();
                 let out = match tokio::time::timeout(effective_timeout, body_future).await {
-                    Ok(Ok(o)) => o,
+                    Ok(Ok(o)) => {
+                        let duration_ms = body_start.elapsed().as_millis() as u64;
+                        emit(FlowProgressEvent::BodyStepDone {
+                            step: loop_step_name.clone(),
+                            body_step: body_step.name.clone(),
+                            duration_ms,
+                        });
+                        o
+                    }
                     Ok(Err(e)) => {
+                        let duration_ms = body_start.elapsed().as_millis() as u64;
+                        emit(FlowProgressEvent::BodyStepFailed {
+                            step: loop_step_name.clone(),
+                            body_step: body_step.name.clone(),
+                            error: e.to_string(),
+                            duration_ms,
+                        });
                         return Err(FlowError::StepFailed {
                             step: body_step.name.clone(),
                             source: e,
-                        })
+                        });
                     }
                     Err(_) => {
+                        let duration_ms = body_start.elapsed().as_millis() as u64;
+                        emit(FlowProgressEvent::BodyStepFailed {
+                            step: loop_step_name.clone(),
+                            body_step: body_step.name.clone(),
+                            error: "timeout".to_string(),
+                            duration_ms,
+                        });
                         return Err(FlowError::StepFailed {
                             step: body_step.name.clone(),
                             source: RuneError::Timeout,
-                        })
+                        });
                     }
                 };
 
@@ -715,9 +821,23 @@ impl FlowRunner {
             // until 条件检查
             if let Some(until) = &config.until {
                 let last_json: Option<serde_json::Value> = serde_json::from_slice(&last).ok();
-                if evaluate_condition(until, &HashMap::new(), &body_outputs, &last_json) {
+                let met = evaluate_condition(until, &HashMap::new(), &body_outputs, &last_json);
+                emit(FlowProgressEvent::LoopIterationEnd {
+                    step: loop_step_name.clone(),
+                    iteration: _iter,
+                    duration_ms: iter_start.elapsed().as_millis() as u64,
+                    until_met: met,
+                });
+                if met {
                     return Ok(last);
                 }
+            } else {
+                emit(FlowProgressEvent::LoopIterationEnd {
+                    step: loop_step_name.clone(),
+                    iteration: _iter,
+                    duration_ms: iter_start.elapsed().as_millis() as u64,
+                    until_met: false,
+                });
             }
 
             current = last;
@@ -887,7 +1007,14 @@ impl FlowRunner {
                     }
                 }
                 BodyStepKind::Loop(lc) => runner
-                    .execute_loop(&lc, input, parent_context, flow_request_id, call_stack)
+                    .execute_loop(
+                        &lc,
+                        input,
+                        parent_context,
+                        flow_request_id,
+                        call_stack,
+                        "nested_loop".to_string(),
+                    )
                     .await
                     .map_err(|e| RuneError::ExecutionFailed {
                         code: "LOOP_FAILED".into(),
@@ -1293,6 +1420,32 @@ fn as_f64(v: &serde_json::Value) -> Option<f64> {
 /// 生成简单的请求 ID（时间戳 + 单调计数器，保证并行 step 不重复）
 fn uuid_simple() -> String {
     rune_core::time_utils::unique_request_id()
+}
+
+/// 按 RetryConfig 执行 invoker.invoke_once，失败时 backoff 后重试。
+/// max_attempts 含首次执行；None 等价于 max_attempts=1（不重试）。
+async fn invoke_with_retry(
+    invoker: Arc<dyn rune_core::invoker::RuneInvoker>,
+    ctx: RuneContext,
+    input: Bytes,
+    retry: Option<&crate::dag::RetryConfig>,
+) -> Result<Bytes, RuneError> {
+    let max_attempts = retry.map(|r| r.max_attempts).unwrap_or(1).max(1);
+    let backoff = retry.map(|r| r.backoff_ms).unwrap_or(0);
+    for attempt in 0..max_attempts {
+        match invoker.invoke_once(ctx.clone(), input.clone()).await {
+            Ok(out) => return Ok(out),
+            Err(e) => {
+                if attempt + 1 >= max_attempts {
+                    return Err(e);
+                }
+                if backoff > 0 {
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                }
+            }
+        }
+    }
+    unreachable!()
 }
 
 #[cfg(test)]
