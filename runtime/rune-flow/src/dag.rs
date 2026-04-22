@@ -29,6 +29,7 @@ pub enum StepKind {
     Rune(RuneConfig),
     Loop(LoopConfig),
     Map(MapConfig),
+    Switch(SwitchConfig),
 }
 
 /// Rune step 配置
@@ -57,6 +58,25 @@ pub struct MapConfig {
     pub concurrency: Option<usize>,
 }
 
+/// Switch Step 配置：对表达式求值，按结果路由到对应的 case body
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchConfig {
+    /// 路径表达式，求值结果与 cases[*].when 精确匹配
+    pub on: String,
+    pub cases: Vec<SwitchCase>,
+    /// 无任何 case 匹配时执行的 body；None 时 step 状态为 Skipped
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<Box<BodyStep>>,
+}
+
+/// Switch 中的一个匹配分支
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchCase {
+    /// 精确匹配值（支持任意 JSON 类型）
+    pub when: serde_json::Value,
+    pub body: BodyStep,
+}
+
 /// Loop body 中的步骤（有名字、条件、映射）
 #[derive(Debug, Clone)]
 pub struct BodyStep {
@@ -74,6 +94,7 @@ pub enum BodyStepKind {
     Rune(RuneConfig),
     Loop(LoopConfig),
     Map(MapConfig),
+    Switch(SwitchConfig),
 }
 
 /// Step 失败后的重试策略（PR-7 实现执行逻辑）
@@ -134,6 +155,13 @@ impl Serialize for StepDefinition {
                     map.extend(mm);
                 }
             }
+            StepKind::Switch(sc) => {
+                map.insert("type".into(), "switch".into());
+                let sv = serde_json::to_value(sc).map_err(serde::ser::Error::custom)?;
+                if let serde_json::Value::Object(sm) = sv {
+                    map.extend(sm);
+                }
+            }
         }
         serde_json::Value::Object(map).serialize(s)
     }
@@ -186,6 +214,11 @@ impl TryFrom<serde_json::Value> for StepDefinition {
             "map" => {
                 let mc: MapConfig = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
                 StepKind::Map(mc)
+            }
+            "switch" => {
+                let sc: SwitchConfig =
+                    serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+                StepKind::Switch(sc)
             }
             other => return Err(format!("unknown step type: '{other}'")),
         };
@@ -245,6 +278,13 @@ impl Serialize for BodyStep {
                     map.extend(mm);
                 }
             }
+            BodyStepKind::Switch(sc) => {
+                map.insert("type".into(), "switch".into());
+                let sv = serde_json::to_value(sc).map_err(serde::ser::Error::custom)?;
+                if let serde_json::Value::Object(sm) = sv {
+                    map.extend(sm);
+                }
+            }
         }
         serde_json::Value::Object(map).serialize(s)
     }
@@ -293,6 +333,11 @@ impl TryFrom<serde_json::Value> for BodyStep {
                 let mc: MapConfig = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
                 BodyStepKind::Map(mc)
             }
+            "switch" => {
+                let sc: SwitchConfig =
+                    serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+                BodyStepKind::Switch(sc)
+            }
             other => return Err(format!("unknown body step type: '{other}'")),
         };
 
@@ -325,6 +370,8 @@ pub enum DagError {
     InvalidLoopConfig { step: String, reason: String },
     #[error("step '{step}' has invalid map config: {reason}")]
     InvalidMapConfig { step: String, reason: String },
+    #[error("step '{step}' has invalid switch config: {reason}")]
+    InvalidSwitchConfig { step: String, reason: String },
 }
 
 // ─── 验证 ─────────────────────────────────────────────────────────────────────
@@ -411,13 +458,14 @@ pub fn validate_dag(flow: &FlowDefinition) -> Result<(), DagError> {
         }
     }
 
-    // 5. condition 语法预检 + loop/map config 验证
+    // 5. condition 语法预检 + loop/map/switch config 验证
     let operators = ["==", "!=", ">=", "<=", ">", "<"];
     for s in steps {
         validate_condition_syntax(&s.name, &s.condition, &operators)?;
         match &s.kind {
             StepKind::Loop(lc) => validate_loop_config(&s.name, lc, &operators)?,
             StepKind::Map(mc) => validate_map_config(&s.name, mc, &operators)?,
+            StepKind::Switch(sc) => validate_switch_config(&s.name, sc, &operators)?,
             StepKind::Rune(_) => {}
         }
     }
@@ -476,7 +524,7 @@ fn validate_loop_config(
         }
     }
 
-    // body step condition 预检 + 递归验证嵌套 loop/map
+    // body step condition 预检 + 递归验证嵌套 loop/map/switch
     let qualified = |bs_name: &str| format!("{step_name}/{bs_name}");
     for bs in &lc.body {
         validate_condition_syntax(&qualified(&bs.name), &bs.condition, operators)?;
@@ -486,6 +534,9 @@ fn validate_loop_config(
             }
             BodyStepKind::Map(nested) => {
                 validate_map_config(&qualified(&bs.name), nested, operators)?
+            }
+            BodyStepKind::Switch(nested) => {
+                validate_switch_config(&qualified(&bs.name), nested, operators)?
             }
             BodyStepKind::Rune(_) => {}
         }
@@ -522,7 +573,58 @@ fn validate_map_config(
     match &mc.body.kind {
         BodyStepKind::Loop(nested) => validate_loop_config(&body_name, nested, operators)?,
         BodyStepKind::Map(nested) => validate_map_config(&body_name, nested, operators)?,
+        BodyStepKind::Switch(nested) => validate_switch_config(&body_name, nested, operators)?,
         BodyStepKind::Rune(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_switch_config(
+    step_name: &str,
+    sc: &SwitchConfig,
+    operators: &[&str],
+) -> Result<(), DagError> {
+    if sc.on.trim().is_empty() {
+        return Err(DagError::InvalidSwitchConfig {
+            step: step_name.to_string(),
+            reason: "'on' must not be empty".to_string(),
+        });
+    }
+    if sc.cases.is_empty() {
+        return Err(DagError::InvalidSwitchConfig {
+            step: step_name.to_string(),
+            reason: "'cases' must not be empty".to_string(),
+        });
+    }
+    // serde_json::Value 未实现 Hash/Ord，无法用 HashSet/BTreeSet；
+    // switch cases 在实践中数量极少（通常 < 10），O(n²) 可接受。
+    let mut seen_whens: Vec<&serde_json::Value> = Vec::new();
+    for case in &sc.cases {
+        if seen_whens.contains(&&case.when) {
+            return Err(DagError::InvalidSwitchConfig {
+                step: step_name.to_string(),
+                reason: format!("duplicate 'when' value: {}", case.when),
+            });
+        }
+        seen_whens.push(&case.when);
+    }
+    // 递归验证每个 case body 和 default
+    let validate_body = |b: &BodyStep| -> Result<(), DagError> {
+        let body_name = format!("{step_name}/{}", b.name);
+        validate_condition_syntax(&body_name, &b.condition, operators)?;
+        match &b.kind {
+            BodyStepKind::Loop(nested) => validate_loop_config(&body_name, nested, operators)?,
+            BodyStepKind::Map(nested) => validate_map_config(&body_name, nested, operators)?,
+            BodyStepKind::Switch(nested) => validate_switch_config(&body_name, nested, operators)?,
+            BodyStepKind::Rune(_) => {}
+        }
+        Ok(())
+    };
+    for case in &sc.cases {
+        validate_body(&case.body)?;
+    }
+    if let Some(default_body) = &sc.default {
+        validate_body(default_body)?;
     }
     Ok(())
 }

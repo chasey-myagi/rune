@@ -418,6 +418,64 @@ impl FlowRunner {
                             }
                         });
                     }
+                    StepKind::Switch(sc) => {
+                        // on 表达式在当前 step_outputs 和 flow_input_json 上下文中求值（同步）
+                        let on_val =
+                            resolve_condition_value(&sc.on, &step_outputs, &flow_input_json);
+                        let matched: Option<BodyStep> = sc
+                            .cases
+                            .iter()
+                            .find(|c| c.when == on_val)
+                            .map(|c| c.body.clone())
+                            .or_else(|| sc.default.as_deref().cloned());
+
+                        match matched {
+                            None => {
+                                // 无匹配且无 default → Skipped
+                                skip_indices.push(step_idx);
+                            }
+                            Some(body) => {
+                                let si_json: Option<serde_json::Value> =
+                                    serde_json::from_slice(&si).ok();
+                                let body_input = Self::build_body_step_input(
+                                    &body,
+                                    &si,
+                                    &HashMap::new(),
+                                    &si_json,
+                                )?;
+                                let runner = self.clone();
+                                let parent_context = parent_context.clone();
+                                let flow_request_id = flow_request_id.clone();
+                                join_set.spawn(async move {
+                                    // body.timeout_ms 覆盖 step 级别 timeout；
+                                    // 对内（execute_body_step_kind）和外（hard deadline）使用同一值。
+                                    let effective_timeout = body
+                                        .timeout_ms
+                                        .map(Duration::from_millis)
+                                        .unwrap_or(timeout);
+                                    let body_future = runner.execute_body_step_kind(
+                                        body.kind,
+                                        body_input,
+                                        effective_timeout,
+                                        parent_context,
+                                        flow_request_id,
+                                    );
+                                    match tokio::time::timeout(effective_timeout, body_future).await
+                                    {
+                                        Ok(Ok(out)) => Ok((step_idx, out)),
+                                        Ok(Err(e)) => Err((
+                                            step_idx,
+                                            RuneError::ExecutionFailed {
+                                                code: "SWITCH_CASE_FAILED".into(),
+                                                message: e.to_string(),
+                                            },
+                                        )),
+                                        Err(_) => Err((step_idx, RuneError::Timeout)),
+                                    }
+                                });
+                            }
+                        }
+                    }
                 }
             }
 
@@ -771,6 +829,45 @@ impl FlowRunner {
                         code: "MAP_FAILED".into(),
                         message: e.to_string(),
                     }),
+                BodyStepKind::Switch(sc) => {
+                    // body step 内 Switch 同理：on 只能引用 $input.*
+                    let input_json: Option<serde_json::Value> = serde_json::from_slice(&input).ok();
+                    let on_val = resolve_condition_value(&sc.on, &HashMap::new(), &input_json);
+                    let matched: Option<BodyStep> = sc
+                        .cases
+                        .into_iter()
+                        .find(|c| c.when == on_val)
+                        .map(|c| c.body)
+                        .or_else(|| sc.default.map(|b| *b));
+
+                    match matched {
+                        None => Ok(Bytes::copy_from_slice(b"null")),
+                        Some(body) => {
+                            // Switch body 是孤立执行单元，没有前序 body 输出可引用
+                            let body_input = FlowRunner::build_body_step_input(
+                                &body,
+                                &input,
+                                &HashMap::new(),
+                                &input_json,
+                            )
+                            .map_err(|e| {
+                                RuneError::ExecutionFailed {
+                                    code: "SWITCH_INPUT_MAPPING_FAILED".into(),
+                                    message: e.to_string(),
+                                }
+                            })?;
+                            runner
+                                .execute_body_step_kind(
+                                    body.kind,
+                                    body_input,
+                                    effective_timeout,
+                                    parent_context,
+                                    flow_request_id,
+                                )
+                                .await
+                        }
+                    }
+                }
             }
         })
     }
