@@ -1580,6 +1580,7 @@ async fn sf1_step_b_non_object_returns_error_not_panic() {
         request_id: "test-1".into(),
         context: Default::default(),
         timeout: Duration::from_secs(5),
+        disable_runtime_retry: false,
     };
     let result = invoker.invoke_once(ctx, Bytes::from("[1,2,3]")).await;
     assert!(
@@ -1593,6 +1594,7 @@ async fn sf1_step_b_non_object_returns_error_not_panic() {
         request_id: "test-2".into(),
         context: Default::default(),
         timeout: Duration::from_secs(5),
+        disable_runtime_retry: false,
     };
     let result2 = invoker.invoke_once(ctx2, Bytes::from(r#""hello""#)).await;
     assert!(result2.is_err(), "string JSON should return Err, not panic");
@@ -1603,6 +1605,7 @@ async fn sf1_step_b_non_object_returns_error_not_panic() {
         request_id: "test-3".into(),
         context: Default::default(),
         timeout: Duration::from_secs(5),
+        disable_runtime_retry: false,
     };
     let result3 = invoker.invoke_once(ctx3, Bytes::from(r#"{"x":1}"#)).await;
     assert!(result3.is_ok(), "object JSON should succeed");

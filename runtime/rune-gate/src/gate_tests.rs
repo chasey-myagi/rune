@@ -8999,6 +8999,7 @@ mod tests {
             request_id: "req-m6".into(),
             context: HashMap::new(),
             timeout: std::time::Duration::from_secs(5),
+            disable_runtime_retry: false,
         };
 
         let (_response, output_size) =

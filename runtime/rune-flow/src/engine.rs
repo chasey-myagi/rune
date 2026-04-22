@@ -415,6 +415,7 @@ impl FlowRunner {
                                         request_id: uuid_simple(),
                                         context: step_context,
                                         timeout,
+                                        disable_runtime_retry: false,
                                     };
                                     // engine 层强制 hard deadline（LocalInvoker 无内置 timeout）。
                                     // RemoteInvoker 经由 RuneContext.timeout 在 session 层同时
@@ -1107,6 +1108,7 @@ impl FlowRunner {
                                 // cancel；外层 execute_loop 的 tokio::time::timeout 是
                                 // LocalInvoker 的 hard deadline。两者使用相同值，互补不冲突。
                                 timeout: effective_timeout,
+                                disable_runtime_retry: false,
                             };
                             inv.invoke_once(ctx, input).await
                         }
@@ -1619,8 +1621,14 @@ async fn invoke_with_retry(
                     .iter()
                     .any(|cond| matches!((cond, e), (RetryCondition::Timeout, RuneError::Timeout)))
             };
+            let start = std::time::Instant::now();
+            let total_timeout = ctx.timeout;
             retry_op(config, should_retry, || {
-                invoker.invoke_once(ctx.clone(), input.clone())
+                let elapsed = start.elapsed();
+                let mut attempt_ctx = ctx.clone();
+                attempt_ctx.timeout = total_timeout.saturating_sub(elapsed);
+                attempt_ctx.disable_runtime_retry = true;
+                invoker.invoke_once(attempt_ctx, input.clone())
             })
             .await
         }

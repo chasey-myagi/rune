@@ -159,6 +159,7 @@ mod tests {
             request_id: "r-1".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         }
     }
 
@@ -234,6 +235,7 @@ mod tests {
             request_id: "req-42".into(),
             context: Default::default(),
             timeout: Duration::from_secs(5),
+            disable_runtime_retry: false,
         };
         let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
         assert_eq!(result, Bytes::from("my_rune:req-42"));
@@ -291,6 +293,7 @@ mod tests {
                 request_id: format!("r-{}", i),
                 context: Default::default(),
                 timeout: Duration::from_secs(30),
+                disable_runtime_retry: false,
             };
             let payload = Bytes::from(format!("msg-{}", i));
             handles.push(tokio::spawn(
@@ -456,6 +459,7 @@ mod tests {
             request_id: "r-99".into(),
             context: Default::default(),
             timeout: Duration::from_secs(10),
+            disable_runtime_retry: false,
         };
         let mut rx = invoker
             .invoke_stream(ctx, Bytes::from("payload"))
@@ -513,6 +517,7 @@ mod tests {
                         request_id: "req-remote-1".into(),
                         context: Default::default(),
                         timeout: Duration::from_secs(30),
+                        disable_runtime_retry: false,
                     },
                     Bytes::from("remote_input"),
                 )
@@ -601,6 +606,7 @@ mod tests {
                         request_id: "req-stream-1".into(),
                         context: Default::default(),
                         timeout: Duration::from_secs(30),
+                        disable_runtime_retry: false,
                     },
                     Bytes::from("data"),
                 )

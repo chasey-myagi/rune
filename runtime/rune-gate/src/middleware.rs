@@ -132,6 +132,14 @@ fn rate_limited_response(retry_after: u64, scope: &str) -> axum::response::Respo
     response
 }
 
+fn caster_unavailable_response() -> axum::response::Response {
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "SERVICE_UNAVAILABLE",
+        "all caster capacity exhausted",
+    )
+}
+
 fn resolve_rune_name_for_rate_limit(state: &GateState, method: &str, path: &str) -> Option<String> {
     debug_rune_name(path)
         .map(ToString::to_string)
@@ -310,7 +318,7 @@ pub async fn rate_limit_middleware(
         // to a different caster than the one the handler ultimately invokes.
         if let Some(selected_entry) = select_rune_entry(&state, &rune_name, &labels) {
             if caster_capacity_exhausted(&state.rune.session_mgr, &selected_entry) {
-                return rate_limited_response(1, "caster");
+                return caster_unavailable_response();
             }
             req.extensions_mut().insert(selected_entry);
         }

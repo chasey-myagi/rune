@@ -44,6 +44,7 @@ fn test_ctx(rune_name: &str, request_id: &str) -> RuneContext {
         request_id: request_id.into(),
         context: Default::default(),
         timeout: Duration::from_secs(30),
+        disable_runtime_retry: false,
     }
 }
 
@@ -219,6 +220,7 @@ async fn full_chain_with_context_propagation() {
             .into_iter()
             .collect(),
         timeout: Duration::from_secs(10),
+        disable_runtime_retry: false,
     };
 
     let result = invoker.invoke_once(ctx, Bytes::from("data")).await.unwrap();

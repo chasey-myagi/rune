@@ -574,6 +574,7 @@ impl SessionManager {
                     })),
                 };
                 if hb_tx.send(msg).await.is_err() {
+                    let _ = hb_shutdown.send(true);
                     break;
                 }
                 let elapsed = now_ms().saturating_sub(hb_last.load(Ordering::Relaxed));
@@ -737,7 +738,9 @@ impl SessionManager {
                 protocol_version: PROTOCOL_VERSION.to_string(),
             })),
         };
-        let _ = ctx.outbound_tx.send(ack).await;
+        if ctx.outbound_tx.send(ack).await.is_err() {
+            return false;
+        }
         ctx.state = SessionState::Active;
         ctx.caster_id = Some(id);
         true

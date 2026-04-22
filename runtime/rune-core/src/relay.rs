@@ -413,6 +413,7 @@ mod tests {
             request_id: "r1".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
         let result = invoker
             .invoke_once(ctx, Bytes::from("hello"))
@@ -468,6 +469,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
         let r1 = relay
             .resolve("rr", &resolver)
@@ -1071,6 +1073,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
         let r1 = relay
             .resolve("shared_rune", &resolver)
@@ -1476,6 +1479,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         let mut results = std::collections::HashSet::new();
@@ -1706,6 +1710,7 @@ mod tests {
             request_id: "r1".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Request with env=prod should get prod caster
@@ -1882,6 +1887,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Should always pick the high-priority caster
@@ -1922,6 +1928,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Should fallback to low-priority caster
@@ -1959,6 +1966,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // With same priority, inner round-robin should alternate
@@ -2157,6 +2165,7 @@ mod tests {
             request_id: "r1".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
         let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
         assert_eq!(
@@ -2200,6 +2209,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Should pick the positive-priority candidate
@@ -2250,6 +2260,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Should always pick the highest priority (10)
@@ -2313,6 +2324,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Should resolve to one of the high-priority candidates (a or b), never "low"

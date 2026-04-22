@@ -162,6 +162,23 @@ impl RuneInvoker for RetryInvoker {
             return self.inner.invoke_once(ctx, input).await;
         }
 
+        // Flow-level retry is managing this call: execute once, still gated by circuit breaker.
+        if ctx.disable_runtime_retry {
+            let _permit = self.circuit_breaker.can_execute()?;
+            match self.inner.invoke_once(ctx, input).await {
+                Ok(output) => {
+                    self.circuit_breaker.record_success();
+                    return Ok(output);
+                }
+                Err(err) => {
+                    if !is_client_error(&err) {
+                        self.circuit_breaker.record_failure();
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
         let deadline = std::time::Instant::now() + ctx.timeout;
         let base_ctx = ctx.clone();
         let mut current_ctx = ctx;
@@ -298,6 +315,7 @@ mod tests {
             request_id: "r-1".into(),
             context: Default::default(),
             timeout: Duration::from_secs(5),
+            disable_runtime_retry: false,
         }
     }
 
@@ -679,6 +697,7 @@ mod tests {
             request_id: "overshoot-test".into(),
             context: Default::default(),
             timeout: Duration::from_millis(100),
+            disable_runtime_retry: false,
         };
 
         struct InstantFail {
@@ -748,6 +767,7 @@ mod tests {
             request_id: "deadline-test".into(),
             context: Default::default(),
             timeout: Duration::from_millis(50),
+            disable_runtime_retry: false,
         };
 
         // Inner invoker sleeps 30ms per call then fails — after 2 calls (60ms)
@@ -823,6 +843,7 @@ mod tests {
             request_id: "backoff-budget".into(),
             context: Default::default(),
             timeout: Duration::from_secs(5),
+            disable_runtime_retry: false,
         };
 
         struct TimedCapture {
@@ -907,6 +928,7 @@ mod tests {
             request_id: "budget-test".into(),
             context: Default::default(),
             timeout: Duration::from_secs(10),
+            disable_runtime_retry: false,
         };
 
         // Capture the timeout from each invocation

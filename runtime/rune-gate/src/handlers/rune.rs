@@ -336,6 +336,7 @@ pub async fn execute_rune(req: ExecuteRequest<'_>) -> axum::response::Response {
         request_id: request_id.clone(),
         context,
         timeout: state.rune.request_timeout,
+        disable_runtime_retry: false,
     };
 
     // async mode
@@ -502,7 +503,9 @@ pub async fn sync_execute_multipart(
             } else {
                 match serde_json::from_slice::<serde_json::Value>(&output) {
                     Ok(json) => json,
-                    Err(_) => serde_json::json!({"output": String::from_utf8_lossy(&output)}),
+                    Err(_) => {
+                        serde_json::json!({"output": format!("hex:{}", hex::encode(&output))})
+                    }
                 }
             };
 
@@ -559,9 +562,12 @@ pub async fn stream_execute(
                     match chunk {
                         Ok(data) => {
                             output_size += data.len() as i64;
-                            let event = Event::default()
-                                .event("message")
-                                .data(String::from_utf8_lossy(&data));
+                            let event = Event::default().event("message").data(
+                                match std::str::from_utf8(&data) {
+                                    Ok(s) => s.to_owned(),
+                                    Err(_) => format!("hex:{}", hex::encode(&data)),
+                                },
+                            );
                             if tx.send(Ok(event)).await.is_err() {
                                 state_clone
                                     .rune

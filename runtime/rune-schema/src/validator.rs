@@ -38,8 +38,7 @@ fn get_or_compile(schema_str: &str) -> Result<Arc<jsonschema::Validator>, Schema
     let v = Arc::new(validator);
 
     let mut cache = cache().write().unwrap_or_else(|e| e.into_inner());
-    cache.insert(schema_str.to_string(), Arc::clone(&v));
-    Ok(v)
+    Ok(Arc::clone(cache.entry(schema_str.to_string()).or_insert(v)))
 }
 
 /// Clear the validator cache. Mainly used for benchmarking cold-start scenarios.

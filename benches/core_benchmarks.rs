@@ -214,6 +214,7 @@ fn invoker_benchmarks(c: &mut Criterion) {
                 request_id: "bench-1".into(),
                 context: Default::default(),
                 timeout: Duration::from_secs(30),
+                disable_runtime_retry: false,
             };
             rt.block_on(invoker.invoke_once(ctx, Bytes::from("hello")))
                 .unwrap();
@@ -247,6 +248,7 @@ fn invoker_benchmarks(c: &mut Criterion) {
                 request_id: "bench-s".into(),
                 context: Default::default(),
                 timeout: Duration::from_secs(30),
+                disable_runtime_retry: false,
             };
             rt.block_on(async {
                 let mut rx = invoker

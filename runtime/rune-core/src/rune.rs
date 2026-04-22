@@ -5,12 +5,16 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Rune 的执行上下文
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RuneContext {
     pub rune_name: String,
     pub request_id: String,
     pub context: std::collections::HashMap<String, String>,
     pub timeout: std::time::Duration,
+    /// When true, RuntimeRetryInvoker skips its retry loop (one attempt only).
+    /// Set by flow's invoke_with_retry to prevent multiplicative retries when
+    /// the flow layer is already managing retry/backoff for this step.
+    pub disable_runtime_retry: bool,
 }
 
 /// Rune 注册配置

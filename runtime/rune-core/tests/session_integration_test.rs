@@ -836,6 +836,7 @@ async fn test_fix_timeout_trips_cb_but_never_retries_integration() {
         request_id: "timeout-1".into(),
         context: Default::default(),
         timeout: Duration::from_millis(200),
+        disable_runtime_retry: false,
     };
     let result1 = invoker.invoke_once(ctx1, Bytes::from("ping")).await;
     assert!(
@@ -867,6 +868,7 @@ async fn test_fix_timeout_trips_cb_but_never_retries_integration() {
         request_id: "timeout-2".into(),
         context: Default::default(),
         timeout: Duration::from_millis(200),
+        disable_runtime_retry: false,
     };
     let result2 = invoker.invoke_once(ctx2, Bytes::from("ping")).await;
     assert!(matches!(result2, Err(RuneError::Timeout)));
@@ -897,6 +899,7 @@ async fn test_fix_timeout_trips_cb_but_never_retries_integration() {
         request_id: "fast-fail-3".into(),
         context: Default::default(),
         timeout: Duration::from_secs(5),
+        disable_runtime_retry: false,
     };
     let start = std::time::Instant::now();
     let result3 = invoker.invoke_once(ctx3, Bytes::from("ping")).await;

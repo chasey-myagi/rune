@@ -189,6 +189,7 @@ mod tests {
             request_id: "r-1".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         }
     }
 
