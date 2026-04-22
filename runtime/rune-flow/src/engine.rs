@@ -315,17 +315,17 @@ impl FlowRunner {
 
                 // 检查是否有失败的上游：失败向下游传播，该 step 标记为 Failed 并跳过；
                 // 仅跳过有失败依赖的 step，不影响同层其他独立 step（修正层级粒度 fail-fast bug）
-                let has_failed_dep = step_def.depends_on.iter().any(|dep| {
-                    matches!(
-                        step_statuses.get(dep.as_str()),
-                        Some(StepStatus::Failed { .. })
-                    )
+                let failed_dep = step_def.depends_on.iter().find_map(|dep| {
+                    match step_statuses.get(dep.as_str()) {
+                        Some(StepStatus::Failed { error }) => Some((dep.clone(), error.clone())),
+                        _ => None,
+                    }
                 });
-                if has_failed_dep {
+                if let Some((dep_name, dep_err)) = failed_dep {
                     step_statuses.insert(
                         step_def.name.clone(),
                         StepStatus::Failed {
-                            error: "upstream step failed".to_string(),
+                            error: format!("upstream '{}' failed: {}", dep_name, dep_err),
                         },
                     );
                     continue;

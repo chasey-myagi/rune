@@ -23,6 +23,7 @@ fn safe_mime(raw: &str) -> String {
         .trim()
         .to_ascii_lowercase();
     // Block only the types that browsers can execute as scripts or active content.
+    // text/svg+xml is included because SVG files can embed <script> elements.
     let dangerous = matches!(
         base.as_str(),
         "text/html"
@@ -32,6 +33,8 @@ fn safe_mime(raw: &str) -> String {
             | "application/xhtml+xml"
             | "text/xml"
             | "application/xml"
+            | "text/svg+xml"
+            | "image/svg+xml"
             | "application/x-shockwave-flash"
             | "application/vnd.ms-powerpoint"
     );

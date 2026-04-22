@@ -80,7 +80,14 @@ impl RuneStore {
                     })
                 }
                 Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK");
+                    if let Err(rb_err) = conn.execute_batch("ROLLBACK") {
+                        tracing::error!(
+                            task_id = %task_id,
+                            error = %rb_err,
+                            "ROLLBACK failed after insert_task_and_start error; \
+                             DB connection may have a dangling transaction"
+                        );
+                    }
                     Err(e)
                 }
             }

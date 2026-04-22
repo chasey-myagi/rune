@@ -519,3 +519,42 @@ fn validate_complex_diamond_with_conditions_and_mappings() {
     );
     assert!(validate_dag(&f).is_ok());
 }
+
+// ============================================================
+// Reserved step name tests
+// ============================================================
+
+#[test]
+fn reserved_name_input_is_rejected() {
+    let f = flow("reserved_input", vec![step("input", "rune_a")]);
+    assert!(
+        matches!(validate_dag(&f), Err(DagError::ReservedStepName(n)) if n == "input"),
+        "step named 'input' should be rejected with ReservedStepName"
+    );
+}
+
+#[test]
+fn reserved_name_dollar_input_is_rejected() {
+    let f = flow("reserved_dollar_input", vec![step("$input", "rune_a")]);
+    assert!(
+        matches!(validate_dag(&f), Err(DagError::ReservedStepName(n)) if n == "$input"),
+        "step named '$input' should be rejected with ReservedStepName"
+    );
+}
+
+#[test]
+fn non_reserved_names_are_accepted() {
+    // Names that contain "input" as a substring must not be rejected.
+    let f = flow(
+        "near_reserved",
+        vec![
+            step("inputs", "rune_a"),
+            step("my_input", "rune_b"),
+            step("input_data", "rune_c"),
+        ],
+    );
+    assert!(
+        validate_dag(&f).is_ok(),
+        "names that merely contain 'input' should be allowed"
+    );
+}

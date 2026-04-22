@@ -33,7 +33,10 @@ fn load_cli_config() -> CliConfig {
     };
     let doc: toml::Value = match toml::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return none,
+        Err(e) => {
+            eprintln!("warning: failed to parse ~/.rune/config.toml: {e}");
+            return none;
+        }
     };
     let rt = match doc.get("runtime") {
         Some(v) => v,
