@@ -3,7 +3,7 @@ use rune_core::invoker::LocalInvoker;
 use rune_core::relay::Relay;
 use rune_core::resolver::RoundRobinResolver;
 use rune_core::rune::{make_handler, RuneConfig, RuneError};
-use rune_flow::dag::{FlowDefinition, StepDefinition};
+use rune_flow::dag::{FlowDefinition, RuneConfig as FlowRuneConfig, StepDefinition, StepKind};
 use rune_flow::engine::{FlowEngine, FlowError, StepStatus};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,22 +30,24 @@ fn rune_config(name: &str) -> RuneConfig {
 fn step(name: &str, rune: &str) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: vec![],
         condition: None,
         input_mapping: None,
         timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(FlowRuneConfig { rune: rune.into() }),
     }
 }
 
 fn step_with_deps(name: &str, rune: &str, deps: &[&str]) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: None,
         input_mapping: None,
         timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(FlowRuneConfig { rune: rune.into() }),
     }
 }
 
@@ -57,22 +59,24 @@ fn step_with_deps_and_mapping(
 ) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: None,
         input_mapping: Some(mapping),
         timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(FlowRuneConfig { rune: rune.into() }),
     }
 }
 
 fn step_with_condition(name: &str, rune: &str, deps: &[&str], condition: &str) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: Some(condition.to_string()),
         input_mapping: None,
         timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(FlowRuneConfig { rune: rune.into() }),
     }
 }
 
@@ -85,11 +89,12 @@ fn step_with_condition_and_mapping(
 ) -> StepDefinition {
     StepDefinition {
         name: name.to_string(),
-        rune: rune.to_string(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         condition: Some(condition.to_string()),
         input_mapping: Some(mapping),
         timeout_ms: None,
+        retry: None,
+        kind: StepKind::Rune(FlowRuneConfig { rune: rune.into() }),
     }
 }
 
@@ -1635,4 +1640,466 @@ async fn per_step_timeout_none_uses_global() {
         } => {}
         other => panic!("expected StepFailed(Timeout), got {:?}", other),
     }
+}
+
+// ============================================================
+// A: Loop Step (A-10 to A-16)
+// ============================================================
+
+use rune_flow::dag::{BodyStep, BodyStepKind, LoopConfig};
+
+/// A-10: 基础 loop — 循环到 count == 3 后 until 条件满足
+#[tokio::test]
+async fn loop_basic_until_condition() {
+    let relay = test_relay();
+    let h = rune_core::rune::make_handler(|_ctx, input| async move {
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&input).unwrap_or(serde_json::Value::Object(Default::default()));
+        let n = v["count"].as_i64().unwrap_or(0) + 1;
+        v["count"] = n.into();
+        Ok(bytes::Bytes::from(serde_json::to_vec(&v).unwrap()))
+    });
+    relay
+        .register(
+            rune_config("counter"),
+            Arc::new(rune_core::invoker::LocalInvoker::new(h)),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "loop_flow",
+            vec![StepDefinition {
+                name: "loop".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Loop(LoopConfig {
+                    max_iterations: 10,
+                    until: Some("steps.inc.output.count == 3".to_string()),
+                    body: vec![BodyStep {
+                        name: "inc".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Rune(FlowRuneConfig {
+                            rune: "counter".into(),
+                        }),
+                    }],
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("loop_flow", Bytes::from(r#"{"count": 0}"#))
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(v["count"], 3);
+}
+
+/// A-11: body step condition — `fix` 只在 passed == false 时运行，passed == true 时被跳过
+#[tokio::test]
+async fn loop_body_step_condition_skips_when_false() {
+    let relay = test_relay();
+    let hp = rune_core::rune::make_handler(|_ctx, _input| async move {
+        Ok(bytes::Bytes::from(r#"{"passed": true}"#))
+    });
+    relay
+        .register(
+            rune_config("set_pass"),
+            Arc::new(rune_core::invoker::LocalInvoker::new(hp)),
+            None,
+        )
+        .unwrap();
+    let hf = rune_core::rune::make_handler(|_ctx, _input| async move {
+        Err(rune_core::rune::RuneError::ExecutionFailed {
+            code: "SHOULD_NOT_RUN".into(),
+            message: "fix should have been skipped".into(),
+        })
+    });
+    relay
+        .register(
+            rune_config("would_fail2"),
+            Arc::new(rune_core::invoker::LocalInvoker::new(hf)),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "cond_flow",
+            vec![StepDefinition {
+                name: "loop".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Loop(LoopConfig {
+                    max_iterations: 1,
+                    until: Some("steps.implement.output.passed == true".to_string()),
+                    body: vec![
+                        BodyStep {
+                            name: "implement".to_string(),
+                            condition: None,
+                            input_mapping: None,
+                            timeout_ms: None,
+                            retry: None,
+                            kind: BodyStepKind::Rune(FlowRuneConfig {
+                                rune: "set_pass".into(),
+                            }),
+                        },
+                        BodyStep {
+                            name: "fix".to_string(),
+                            condition: Some("steps.implement.output.passed == false".to_string()),
+                            input_mapping: None,
+                            timeout_ms: None,
+                            retry: None,
+                            kind: BodyStepKind::Rune(FlowRuneConfig {
+                                rune: "would_fail2".into(),
+                            }),
+                        },
+                    ],
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("cond_flow", Bytes::from(r#"{}"#))
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(v["passed"], true);
+}
+
+/// A-12: body step input_mapping — 从上游 output 字段取值作为下游输入
+#[tokio::test]
+async fn loop_body_step_input_mapping() {
+    let relay = test_relay();
+    let hp = rune_core::rune::make_handler(|_ctx, _input| async move {
+        Ok(bytes::Bytes::from(r#"{"session_id": "abc123"}"#))
+    });
+    relay
+        .register(
+            rune_config("produce"),
+            Arc::new(rune_core::invoker::LocalInvoker::new(hp)),
+            None,
+        )
+        .unwrap();
+    let hc = rune_core::rune::make_handler(|_ctx, input| async move { Ok(input) });
+    relay
+        .register(
+            rune_config("consume"),
+            Arc::new(rune_core::invoker::LocalInvoker::new(hc)),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    let mut mapping = HashMap::new();
+    mapping.insert(
+        "sid".to_string(),
+        "steps.produce.output.session_id".to_string(),
+    );
+
+    engine
+        .register(flow(
+            "mapping_flow",
+            vec![StepDefinition {
+                name: "loop".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Loop(LoopConfig {
+                    max_iterations: 1,
+                    until: None,
+                    body: vec![
+                        BodyStep {
+                            name: "produce".to_string(),
+                            condition: None,
+                            input_mapping: None,
+                            timeout_ms: None,
+                            retry: None,
+                            kind: BodyStepKind::Rune(FlowRuneConfig {
+                                rune: "produce".into(),
+                            }),
+                        },
+                        BodyStep {
+                            name: "consume".to_string(),
+                            condition: None,
+                            input_mapping: Some(mapping),
+                            timeout_ms: None,
+                            retry: None,
+                            kind: BodyStepKind::Rune(FlowRuneConfig {
+                                rune: "consume".into(),
+                            }),
+                        },
+                    ],
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("mapping_flow", Bytes::from(r#"{}"#))
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(v["sid"], "abc123");
+}
+
+/// A-13: 达到 max_iterations 时正常返回（非 error）
+#[tokio::test]
+async fn loop_reaches_max_iterations_returns_ok() {
+    let relay = test_relay();
+    let h = rune_core::rune::make_handler(|_ctx, _input| async move {
+        Ok(bytes::Bytes::from(r#"{"passed": false}"#))
+    });
+    relay
+        .register(
+            rune_config("never_done"),
+            Arc::new(rune_core::invoker::LocalInvoker::new(h)),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "max_iter_flow",
+            vec![StepDefinition {
+                name: "loop".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Loop(LoopConfig {
+                    max_iterations: 3,
+                    until: Some("steps.work.output.passed == true".to_string()),
+                    body: vec![BodyStep {
+                        name: "work".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Rune(FlowRuneConfig {
+                            rune: "never_done".into(),
+                        }),
+                    }],
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("max_iter_flow", Bytes::from(r#"{}"#))
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(v["passed"], false);
+}
+
+/// A-14: 嵌套 loop — 外层 body 包含内层 loop，x 从 0 累加到 2
+#[tokio::test]
+async fn loop_nested_inner_outer() {
+    let relay = test_relay();
+    let h = rune_core::rune::make_handler(|_ctx, input| async move {
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&input).unwrap_or(serde_json::Value::Object(Default::default()));
+        let n = v["x"].as_i64().unwrap_or(0) + 1;
+        v["x"] = n.into();
+        Ok(bytes::Bytes::from(serde_json::to_vec(&v).unwrap()))
+    });
+    relay
+        .register(
+            rune_config("add_x"),
+            Arc::new(rune_core::invoker::LocalInvoker::new(h)),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "nested_flow",
+            vec![StepDefinition {
+                name: "outer".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Loop(LoopConfig {
+                    max_iterations: 1,
+                    until: None,
+                    body: vec![BodyStep {
+                        name: "inner".to_string(),
+                        condition: None,
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Loop(LoopConfig {
+                            max_iterations: 5,
+                            until: Some("steps.inc.output.x == 2".to_string()),
+                            body: vec![BodyStep {
+                                name: "inc".to_string(),
+                                condition: None,
+                                input_mapping: None,
+                                timeout_ms: None,
+                                retry: None,
+                                kind: BodyStepKind::Rune(FlowRuneConfig {
+                                    rune: "add_x".into(),
+                                }),
+                            }],
+                        }),
+                    }],
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("nested_flow", Bytes::from(r#"{"x": 0}"#))
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(v["x"], 2);
+}
+
+/// A-15: Loop step 作为 DAG 中的节点（有 depends_on），接收上游输出
+#[tokio::test]
+async fn loop_step_as_dag_node_with_deps() {
+    let relay = test_relay();
+    let h = rune_core::rune::make_handler(|_ctx, input| async move {
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&input).unwrap_or(serde_json::Value::Object(Default::default()));
+        let n = v["count"].as_i64().unwrap_or(0) + 1;
+        v["count"] = n.into();
+        Ok(bytes::Bytes::from(serde_json::to_vec(&v).unwrap()))
+    });
+    relay
+        .register(
+            rune_config("bump"),
+            Arc::new(rune_core::invoker::LocalInvoker::new(h)),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "dag_loop",
+            vec![
+                step("A", "echo"),
+                StepDefinition {
+                    name: "B".to_string(),
+                    depends_on: vec!["A".to_string()],
+                    condition: None,
+                    input_mapping: None,
+                    timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Loop(LoopConfig {
+                        max_iterations: 5,
+                        until: Some("steps.inc.output.count == 2".to_string()),
+                        body: vec![BodyStep {
+                            name: "inc".to_string(),
+                            condition: None,
+                            input_mapping: None,
+                            timeout_ms: None,
+                            retry: None,
+                            kind: BodyStepKind::Rune(FlowRuneConfig {
+                                rune: "bump".into(),
+                            }),
+                        }],
+                    }),
+                },
+            ],
+        ))
+        .unwrap();
+
+    let result = engine
+        .execute("dag_loop", Bytes::from(r#"{"count": 0}"#))
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(v["count"], 2);
+}
+
+/// A-16: 所有 body steps 均 Skip 时，输出为 loop 入参（passthrough）
+#[tokio::test]
+async fn loop_all_body_steps_skipped_passthrough() {
+    let relay = test_relay();
+    let h = rune_core::rune::make_handler(|_ctx, _input| async move {
+        Err(rune_core::rune::RuneError::ExecutionFailed {
+            code: "SHOULD_NOT_RUN".into(),
+            message: "this body step should have been skipped".into(),
+        })
+    });
+    relay
+        .register(
+            rune_config("never_run"),
+            Arc::new(rune_core::invoker::LocalInvoker::new(h)),
+            None,
+        )
+        .unwrap();
+
+    let resolver = Arc::new(RoundRobinResolver::new());
+    let mut engine = FlowEngine::new(relay, resolver);
+
+    engine
+        .register(flow(
+            "skip_flow",
+            vec![StepDefinition {
+                name: "loop".to_string(),
+                depends_on: vec![],
+                condition: None,
+                input_mapping: None,
+                timeout_ms: None,
+                retry: None,
+                kind: StepKind::Loop(LoopConfig {
+                    max_iterations: 1,
+                    until: None,
+                    body: vec![BodyStep {
+                        name: "skip_me".to_string(),
+                        condition: Some("false".to_string()),
+                        input_mapping: None,
+                        timeout_ms: None,
+                        retry: None,
+                        kind: BodyStepKind::Rune(FlowRuneConfig {
+                            rune: "never_run".into(),
+                        }),
+                    }],
+                }),
+            }],
+        ))
+        .unwrap();
+
+    let input = Bytes::from(r#"{"original": true}"#);
+    let result = engine.execute("skip_flow", input).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
+    assert_eq!(v["original"], true);
 }

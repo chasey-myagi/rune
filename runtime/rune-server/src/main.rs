@@ -10,7 +10,7 @@ use rune_core::grpc_service::RuneGrpcService;
 use rune_core::rune::{make_handler, GateConfig, RuneConfig, RuneError};
 use rune_core::scaling::ScaleEvaluator;
 use rune_core::telemetry::TelemetryConfig;
-use rune_flow::dag::{FlowDefinition, StepDefinition};
+use rune_flow::dag::{FlowDefinition, RuneConfig as FlowRuneConfig, StepDefinition, StepKind};
 use rune_flow::engine::FlowEngine;
 use rune_gate::gate;
 use rune_proto::rune_service_server::RuneServiceServer;
@@ -261,27 +261,36 @@ async fn main() -> anyhow::Result<()> {
             steps: vec![
                 StepDefinition {
                     name: "s_a".into(),
-                    rune: "step_a".into(),
                     depends_on: vec![],
                     condition: None,
                     input_mapping: None,
                     timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: "step_a".into(),
+                    }),
                 },
                 StepDefinition {
                     name: "s_b".into(),
-                    rune: "step_b".into(),
                     depends_on: vec!["s_a".into()],
                     condition: None,
                     input_mapping: None,
                     timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: "step_b".into(),
+                    }),
                 },
                 StepDefinition {
                     name: "s_c".into(),
-                    rune: "step_c".into(),
                     depends_on: vec!["s_b".into()],
                     condition: None,
                     input_mapping: None,
                     timeout_ms: None,
+                    retry: None,
+                    kind: StepKind::Rune(FlowRuneConfig {
+                        rune: "step_c".into(),
+                    }),
                 },
             ],
             gate_path: None,
@@ -291,11 +300,14 @@ async fn main() -> anyhow::Result<()> {
             name: "single".to_string(),
             steps: vec![StepDefinition {
                 name: "s_a".into(),
-                rune: "step_a".into(),
                 depends_on: vec![],
                 condition: None,
                 input_mapping: None,
                 timeout_ms: None,
+                retry: None,
+                kind: StepKind::Rune(FlowRuneConfig {
+                    rune: "step_a".into(),
+                }),
             }],
             gate_path: None,
         });

@@ -8787,7 +8787,9 @@ mod tests {
         // Setup: create a flow with a slow echo step, run async, cancel the
         // task in the store before it completes, then verify the completion
         // callback does NOT overwrite the cancelled status.
-        use rune_flow::dag::{FlowDefinition, StepDefinition};
+        use rune_flow::dag::{
+            FlowDefinition, RuneConfig as FlowRuneConfig, StepDefinition, StepKind,
+        };
         use std::time::Duration;
         use tokio::time::sleep;
 
@@ -8823,11 +8825,14 @@ mod tests {
             name: "slow_flow".into(),
             steps: vec![StepDefinition {
                 name: "step1".into(),
-                rune: "slow_echo".into(),
                 depends_on: vec![],
                 condition: None,
                 input_mapping: None,
                 timeout_ms: None,
+                retry: None,
+                kind: StepKind::Rune(FlowRuneConfig {
+                    rune: "slow_echo".into(),
+                }),
             }],
             gate_path: None,
         };
