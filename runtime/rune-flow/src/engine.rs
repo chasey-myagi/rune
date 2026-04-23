@@ -1046,8 +1046,10 @@ impl FlowRunner {
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
                 Ok(Ok((i, out))) => {
-                    let val: serde_json::Value =
-                        serde_json::from_slice(&out).unwrap_or(serde_json::Value::Null);
+                    let val = match serde_json::from_slice::<serde_json::Value>(&out) {
+                        Ok(v) => v,
+                        Err(_) => serde_json::Value::String(format!("hex:{}", hex::encode(&out))),
+                    };
                     results[i] = Some(val);
                 }
                 Ok(Err((_, e))) => {
@@ -1612,6 +1614,11 @@ async fn invoke_with_retry(
     match retry {
         None => invoker.invoke_once(ctx, input).await,
         Some(config) => {
+            // Note: RetryCondition::Timeout at the flow level means "restart the rune call
+            // after a timeout". This is distinct from rune-core's RetryInvoker which never
+            // retries Timeout (because it cannot cancel the in-flight remote execution).
+            // Flow-level retry is safe here because the previous attempt has already returned
+            // RuneError::Timeout — the session layer has already cleaned up the pending request.
             let should_retry = |e: &RuneError| -> bool {
                 if config.retry_on.is_empty() || config.retry_on.contains(&RetryCondition::Any) {
                     return true;
@@ -1625,10 +1632,19 @@ async fn invoke_with_retry(
             let total_timeout = ctx.timeout;
             retry_op(config, should_retry, || {
                 let elapsed = start.elapsed();
+                let remaining = total_timeout.saturating_sub(elapsed);
+                let inv = Arc::clone(&invoker);
+                let inp = input.clone();
                 let mut attempt_ctx = ctx.clone();
-                attempt_ctx.timeout = total_timeout.saturating_sub(elapsed);
+                attempt_ctx.timeout = remaining;
                 attempt_ctx.disable_runtime_retry = true;
-                invoker.invoke_once(attempt_ctx, input.clone())
+                async move {
+                    // If the total timeout budget is exhausted, don't start another attempt.
+                    if remaining.is_zero() {
+                        return Err(RuneError::Timeout);
+                    }
+                    inv.invoke_once(attempt_ctx, inp).await
+                }
             })
             .await
         }

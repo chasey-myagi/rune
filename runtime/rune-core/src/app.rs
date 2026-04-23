@@ -98,9 +98,12 @@ impl App {
     }
 
     pub fn rune(&mut self, config: RuneConfig, handler: RuneHandler) -> &mut Self {
-        self.relay
+        if let Err(e) = self
+            .relay
             .register(config, Arc::new(LocalInvoker::new(handler)), None)
-            .expect("route conflict in local rune registration");
+        {
+            tracing::error!(error = %e, "route conflict in local rune registration");
+        }
         self
     }
 
@@ -109,13 +112,13 @@ impl App {
         config: RuneConfig,
         handler: impl StreamRuneHandler,
     ) -> &mut Self {
-        self.relay
-            .register(
-                config,
-                Arc::new(LocalStreamInvoker::new(Arc::new(handler))),
-                None,
-            )
-            .expect("route conflict in local stream rune registration");
+        if let Err(e) = self.relay.register(
+            config,
+            Arc::new(LocalStreamInvoker::new(Arc::new(handler))),
+            None,
+        ) {
+            tracing::error!(error = %e, "route conflict in local stream rune registration");
+        }
         self
     }
 
@@ -493,12 +496,11 @@ mod tests {
     }
 
     // ========================================================================
-    // gate conflict panics (since App uses expect)
+    // gate conflict is logged, not panicked — second rune is silently dropped
     // ========================================================================
 
     #[test]
-    #[should_panic(expected = "route conflict")]
-    fn app_register_conflicting_gate_paths_panics() {
+    fn app_register_conflicting_gate_paths_logs_error() {
         let mut app = App::new();
         let cfg1 = RuneConfig {
             gate: Some(GateConfig {
@@ -515,6 +517,11 @@ mod tests {
             ..echo_config("rune_y")
         };
         app.rune(cfg1, echo_handler());
-        app.rune(cfg2, echo_handler()); // should panic
+        app.rune(cfg2, echo_handler()); // logs error, does not panic
+
+        // Only rune_x was registered (rune_y failed with conflict)
+        let list = app.relay.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0, "rune_x");
     }
 }

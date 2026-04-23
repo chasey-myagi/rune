@@ -74,6 +74,15 @@ impl Relay {
         invoker: Arc<dyn RuneInvoker>,
         caster_id: Option<String>,
     ) -> Result<(), String> {
+        if config.name.is_empty() {
+            return Err("rune name must not be empty".to_string());
+        }
+        if let Some(ref gate) = config.gate {
+            if gate.path.is_empty() {
+                return Err("gate.path must not be empty".to_string());
+            }
+        }
+
         let _guard = self.write_lock.lock();
 
         // Check gate.path conflict: different rune_name with same path+method is a hard error

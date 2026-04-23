@@ -132,12 +132,21 @@ fn rate_limited_response(retry_after: u64, scope: &str) -> axum::response::Respo
     response
 }
 
+/// Seconds a client should wait before retrying after receiving 503 capacity-exhausted.
+const CASTER_UNAVAILABLE_RETRY_AFTER_SECS: &str = "5";
+
 fn caster_unavailable_response() -> axum::response::Response {
-    error_response(
+    let mut response = error_response(
         StatusCode::SERVICE_UNAVAILABLE,
         "SERVICE_UNAVAILABLE",
         "all caster capacity exhausted",
-    )
+    );
+    // RFC 7231 §6.6.4: 503 SHOULD include Retry-After when the delay is known.
+    response.headers_mut().insert(
+        "retry-after",
+        axum::http::HeaderValue::from_static(CASTER_UNAVAILABLE_RETRY_AFTER_SECS),
+    );
+    response
 }
 
 fn resolve_rune_name_for_rate_limit(state: &GateState, method: &str, path: &str) -> Option<String> {
@@ -214,16 +223,18 @@ pub async fn auth_middleware(
             if state.auth.key_verifier.verify_gate_key(&key).await {
                 // Fire-and-forget: update last_used_at / last_used_ip audit fields.
                 // Failure is silently logged at debug level and never blocks the response.
+                // Use key_prefix (first 19 chars of the raw key) to identify the row so
+                // the lookup works regardless of whether SHA-256 or HMAC-SHA256 is used.
                 let store = state.admin.store.clone();
-                let key_hash = {
-                    let mut hasher = Sha256::new();
-                    hasher.update(key.as_bytes());
-                    hex::encode(hasher.finalize())
+                let key_prefix = if key.starts_with("rk_") && key.len() >= 19 {
+                    key[..19].to_string()
+                } else {
+                    key.clone()
                 };
                 let now = rune_core::time_utils::now_iso8601();
                 tokio::spawn(async move {
                     if let Err(e) = store
-                        .update_key_last_used(&key_hash, &now, &client_ip)
+                        .update_key_last_used(&key_prefix, &now, &client_ip)
                         .await
                     {
                         tracing::debug!(

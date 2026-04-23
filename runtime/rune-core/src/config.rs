@@ -323,9 +323,14 @@ impl AppConfig {
     /// Load configuration with default file search.
     ///
     /// Priority: explicit path > ./rune.toml > ~/.config/rune/rune.toml > defaults.
+    ///
+    /// When an explicit path is given, a missing file is an error (not a silent
+    /// fallback to defaults), preventing silent misconfiguration at deployment.
     pub fn load(path: Option<&str>) -> anyhow::Result<Self> {
         if let Some(p) = path {
-            return Self::from_file(p);
+            let content = std::fs::read_to_string(p)
+                .map_err(|e| anyhow::anyhow!("config file '{}': {}", p, e))?;
+            return Ok(toml::from_str(&content)?);
         }
 
         // Try ./rune.toml
@@ -364,6 +369,24 @@ impl AppConfig {
             self.rate_limit.window_secs > 0,
             "rate_limit.window_secs must be > 0"
         );
+        anyhow::ensure!(
+            self.server.drain_timeout_secs > 0,
+            "server.drain_timeout_secs must be > 0"
+        );
+        anyhow::ensure!(
+            self.rate_limit.default_caster_max_concurrent > 0,
+            "rate_limit.default_caster_max_concurrent must be > 0"
+        );
+        anyhow::ensure!(
+            self.gate.max_upload_size_mb > 0,
+            "gate.max_upload_size_mb must be >= 1 MB"
+        );
+        anyhow::ensure!(
+            self.session.heartbeat_timeout_secs > self.session.heartbeat_interval_secs,
+            "session.heartbeat_timeout_secs ({}) must be > heartbeat_interval_secs ({})",
+            self.session.heartbeat_timeout_secs,
+            self.session.heartbeat_interval_secs,
+        );
 
         if self.retry.enabled {
             anyhow::ensure!(
@@ -401,7 +424,12 @@ impl AppConfig {
                     match val.parse::<$ty>() {
                         Ok(parsed) => $field = parsed,
                         Err(e) => {
-                            tracing::warn!(env = $var, value = %val, error = %e, "failed to parse env override, using default");
+                            // Use eprintln because apply_env_overrides runs before
+                            // tracing is initialized — tracing::warn would be silently dropped.
+                            eprintln!(
+                                "WARNING: env var {} has invalid value '{}': {} — using default",
+                                $var, val, e
+                            );
                         }
                     }
                 }
@@ -740,6 +768,47 @@ http_port = 19999
         "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.log.format, LogFormat::Text);
+    }
+
+    #[test]
+    fn validate_default_config_passes() {
+        let config = AppConfig::default();
+        assert!(
+            config.validate().is_ok(),
+            "default config must pass validation"
+        );
+    }
+
+    #[test]
+    fn validate_drain_timeout_zero_fails() {
+        let mut config = AppConfig::default();
+        config.server.drain_timeout_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_default_caster_max_concurrent_zero_fails() {
+        let mut config = AppConfig::default();
+        config.rate_limit.default_caster_max_concurrent = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_max_upload_size_zero_fails() {
+        let mut config = AppConfig::default();
+        config.gate.max_upload_size_mb = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_heartbeat_timeout_le_interval_fails() {
+        let mut config = AppConfig::default();
+        config.session.heartbeat_interval_secs = 30;
+        config.session.heartbeat_timeout_secs = 30; // must be > interval
+        assert!(config.validate().is_err());
+
+        config.session.heartbeat_timeout_secs = 31;
+        assert!(config.validate().is_ok());
     }
 
     #[test]

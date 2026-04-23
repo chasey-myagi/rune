@@ -37,9 +37,28 @@ async fn main() -> anyhow::Result<()> {
         config.apply_dev_mode();
     }
     config.apply_env_overrides();
+
+    // A27: prevent env vars from partially overriding dev mode invariants.
+    // If dev mode is active (set by --dev flag or RUNE_SERVER__DEV_MODE=true), auth must
+    // remain disabled regardless of RUNE_AUTH__ENABLED being set in the environment.
+    if config.server.dev_mode {
+        config.auth.enabled = false;
+    }
+
     config.validate()?;
 
     if config.server.dev_mode {
+        // Safety guard: dev mode disables auth and rate limiting.
+        // Refuse to bind to a non-loopback address to prevent accidental
+        // production exposure via RUNE_SERVER__HTTP_HOST=0.0.0.0.
+        if !config.server.http_host.is_loopback() {
+            anyhow::bail!(
+                "dev mode cannot bind to non-loopback address '{}' — \
+                 dev mode disables authentication and rate limiting.\n\
+                 Remove --dev or set RUNE_SERVER__HTTP_HOST=127.0.0.1.",
+                config.server.http_host
+            );
+        }
         eprintln!(
             "\n\
              ⚠️  DEV MODE ACTIVE — auth disabled, rate limiting disabled\n\

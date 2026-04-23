@@ -145,9 +145,13 @@ impl KeyCache {
         }
     }
 
-    pub fn invalidate_all(&self) {
-        self.entries.clear();
-        self.negatives.clear();
+    /// Remove all cache entries for a specific key hash (across all key types).
+    pub fn invalidate(&self, key_hash: &str) {
+        for key_type in [KeyType::Gate, KeyType::Admin, KeyType::Caster] {
+            let ck = cache_key(key_hash, key_type);
+            self.entries.remove(&ck);
+            self.negatives.remove(&ck);
+        }
     }
 }
 

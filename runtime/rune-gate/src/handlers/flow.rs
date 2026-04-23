@@ -382,14 +382,17 @@ pub async fn run_flow_async(
             .await
         {
             Ok(result) => {
-                let output_str = match std::str::from_utf8(&result.output) {
-                    Ok(s) => s.to_string(),
-                    Err(_) => format!("hex:{}", hex::encode(&result.output)),
+                // Binary outputs are encoded as "hex:..." — preserve that string
+                // rather than trying to JSON-parse it (which would silently lose data).
+                let output_val = match std::str::from_utf8(&result.output) {
+                    Ok(s) => serde_json::from_str::<serde_json::Value>(s)
+                        .unwrap_or_else(|_| serde_json::Value::String(s.to_string())),
+                    Err(_) => {
+                        serde_json::Value::String(format!("hex:{}", hex::encode(&result.output)))
+                    }
                 };
-                let val = serde_json::from_str::<serde_json::Value>(&output_str)
-                    .unwrap_or(serde_json::Value::Null);
                 let combined = serde_json::json!({
-                    "output": val,
+                    "output": output_val,
                     "steps_executed": result.steps_executed,
                 });
                 // CAS: only complete if not already cancelled
@@ -442,22 +445,14 @@ pub async fn run_flow_stream(
     let response_trace_context = trace_context.clone();
     let response_request_id = request_id.clone();
 
-    // progress 转发 task：把 FlowProgressEvent 序列化为 SSE "flow_progress" 事件
     let (progress_tx, mut progress_rx) = mpsc::channel::<FlowProgressEvent>(64);
-    let fwd_tx = event_tx.clone();
-    tokio::spawn(async move {
-        while let Some(evt) = progress_rx.recv().await {
-            let data = serde_json::to_string(&evt).unwrap_or_default();
-            let sse_evt = Event::default().event("flow_progress").data(data);
-            if fwd_tx.send(Ok(sse_evt)).await.is_err() {
-                break;
-            }
-        }
-    });
 
-    // 主执行 task
+    // Clone event_tx before it is moved into the exec task.
+    let fwd_tx = event_tx.clone();
+
+    // Main execution task.
     let runner = runner.with_progress(progress_tx);
-    tokio::spawn(async move {
+    let exec_abort = tokio::spawn(async move {
         match runner
             .execute_flow_with_context(&flow_def, body, trace_context.clone(), Some(request_id))
             .await
@@ -480,6 +475,19 @@ pub async fn run_flow_stream(
                 let _ = event_tx
                     .send(Ok(Event::default().event("error").data(e.to_string())))
                     .await;
+            }
+        }
+    })
+    .abort_handle(); // Detach JoinHandle; keep AbortHandle to cancel on disconnect.
+
+    // Progress forwarding task: abort the exec task when the SSE client disconnects.
+    tokio::spawn(async move {
+        while let Some(evt) = progress_rx.recv().await {
+            let data = serde_json::to_string(&evt).unwrap_or_default();
+            let sse_evt = Event::default().event("flow_progress").data(data);
+            if fwd_tx.send(Ok(sse_evt)).await.is_err() {
+                exec_abort.abort();
+                break;
             }
         }
     });

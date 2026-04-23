@@ -179,7 +179,16 @@ pub async fn dynamic_rune_handler(
         }
     };
 
-    let params: RunParams = serde_urlencoded::from_str(&query).unwrap_or_default();
+    let params: RunParams = match serde_urlencoded::from_str(&query) {
+        Ok(p) => p,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "invalid query parameters",
+            );
+        }
+    };
 
     execute_rune(ExecuteRequest {
         state: &state,
@@ -562,6 +571,8 @@ pub async fn stream_execute(
                     match chunk {
                         Ok(data) => {
                             output_size += data.len() as i64;
+                            // Non-UTF-8 binary output is encoded as "hex:<lowercase-hex>".
+                            // Clients should check for this prefix to recover the raw bytes.
                             let event = Event::default().event("message").data(
                                 match std::str::from_utf8(&data) {
                                     Ok(s) => s.to_owned(),

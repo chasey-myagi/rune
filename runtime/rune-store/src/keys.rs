@@ -4,7 +4,7 @@ use crate::pool::ConnectionPool;
 use crate::store::{RuneStore, StoreError, StoreResult};
 use hmac::{Hmac, Mac};
 use rand::TryRngCore;
-use rusqlite::{Connection, Error as SqlError, Row};
+use rusqlite::{Connection, Error as SqlError, OptionalExtension, Row};
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -186,35 +186,49 @@ impl RuneStore {
         let pool = self.pool.clone();
         let key_cache = self.key_cache.clone();
         tokio::task::spawn_blocking(move || {
-            let now = now_iso8601();
             let conn = pool.writer();
+            // Look up key_hash first so we can do a targeted cache invalidation.
+            let key_hash: Option<String> = conn
+                .query_row(
+                    "SELECT key_hash FROM api_keys WHERE id = ?1 AND revoked_at IS NULL",
+                    rusqlite::params![key_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let now = now_iso8601();
             conn.execute(
                 "UPDATE api_keys SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
                 rusqlite::params![now, key_id],
             )?;
-            key_cache.invalidate_all();
+            // Invalidate cache entry so the revoked key is not served from cache.
+            if let Some(hash) = key_hash {
+                key_cache.invalidate(&hash);
+            }
             Ok(())
         })
         .await?
     }
 
-    /// Update the last_used_at and last_used_ip audit fields for the given key hash.
-    /// Offloads the blocking SQLite write to a spawn_blocking thread.
+    /// Update the last_used_at and last_used_ip audit fields identified by key_prefix.
+    ///
+    /// Uses `key_prefix` (the first 8 bytes / 16 hex chars of the key, always derived the
+    /// same way) rather than `key_hash` so that both SHA-256 and HMAC-SHA256 keys are
+    /// correctly matched — callers do not need to know which hash algorithm is in use.
     pub async fn update_key_last_used(
         &self,
-        key_hash: &str,
+        key_prefix: &str,
         used_at: &str,
         used_ip: &str,
     ) -> StoreResult<()> {
         let pool = self.pool.clone();
-        let key_hash = key_hash.to_string();
+        let key_prefix = key_prefix.to_string();
         let used_at = used_at.to_string();
         let used_ip = used_ip.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = pool.writer();
             conn.execute(
-                "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE key_hash = ?3",
-                rusqlite::params![used_at, used_ip, key_hash],
+                "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE key_prefix = ?3",
+                rusqlite::params![used_at, used_ip, key_prefix],
             )?;
             Ok(())
         })
@@ -258,9 +272,10 @@ fn insert_raw_key(
     key_type: KeyType,
     label: &str,
 ) -> StoreResult<ApiKey> {
-    if !raw_key.starts_with("rk_") || raw_key.len() < 19 {
+    if !raw_key.starts_with("rk_") || raw_key.len() < 35 {
         return Err(StoreError::InvalidKeyFormat(
-            "expected a key starting with 'rk_' and at least 19 characters".to_string(),
+            "expected a key starting with 'rk_' and at least 35 characters (rk_ + 32 hex)"
+                .to_string(),
         ));
     }
     let key_prefix = format!("rk_{}", &raw_key[3..19]);

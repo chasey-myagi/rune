@@ -17,37 +17,68 @@ pub fn error_response_with_id(
         "message": msg,
     });
     if let Some(request_id) = request_id {
-        error
-            .as_object_mut()
-            .expect("error object must be a JSON object")
-            .insert(
+        if let Some(obj) = error.as_object_mut() {
+            obj.insert(
                 "request_id".to_string(),
                 serde_json::Value::String(request_id.to_string()),
             );
+        }
     }
     (status, Json(serde_json::json!({ "error": error }))).into_response()
 }
 
 pub fn map_error(e: RuneError, request_id: Option<&str>) -> axum::response::Response {
-    let (status, code) = match &e {
-        RuneError::InvalidInput(_) => (StatusCode::BAD_REQUEST, "INVALID_INPUT"),
-        RuneError::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
-        RuneError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "UNAVAILABLE"),
-        RuneError::Timeout => (StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+    let (status, code, msg): (StatusCode, &str, std::borrow::Cow<str>) = match &e {
+        RuneError::InvalidInput(_) => (
+            StatusCode::BAD_REQUEST,
+            "INVALID_INPUT",
+            e.to_string().into(),
+        ),
+        RuneError::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND", e.to_string().into()),
+        RuneError::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "UNAVAILABLE",
+            e.to_string().into(),
+        ),
+        RuneError::Timeout => (StatusCode::GATEWAY_TIMEOUT, "TIMEOUT", e.to_string().into()),
         RuneError::Cancelled => (
             StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
             "CANCELLED",
+            e.to_string().into(),
         ),
-        RuneError::ExecutionFailed { .. } => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "EXECUTION_FAILED")
+        RuneError::ExecutionFailed { .. } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "EXECUTION_FAILED",
+            e.to_string().into(),
+        ),
+        RuneError::RateLimited { .. } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            e.to_string().into(),
+        ),
+        RuneError::CircuitOpen { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "CIRCUIT_OPEN",
+            e.to_string().into(),
+        ),
+        RuneError::Unauthorized(_) => (
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            e.to_string().into(),
+        ),
+        RuneError::Forbidden(_) => (StatusCode::FORBIDDEN, "FORBIDDEN", e.to_string().into()),
+        RuneError::Internal(_) => {
+            // Log the full error chain server-side but return a generic message to the
+            // client to prevent leaking internal details (file paths, connection strings, etc.)
+            tracing::error!(error = %e, "internal rune error");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL",
+                "internal server error".into(),
+            )
         }
-        RuneError::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED"),
-        RuneError::CircuitOpen { .. } => (StatusCode::SERVICE_UNAVAILABLE, "CIRCUIT_OPEN"),
-        RuneError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
-        RuneError::Forbidden(_) => (StatusCode::FORBIDDEN, "FORBIDDEN"),
-        RuneError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL"),
     };
-    error_response_with_id(status, code, &e.to_string(), request_id)
+    error_response_with_id(status, code, &msg, request_id)
 }
 
 pub fn map_flow_error(e: FlowError, request_id: Option<&str>) -> axum::response::Response {

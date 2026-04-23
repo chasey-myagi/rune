@@ -2402,14 +2402,14 @@ async fn test_update_key_last_used() {
     let store = new_store();
     let result = store.create_key(KeyType::Gate, "used-key").await.unwrap();
 
-    // Extract the hash from the created key (key_hash is Some after create)
-    let key_hash = result.api_key.key_hash.clone().unwrap();
+    // Use key_prefix (hash-algorithm-agnostic identifier) for the audit update.
+    let key_prefix = result.api_key.key_prefix.clone();
 
     let used_at = "2026-04-23T12:00:00Z";
     let used_ip = "192.0.2.1";
 
     store
-        .update_key_last_used(&key_hash, used_at, used_ip)
+        .update_key_last_used(&key_prefix, used_at, used_ip)
         .await
         .unwrap();
 
@@ -2432,7 +2432,7 @@ async fn test_update_key_last_used() {
     let used_at2 = "2026-04-23T13:00:00Z";
     let used_ip2 = "203.0.113.5";
     store
-        .update_key_last_used(&key_hash, used_at2, used_ip2)
+        .update_key_last_used(&key_prefix, used_at2, used_ip2)
         .await
         .unwrap();
 

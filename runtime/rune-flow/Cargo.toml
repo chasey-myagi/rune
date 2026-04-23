@@ -13,3 +13,4 @@ tokio.workspace = true
 tracing.workspace = true
 metrics = "0.24"
 rand = "0.9"
+hex = "0.4"

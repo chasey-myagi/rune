@@ -59,13 +59,14 @@ impl LocalStreamInvoker {
 #[async_trait::async_trait]
 impl RuneInvoker for LocalStreamInvoker {
     async fn invoke_once(&self, ctx: RuneContext, input: Bytes) -> Result<Bytes, RuneError> {
-        // Collect stream into single response
         let mut rx = self.invoke_stream(ctx, input).await?;
         let mut collected = Vec::new();
         while let Some(chunk) = rx.recv().await {
             collected.push(chunk?);
         }
-        // Return last chunk or empty
+        // Return the last chunk: stream handlers emit the meaningful result as their
+        // final chunk (e.g. tx.emit(data).await followed by tx.end().await). Earlier
+        // chunks are intermediate. Callers that need all chunks must use invoke_stream.
         Ok(collected.into_iter().last().unwrap_or_default())
     }
 
@@ -75,12 +76,17 @@ impl RuneInvoker for LocalStreamInvoker {
         input: Bytes,
     ) -> Result<mpsc::Receiver<Result<Bytes, RuneError>>, RuneError> {
         let (tx, rx) = mpsc::channel(32);
-        let sender = StreamSender::new(tx);
+        let sender = StreamSender::new(tx.clone());
         let handler = Arc::clone(&self.handler);
         tokio::spawn(async move {
-            if let Err(e) = handler.execute(ctx, input, sender).await {
-                // Error is dropped since channel may be closed
-                tracing::error!("stream handler error: {}", e);
+            tokio::select! {
+                result = handler.execute(ctx, input, sender) => {
+                    if let Err(e) = result {
+                        tracing::debug!("stream handler stopped: {}", e);
+                    }
+                }
+                // Cancel the handler if the receiver is dropped before completion.
+                _ = tx.closed() => {}
             }
         });
         Ok(rx)

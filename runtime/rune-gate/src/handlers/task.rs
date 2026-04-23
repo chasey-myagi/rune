@@ -22,7 +22,7 @@ pub async fn list_tasks(
     Query(params): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
     let status = params.status.as_deref().and_then(TaskStatus::parse);
-    let limit = params.limit.unwrap_or(50).min(500);
+    let limit = params.limit.unwrap_or(50).clamp(0, 500);
     let offset = params.offset.unwrap_or(0);
     match state
         .admin

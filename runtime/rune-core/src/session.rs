@@ -619,7 +619,9 @@ impl SessionManager {
                         protocol_version: PROTOCOL_VERSION.to_string(),
                     })),
                 };
-                let _ = ctx.outbound_tx.send(ack).await;
+                if ctx.outbound_tx.send(ack).await.is_err() {
+                    tracing::warn!(caster_id = %id, "failed to send reject ACK — stream already closed");
+                }
                 return false;
             }
         }
@@ -727,6 +729,12 @@ impl SessionManager {
             callback(&id, &configs);
         }
 
+        // Set caster_id BEFORE sending the ACK so that if the send fails,
+        // cleanup_session can find and remove all the state we just inserted
+        // (sessions, health, metadata, relay entries).
+        ctx.state = SessionState::Active;
+        ctx.caster_id = Some(id);
+
         let ack = SessionMessage {
             payload: Some(session_message::Payload::AttachAck(AttachAck {
                 accepted: true,
@@ -741,8 +749,6 @@ impl SessionManager {
         if ctx.outbound_tx.send(ack).await.is_err() {
             return false;
         }
-        ctx.state = SessionState::Active;
-        ctx.caster_id = Some(id);
         true
     }
 

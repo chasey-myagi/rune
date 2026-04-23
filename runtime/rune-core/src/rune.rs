@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Rune 的执行上下文
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RuneContext {
     pub rune_name: String,
     pub request_id: String,

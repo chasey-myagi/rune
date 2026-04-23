@@ -162,22 +162,13 @@ impl RuneInvoker for RetryInvoker {
             return self.inner.invoke_once(ctx, input).await;
         }
 
-        // Flow-level retry is managing this call: execute once, still gated by circuit breaker.
-        if ctx.disable_runtime_retry {
-            let _permit = self.circuit_breaker.can_execute()?;
-            match self.inner.invoke_once(ctx, input).await {
-                Ok(output) => {
-                    self.circuit_breaker.record_success();
-                    return Ok(output);
-                }
-                Err(err) => {
-                    if !is_client_error(&err) {
-                        self.circuit_breaker.record_failure();
-                    }
-                    return Err(err);
-                }
-            }
-        }
+        // When the flow layer owns retries, limit to one attempt here so the
+        // circuit breaker still fires, but the retry loop does not run.
+        let effective_max_retries = if ctx.disable_runtime_retry {
+            0
+        } else {
+            self.config.max_retries
+        };
 
         let deadline = std::time::Instant::now() + ctx.timeout;
         let base_ctx = ctx.clone();
@@ -204,7 +195,7 @@ impl RuneInvoker for RetryInvoker {
                     }
 
                     let retryable = is_retryable(&err, &self.retryable);
-                    if attempt >= self.config.max_retries || !retryable {
+                    if attempt >= effective_max_retries || !retryable {
                         return Err(err);
                     }
 
