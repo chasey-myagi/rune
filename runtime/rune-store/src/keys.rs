@@ -227,7 +227,8 @@ impl RuneStore {
         tokio::task::spawn_blocking(move || {
             let conn = pool.writer();
             let rows = conn.execute(
-                "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE key_prefix = ?3",
+                "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 \
+                 WHERE key_prefix = ?3 AND revoked_at IS NULL",
                 rusqlite::params![used_at, used_ip, key_prefix],
             )?;
             if rows == 0 {

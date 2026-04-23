@@ -34,10 +34,20 @@ impl RuneService for RuneGrpcService {
 
         let relay = Arc::clone(&self.relay);
         let session_mgr = Arc::clone(&self.session_mgr);
-        tokio::spawn(async move {
+        // B5: keep the JoinHandle and spawn a monitor task that logs if the
+        // session handler panics (panics in dropped JoinHandles are not logged
+        // by Tokio's default handler until the handle is awaited or dropped).
+        let session_handle = tokio::spawn(async move {
             session_mgr
                 .handle_session(relay, inbound, outbound_tx)
                 .await;
+        });
+        tokio::spawn(async move {
+            if let Err(e) = session_handle.await {
+                if e.is_panic() {
+                    tracing::error!("session handler task panicked: {:?}", e);
+                }
+            }
         });
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(

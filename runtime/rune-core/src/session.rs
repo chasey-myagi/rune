@@ -599,6 +599,16 @@ impl SessionManager {
         ctx: &mut SessionContext,
         attach: CasterAttach,
     ) -> bool {
+        // Reject duplicate CasterAttach on an already-active session to prevent
+        // double semaphore permit allocation.
+        if ctx.is_active() {
+            tracing::warn!(
+                caster_id = %ctx.caster_id.as_deref().unwrap_or("?"),
+                "duplicate CasterAttach on active session — ignoring"
+            );
+            return false;
+        }
+
         let id = attach.caster_id.clone();
         let max_conc = attach.max_concurrent;
         let role = CasterRole::from_proto(&attach.role);
@@ -735,6 +745,10 @@ impl SessionManager {
         ctx.state = SessionState::Active;
         ctx.caster_id = Some(id);
 
+        // TODO(B3): `CasterAttach` proto message has no `protocol_version` field,
+        // so we cannot verify the client's protocol version at attach time.
+        // When the proto is next bumped, add `string protocol_version = 7` to
+        // `CasterAttach` and reject mismatches here (log + send accepted=false).
         let ack = SessionMessage {
             payload: Some(session_message::Payload::AttachAck(AttachAck {
                 accepted: true,

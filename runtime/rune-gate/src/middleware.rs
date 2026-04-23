@@ -225,24 +225,25 @@ pub async fn auth_middleware(
                 // Failure is silently logged at debug level and never blocks the response.
                 // Use key_prefix (first 19 chars of the raw key) to identify the row so
                 // the lookup works regardless of whether SHA-256 or HMAC-SHA256 is used.
-                let store = state.admin.store.clone();
-                let key_prefix = if key.starts_with("rk_") && key.len() >= 19 {
-                    key[..19].to_string()
-                } else {
-                    key.clone()
-                };
-                let now = rune_core::time_utils::now_iso8601();
-                tokio::spawn(async move {
-                    if let Err(e) = store
-                        .update_key_last_used(&key_prefix, &now, &client_ip)
-                        .await
-                    {
-                        tracing::debug!(
-                            error = %e,
-                            "failed to update key last_used audit fields"
-                        );
-                    }
-                });
+                // Only attempt the audit update for well-formed keys (rk_ + 16 hex = 19 chars).
+                // Non-standard keys have no matching row in api_keys; skip rather than
+                // passing the full raw key as a prefix (which would silently find nothing).
+                if key.starts_with("rk_") && key.len() >= 19 {
+                    let key_prefix = key[..19].to_string();
+                    let store = state.admin.store.clone();
+                    let now = rune_core::time_utils::now_iso8601();
+                    tokio::spawn(async move {
+                        if let Err(e) = store
+                            .update_key_last_used(&key_prefix, &now, &client_ip)
+                            .await
+                        {
+                            tracing::debug!(
+                                error = %e,
+                                "failed to update key last_used audit fields"
+                            );
+                        }
+                    });
+                }
                 next.run(req).await
             } else {
                 error_response(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "invalid api key")

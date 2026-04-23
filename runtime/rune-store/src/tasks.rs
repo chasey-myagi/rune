@@ -91,8 +91,13 @@ impl RuneStore {
                 Ok(TaskRecord {
                     task_id: row.get(0)?,
                     rune_name: row.get(1)?,
-                    status: TaskStatus::parse(&row.get::<_, String>(2)?)
-                        .unwrap_or(TaskStatus::Pending),
+                    status: {
+                        let s: String = row.get(2)?;
+                        TaskStatus::parse(&s).unwrap_or_else(|| {
+                            tracing::warn!(status = %s, "unknown task status in db — treating as pending");
+                            TaskStatus::Pending
+                        })
+                    },
                     input: row.get(3)?,
                     output: row.get(4)?,
                     error: row.get(5)?,

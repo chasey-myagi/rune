@@ -376,7 +376,37 @@ async fn main() -> anyhow::Result<()> {
             relay: Arc::clone(&running.relay),
             resolver: Arc::clone(&running.resolver),
             session_mgr: Arc::clone(&running.session_mgr),
-            file_broker: Arc::new(gate::FileBroker::new()),
+            file_broker: Arc::new({
+                // Use configured disk_spill_dir; default to $TMPDIR/rune-uploads.
+                // This ensures large uploads are spilled to disk rather than
+                // accumulating indefinitely in memory (OOM risk).
+                let dir = if let Some(ref d) = config.gate.disk_spill_dir {
+                    if d.is_empty() {
+                        None // empty string = force in-memory mode
+                    } else {
+                        Some(std::path::PathBuf::from(d))
+                    }
+                } else {
+                    Some(std::env::temp_dir().join("rune-uploads"))
+                };
+                match dir {
+                    Some(d) => {
+                        if let Err(e) = std::fs::create_dir_all(&d) {
+                            tracing::warn!(path = %d.display(), error = %e, "failed to create disk_spill_dir");
+                            gate::FileBroker::new()
+                        } else {
+                            // B7: clean up orphaned files from previous runs (process crash).
+                            if let Ok(rd) = std::fs::read_dir(&d) {
+                                for entry in rd.flatten() {
+                                    let _ = std::fs::remove_file(entry.path());
+                                }
+                            }
+                            gate::FileBroker::with_disk_dir(d)
+                        }
+                    }
+                    None => gate::FileBroker::new(),
+                }
+            }),
             max_upload_size_mb: config.gate.max_upload_size_mb,
             request_timeout: config.default_timeout(),
         },

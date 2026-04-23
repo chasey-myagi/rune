@@ -853,6 +853,12 @@ impl FlowRunner {
                     &iter_input_json,
                 )?;
 
+                // TODO(Important-2): Each body-step timeout is freshly allocated
+                // per iteration rather than drawing from a shrinking deadline
+                // shared across the whole loop. A loop with N iterations and
+                // step_timeout T could run for up to N×T. To enforce an aggregate
+                // loop deadline, thread a `Deadline` token through execute_loop
+                // and subtract elapsed time before each body step invocation.
                 let effective_timeout = body_step
                     .timeout_ms
                     .map(Duration::from_millis)
@@ -921,6 +927,10 @@ impl FlowRunner {
                 .unwrap_or_else(|| current.clone());
 
             // until 条件检查
+            // NOTE: step_statuses is intentionally empty here — `until` expressions can
+            // reference `steps.X.output.*` (via body_outputs) and `$input.*` (via last_json),
+            // but NOT `steps.X.status`. Expressions like `steps.X.status == "completed"`
+            // will silently not match; use output fields for loop-termination conditions.
             if let Some(until) = &config.until {
                 let last_json: Option<serde_json::Value> = serde_json::from_slice(&last).ok();
                 let met = evaluate_condition(until, &HashMap::new(), &body_outputs, &last_json);

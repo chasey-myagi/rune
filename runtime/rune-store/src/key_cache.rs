@@ -95,7 +95,10 @@ impl KeyCache {
         self.negatives
             .retain(|_, inserted_at| inserted_at.elapsed() <= negative_ttl);
 
-        // Phase 2: if still over limit, randomly drop ~25% of entries
+        // Phase 2: if still over limit, randomly drop ~25% of entries.
+        // TODO(B8): random eviction can discard hot keys. Replace with an LRU
+        // structure (e.g. `lru` crate or a DashMap + linked-list tombstone
+        // scheme) so that the least-recently-used entries are evicted instead.
         let total = self.entries.len() + self.negatives.len();
         if total >= self.max_entries {
             let mut rng = rand::rng();

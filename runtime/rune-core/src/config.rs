@@ -112,6 +112,11 @@ impl Default for SessionConfig {
 pub struct GateServerConfig {
     pub cors_origins: Vec<String>,
     pub max_upload_size_mb: u64,
+    /// Directory for spilling large uploads to disk. If None, defaults to
+    /// `$TMPDIR/rune-uploads` at runtime. Set to an empty string to force
+    /// pure in-memory mode (not recommended for production with large files).
+    #[serde(default)]
+    pub disk_spill_dir: Option<String>,
 }
 
 impl Default for GateServerConfig {
@@ -119,6 +124,7 @@ impl Default for GateServerConfig {
         Self {
             cors_origins: Vec::new(),
             max_upload_size_mb: 10,
+            disk_spill_dir: None,
         }
     }
 }

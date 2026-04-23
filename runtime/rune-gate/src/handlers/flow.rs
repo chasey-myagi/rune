@@ -312,8 +312,11 @@ pub async fn run_flow(
         .await
     {
         Ok(result) => {
-            let output_json = serde_json::from_slice::<serde_json::Value>(&result.output)
-                .unwrap_or(serde_json::Value::Null);
+            let output_json = match std::str::from_utf8(&result.output) {
+                Ok(s) => serde_json::from_str::<serde_json::Value>(s)
+                    .unwrap_or_else(|_| serde_json::Value::String(s.to_string())),
+                Err(_) => serde_json::Value::String(format!("hex:{}", hex::encode(&result.output))),
+            };
             traced_response(
                 (
                     StatusCode::OK,

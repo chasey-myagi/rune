@@ -185,22 +185,19 @@ impl RuneStore {
             ",
         )?;
 
-        // v1.3.1 migration: add audit columns to api_keys (idempotent).
-        // SQLite does not support IF NOT EXISTS for ALTER TABLE, so we check
-        // pragma_table_info first.
-        let needs_audit_cols: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('api_keys') WHERE name='last_used_at'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-            == 0;
-        if needs_audit_cols {
-            conn.execute_batch(
-                "ALTER TABLE api_keys ADD COLUMN last_used_at TEXT;
-                 ALTER TABLE api_keys ADD COLUMN last_used_ip  TEXT;",
-            )?;
+        // v1.3.1 migration: add audit columns to api_keys.
+        // SQLite does not support IF NOT EXISTS for ALTER TABLE; we use try/ignore
+        // to handle both the "column already exists" case AND concurrent startup
+        // races (two processes both try ALTER — second fails with "duplicate column name").
+        for alter_sql in &[
+            "ALTER TABLE api_keys ADD COLUMN last_used_at TEXT",
+            "ALTER TABLE api_keys ADD COLUMN last_used_ip  TEXT",
+        ] {
+            match conn.execute(alter_sql, []) {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("duplicate column name") => {}
+                Err(e) => return Err(e.into()),
+            }
         }
 
         Ok(())
