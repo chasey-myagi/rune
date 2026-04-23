@@ -219,17 +219,19 @@ fn test_env_var_invalid_value_ignored() {
 }
 
 #[test]
-fn test_missing_file_uses_defaults() {
-    let config = AppConfig::from_file("/nonexistent/path/to/rune.toml").unwrap();
-    let default_config = AppConfig::default();
-
-    assert_eq!(config.server.grpc_port, default_config.server.grpc_port);
-    assert_eq!(config.server.http_port, default_config.server.http_port);
-    assert_eq!(config.auth.enabled, default_config.auth.enabled);
-    assert_eq!(config.log.level, default_config.log.level);
-    assert_eq!(
-        config.session.heartbeat_interval_secs,
-        default_config.session.heartbeat_interval_secs
+fn test_missing_file_returns_error() {
+    // from_path/from_file now return Err for missing files so that callers
+    // explicitly handle the case rather than silently falling back to defaults.
+    // Use AppConfig::load(None) to get defaults when no config file exists.
+    let result = AppConfig::from_file("/nonexistent/path/to/rune.toml");
+    assert!(
+        result.is_err(),
+        "from_file with missing path should return Err"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("rune.toml"),
+        "error should name the file, got: {msg}"
     );
 }
 

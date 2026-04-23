@@ -74,7 +74,8 @@ pub async fn create_flow(
 
     // Phase 1: Register in engine under write lock (validates DAG + conflicts).
     // Release lock before I/O to avoid blocking concurrent reads.
-    {
+    // Returns a registration epoch used for safe rollback in Phase 2.
+    let reg_epoch = {
         let mut engine = state.flow.flow_engine.write().await;
 
         if engine.get(&flow.name).is_some() {
@@ -99,17 +100,25 @@ pub async fn create_flow(
             }
         }
 
-        if let Err(e) = engine.register(flow.clone()) {
-            return error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string());
+        match engine.register(flow.clone()) {
+            Ok(epoch) => epoch,
+            Err(e) => return error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string()),
         }
-    } // Write lock released here — concurrent reads are no longer blocked.
+    }; // Write lock released here — concurrent reads are no longer blocked.
 
     // Phase 2: Persist to store without holding engine lock.
+    // On failure, rollback using the epoch so we only remove the flow we
+    // registered (not a different flow that may have registered with the
+    // same name after our lock release).
     match state.admin.store.create_flow(&flow).await {
         Ok(()) => (StatusCode::CREATED, Json(serde_json::json!(flow))).into_response(),
         Err(StoreError::DuplicateFlow(_)) => {
-            // Rollback: re-acquire lock and remove from engine.
-            state.flow.flow_engine.write().await.remove(&flow.name);
+            state
+                .flow
+                .flow_engine
+                .write()
+                .await
+                .remove_if_epoch_matches(&flow.name, reg_epoch);
             error_response(
                 StatusCode::CONFLICT,
                 "CONFLICT",
@@ -117,7 +126,12 @@ pub async fn create_flow(
             )
         }
         Err(e) => {
-            state.flow.flow_engine.write().await.remove(&flow.name);
+            state
+                .flow
+                .flow_engine
+                .write()
+                .await
+                .remove_if_epoch_matches(&flow.name, reg_epoch);
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL",
@@ -379,7 +393,11 @@ pub async fn run_flow_async(
     let response_trace_context = trace_context.clone();
     let response_request_id = request_id.clone();
 
-    tokio::spawn(async move {
+    // Spawn the execution task and keep the JoinHandle so that panics are
+    // detected: a panic inside tokio::spawn drops silently unless the handle
+    // is awaited.  The monitor task marks the DB entry as Failed rather than
+    // leaving it permanently in the `running` state.
+    let exec_handle = tokio::spawn(async move {
         match runner
             .execute_flow_with_context(&flow_def, body, trace_context, Some(request_id))
             .await
@@ -422,6 +440,26 @@ pub async fn run_flow_async(
         }
     });
 
+    // Panic monitor: if the exec task panics, the DB entry would otherwise be
+    // permanently stuck in `running`. Detect the panic and mark as Failed.
+    let store_mon = Arc::clone(&state.admin.store);
+    let tid_mon = task_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = exec_handle.await {
+            if e.is_panic() {
+                tracing::error!(task_id = %tid_mon, "async flow task panicked");
+                let _ = store_mon
+                    .complete_task_if_not_cancelled(
+                        &tid_mon,
+                        TaskStatus::Failed,
+                        None,
+                        Some("internal panic"),
+                    )
+                    .await;
+            }
+        }
+    });
+
     traced_response(
         (
             StatusCode::ACCEPTED,
@@ -455,9 +493,9 @@ pub async fn run_flow_stream(
     // Also clone for the disconnect-detection task (before fwd_tx is moved below).
     let dc_tx = fwd_tx.clone();
 
-    // Main execution task.
+    // Main execution task — keep JoinHandle so the DC task can select! on completion.
     let runner = runner.with_progress(progress_tx);
-    let exec_abort = tokio::spawn(async move {
+    let exec_handle = tokio::spawn(async move {
         match runner
             .execute_flow_with_context(&flow_def, body, trace_context.clone(), Some(request_id))
             .await
@@ -489,26 +527,28 @@ pub async fn run_flow_stream(
                     .await;
             }
         }
-    })
-    .abort_handle(); // Detach JoinHandle; keep AbortHandle to cancel on disconnect.
+    });
+    let exec_abort = exec_handle.abort_handle();
 
-    // Disconnect detection: abort exec when the SSE channel is closed (client disconnects).
-    // This runs independently of the progress forwarding task so that abort fires even when
-    // the exec task emits no progress events (e.g. simple rune steps).
-    let dc_abort = exec_abort.clone();
+    // Disconnect detection: abort exec when the client disconnects (dc_tx.closed() fires).
+    // Uses select! so this task exits naturally when exec completes normally — avoiding the
+    // deadlock where closed() would wait for event_rx to drop while to_bytes() waits for all
+    // senders to drop.
     tokio::spawn(async move {
-        dc_tx.closed().await;
-        dc_abort.abort();
+        tokio::select! {
+            _ = exec_handle => {}           // exec finished; exit without aborting
+            _ = dc_tx.closed() => { exec_abort.abort(); }  // client disconnected; abort exec
+        }
     });
 
     // Progress forwarding task: serialise FlowProgressEvents to SSE "flow_progress" events.
-    // Also aborts exec on send failure (belt-and-suspenders alongside the dc task above).
+    // When exec completes (or is aborted), runner drops → progress_tx drops → progress_rx
+    // returns None and this loop exits naturally.
     tokio::spawn(async move {
         while let Some(evt) = progress_rx.recv().await {
             let data = serde_json::to_string(&evt).unwrap_or_default();
             let sse_evt = Event::default().event("flow_progress").data(data);
             if fwd_tx.send(Ok(sse_evt)).await.is_err() {
-                exec_abort.abort();
                 break;
             }
         }

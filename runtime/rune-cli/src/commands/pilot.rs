@@ -720,22 +720,42 @@ pub fn pid_alive(pid_path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    struct HomeGuard(Option<std::ffi::OsString>);
+    // Serializes tests that mutate $HOME so they don't race with each other.
+    static HOME_MUTEX: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    fn home_mutex() -> &'static tokio::sync::Mutex<()> {
+        HOME_MUTEX.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    struct HomeGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+    }
 
     impl HomeGuard {
-        fn set(path: &Path) -> Self {
+        async fn set(path: &Path) -> Self {
+            let lock = home_mutex().lock().await;
             let previous = std::env::var_os("HOME");
-            std::env::set_var("HOME", path);
-            Self(previous)
+            // SAFETY: only one test holds this lock at a time
+            #[allow(deprecated)]
+            unsafe {
+                std::env::set_var("HOME", path);
+            }
+            Self {
+                previous,
+                _lock: lock,
+            }
         }
     }
 
     impl Drop for HomeGuard {
         fn drop(&mut self) {
-            if let Some(previous) = self.0.take() {
-                std::env::set_var("HOME", previous);
-            } else {
-                std::env::remove_var("HOME");
+            #[allow(deprecated)]
+            unsafe {
+                if let Some(previous) = self.previous.take() {
+                    std::env::set_var("HOME", previous);
+                } else {
+                    std::env::remove_var("HOME");
+                }
             }
         }
     }
@@ -753,7 +773,7 @@ mod tests {
     #[tokio::test]
     async fn test_fix_pilot_status_not_ready_before_attach() {
         let temp = tempfile::tempdir().unwrap();
-        let _home = HomeGuard::set(temp.path());
+        let _home = HomeGuard::set(temp.path()).await;
 
         let daemon = tokio::spawn(async { run_daemon("127.0.0.1:9", true).await });
         wait_for_socket().await;
@@ -773,7 +793,7 @@ mod tests {
     #[tokio::test]
     async fn test_fix_daemon_survives_malformed_request() {
         let temp = tempfile::tempdir().unwrap();
-        let _home = HomeGuard::set(temp.path());
+        let _home = HomeGuard::set(temp.path()).await;
 
         let daemon = tokio::spawn(async { run_daemon("127.0.0.1:9", true).await });
         wait_for_socket().await;

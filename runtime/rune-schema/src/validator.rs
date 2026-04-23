@@ -30,15 +30,20 @@ fn get_or_compile(schema_str: &str) -> Result<Arc<jsonschema::Validator>, Schema
         }
     }
 
-    // Slow path: compile and insert with write lock
+    // Slow path: acquire write lock, then double-check before compiling.
+    // The double-check prevents the thundering-herd scenario where N concurrent
+    // requests all miss the read-lock cache and each compile the same schema.
+    let mut cache = cache().write().unwrap_or_else(|e| e.into_inner());
+    if let Some(v) = cache.get(schema_str) {
+        return Ok(Arc::clone(v));
+    }
     let schema_value: serde_json::Value =
         serde_json::from_str(schema_str).map_err(|e| SchemaError::InvalidSchema(e.to_string()))?;
     let validator = jsonschema::validator_for(&schema_value)
         .map_err(|e| SchemaError::InvalidSchema(e.to_string()))?;
     let v = Arc::new(validator);
-
-    let mut cache = cache().write().unwrap_or_else(|e| e.into_inner());
-    Ok(Arc::clone(cache.entry(schema_str.to_string()).or_insert(v)))
+    cache.insert(schema_str.to_string(), Arc::clone(&v));
+    Ok(v)
 }
 
 /// Clear the validator cache. Mainly used for benchmarking cold-start scenarios.

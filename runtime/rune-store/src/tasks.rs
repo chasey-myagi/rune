@@ -188,6 +188,8 @@ impl RuneStore {
         limit: i64,
         offset: i64,
     ) -> StoreResult<Vec<TaskRecord>> {
+        let limit = limit.clamp(0, 500);
+        let offset = offset.max(0);
         let pool = self.pool.clone();
         let rune_name = rune_name.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || {
@@ -216,8 +218,16 @@ impl RuneStore {
                     Ok(TaskRecord {
                         task_id: row.get(0)?,
                         rune_name: row.get(1)?,
-                        status: TaskStatus::parse(&row.get::<_, String>(2)?)
-                            .unwrap_or(TaskStatus::Pending),
+                        status: {
+                            let s: String = row.get(2)?;
+                            TaskStatus::parse(&s).unwrap_or_else(|| {
+                                tracing::warn!(
+                                    status = %s,
+                                    "unknown task status in db (list_tasks) — treating as pending"
+                                );
+                                TaskStatus::Pending
+                            })
+                        },
                         input: row.get(3)?,
                         output: row.get(4)?,
                         error: row.get(5)?,

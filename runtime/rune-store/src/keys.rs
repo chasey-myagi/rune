@@ -211,9 +211,9 @@ impl RuneStore {
 
     /// Update the last_used_at and last_used_ip audit fields identified by key_prefix.
     ///
-    /// Uses `key_prefix` (the first 8 bytes / 16 hex chars of the key, always derived the
-    /// same way) rather than `key_hash` so that both SHA-256 and HMAC-SHA256 keys are
-    /// correctly matched — callers do not need to know which hash algorithm is in use.
+    /// Uses `key_prefix` (the first 19 characters of the raw key: `rk_` + 16 hex chars)
+    /// rather than `key_hash` so that both SHA-256 and HMAC-SHA256 keys are correctly
+    /// matched — callers do not need to know which hash algorithm is in use.
     pub async fn update_key_last_used(
         &self,
         key_prefix: &str,

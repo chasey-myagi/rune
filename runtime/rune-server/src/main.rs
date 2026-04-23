@@ -72,10 +72,14 @@ async fn main() -> anyhow::Result<()> {
     let _tracer_provider = init_telemetry(&config.telemetry, &config.log.format);
 
     if let Some(ref path) = config.log.file {
-        tracing::warn!(
+        tracing::error!(
             path = %path,
             "log.file is configured but file-based logging is not yet implemented; \
-             logs will continue to go to stderr"
+             remove log.file from rune.toml to start the server"
+        );
+        anyhow::bail!(
+            "log.file '{}' is not supported yet; remove it from configuration",
+            path
         );
     }
 
@@ -396,11 +400,17 @@ async fn main() -> anyhow::Result<()> {
                             gate::FileBroker::new()
                         } else {
                             // B7: clean up orphaned files from previous runs (process crash).
-                            if let Ok(rd) = std::fs::read_dir(&d) {
-                                for entry in rd.flatten() {
-                                    let _ = std::fs::remove_file(entry.path());
+                            // Use spawn_blocking to avoid blocking tokio worker threads during startup.
+                            let d_clean = d.clone();
+                            tokio::task::spawn_blocking(move || {
+                                if let Ok(rd) = std::fs::read_dir(&d_clean) {
+                                    for entry in rd.flatten() {
+                                        let _ = std::fs::remove_file(entry.path());
+                                    }
                                 }
-                            }
+                            })
+                            .await
+                            .ok();
                             gate::FileBroker::with_disk_dir(d)
                         }
                     }

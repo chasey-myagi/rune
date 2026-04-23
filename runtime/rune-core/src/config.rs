@@ -309,14 +309,10 @@ impl AppConfig {
     /// If the file does not exist, returns default configuration.
     /// If the file exists but contains invalid TOML, returns an error.
     pub fn from_path(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
-        match std::fs::read_to_string(path.as_ref()) {
-            Ok(content) => {
-                let config: AppConfig = toml::from_str(&content)?;
-                Ok(config)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
-        }
+        let content = std::fs::read_to_string(path.as_ref())
+            .map_err(|e| anyhow::anyhow!("config file '{}': {}", path.as_ref().display(), e))?;
+        let config: AppConfig = toml::from_str(&content)?;
+        Ok(config)
     }
 
     /// Load configuration from a TOML file path string.
@@ -352,6 +348,10 @@ impl AppConfig {
             }
         }
 
+        tracing::warn!(
+            "no rune.toml found in current directory or ~/.config/rune/; \
+             starting with built-in defaults — this may not be what you intended in production"
+        );
         Ok(Self::default())
     }
 
@@ -711,10 +711,19 @@ http_port = 19999
     }
 
     #[test]
-    fn test_fix_from_path_missing_file_returns_default() {
-        let config =
-            AppConfig::from_path("/tmp/rune_test_m5_nonexistent/does_not_exist.toml").unwrap();
-        assert_eq!(config.server.http_port, 50060); // default
+    fn test_fix_from_path_missing_file_returns_error() {
+        // from_path() now errors on NotFound; callers that want a default
+        // fallback should check for existence first (as AppConfig::load does).
+        let result = AppConfig::from_path("/tmp/rune_test_m5_nonexistent/does_not_exist.toml");
+        assert!(
+            result.is_err(),
+            "from_path with missing file should return Err"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("does_not_exist.toml"),
+            "error should name the file, got: {msg}"
+        );
     }
 
     #[test]

@@ -606,6 +606,17 @@ impl SessionManager {
                 caster_id = %ctx.caster_id.as_deref().unwrap_or("?"),
                 "duplicate CasterAttach on active session — ignoring"
             );
+            // Send a reject ACK so the Caster can distinguish "server rejected"
+            // from a silent network drop (important for SDK reconnect logic).
+            let ack = SessionMessage {
+                payload: Some(session_message::Payload::AttachAck(AttachAck {
+                    accepted: false,
+                    reason: "duplicate CasterAttach on active session".into(),
+                    supported_features: vec![],
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                })),
+            };
+            let _ = ctx.outbound_tx.send(ack).await;
             return false;
         }
 
@@ -1160,7 +1171,13 @@ impl SessionManager {
                 reason: reason.to_string(),
             })),
         };
-        let _ = session.outbound.send(msg).await;
+        if session.outbound.send(msg).await.is_err() {
+            tracing::warn!(
+                caster_id = %caster_id,
+                request_id = %request_id,
+                "cancel message not delivered — caster channel closed"
+            );
+        }
         Ok(())
     }
 

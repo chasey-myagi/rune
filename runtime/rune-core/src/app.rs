@@ -141,6 +141,22 @@ impl App {
         tonic::transport::Server::builder()
             .add_service(RuneServiceServer::new(grpc_service))
             .serve_with_shutdown(grpc_addr, async {
+                #[cfg(unix)]
+                {
+                    use tokio::signal::unix::{signal, SignalKind};
+                    let mut sigterm = signal(SignalKind::terminate()).ok();
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = async {
+                            if let Some(ref mut s) = sigterm {
+                                s.recv().await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        } => {}
+                    }
+                }
+                #[cfg(not(unix))]
                 tokio::signal::ctrl_c().await.ok();
                 tracing::info!("shutdown signal received");
             })

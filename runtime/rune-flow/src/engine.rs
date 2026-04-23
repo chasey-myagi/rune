@@ -105,6 +105,12 @@ pub struct FlowRunner {
 #[allow(dead_code)]
 pub struct FlowEngine {
     flows: HashMap<String, FlowDefinition>,
+    /// Monotonic registration epoch per flow name.  Each successful `register`
+    /// increments `next_epoch` and stores the new value alongside the flow.
+    /// `remove_if_epoch_matches` uses this to prevent stale rollbacks from
+    /// removing a flow registered by a different request (see create_flow).
+    epochs: HashMap<String, u64>,
+    next_epoch: u64,
     relay: Arc<Relay>,
     resolver: Arc<dyn Resolver>,
     step_timeout: std::time::Duration,
@@ -114,6 +120,8 @@ impl FlowEngine {
     pub fn new(relay: Arc<Relay>, resolver: Arc<dyn Resolver>) -> Self {
         Self {
             flows: HashMap::new(),
+            epochs: HashMap::new(),
+            next_epoch: 1,
             relay,
             resolver,
             step_timeout: std::time::Duration::from_secs(DEFAULT_STEP_TIMEOUT_SECS),
@@ -128,6 +136,8 @@ impl FlowEngine {
     ) -> Self {
         Self {
             flows: HashMap::new(),
+            epochs: HashMap::new(),
+            next_epoch: 1,
             relay,
             resolver,
             step_timeout,
@@ -145,10 +155,29 @@ impl FlowEngine {
         }
     }
 
-    pub fn register(&mut self, flow: FlowDefinition) -> Result<(), FlowError> {
+    /// Register a flow. Returns the registration epoch on success.
+    /// The caller should pass this epoch to `remove_if_epoch_matches` for
+    /// safe rollback in case a subsequent operation (e.g. store write) fails.
+    pub fn register(&mut self, flow: FlowDefinition) -> Result<u64, FlowError> {
         validate_dag(&flow)?;
+        let epoch = self.next_epoch;
+        self.next_epoch += 1;
+        self.epochs.insert(flow.name.clone(), epoch);
         self.flows.insert(flow.name.clone(), flow);
-        Ok(())
+        Ok(epoch)
+    }
+
+    /// Remove a flow only if its registration epoch matches.
+    /// Returns true if removed, false if the name was not found or the epoch
+    /// has changed (meaning another request registered a new flow with the
+    /// same name between our registration and this rollback).
+    pub fn remove_if_epoch_matches(&mut self, name: &str, epoch: u64) -> bool {
+        if self.epochs.get(name) == Some(&epoch) {
+            self.epochs.remove(name);
+            self.flows.remove(name).is_some()
+        } else {
+            false
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&FlowDefinition> {
@@ -175,6 +204,7 @@ impl FlowEngine {
     }
 
     pub fn remove(&mut self, name: &str) -> bool {
+        self.epochs.remove(name);
         self.flows.remove(name).is_some()
     }
 
@@ -1335,8 +1365,12 @@ fn resolve_path(
 
         // 获取 step output
         let step_output = match step_outputs.get(step_name) {
-            Some(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(bytes)
-                .unwrap_or(serde_json::Value::Null),
+            Some(Some(bytes)) => match serde_json::from_slice::<serde_json::Value>(bytes) {
+                Ok(v) => v,
+                // Binary (non-JSON) output: preserve as hex string, consistent with
+                // how sync/async/stream paths encode binary rune output.
+                Err(_) => serde_json::Value::String(format!("hex:{}", hex::encode(bytes))),
+            },
             Some(None) => serde_json::Value::Null, // skipped step
             None => serde_json::Value::Null,
         };
