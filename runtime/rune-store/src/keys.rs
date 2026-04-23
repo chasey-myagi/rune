@@ -226,10 +226,13 @@ impl RuneStore {
         let used_ip = used_ip.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = pool.writer();
-            conn.execute(
+            let rows = conn.execute(
                 "UPDATE api_keys SET last_used_at = ?1, last_used_ip = ?2 WHERE key_prefix = ?3",
                 rusqlite::params![used_at, used_ip, key_prefix],
             )?;
+            if rows == 0 {
+                tracing::debug!(key_prefix = %key_prefix, "update_key_last_used: no matching row");
+            }
             Ok(())
         })
         .await?

@@ -449,6 +449,8 @@ pub async fn run_flow_stream(
 
     // Clone event_tx before it is moved into the exec task.
     let fwd_tx = event_tx.clone();
+    // Also clone for the disconnect-detection task (before fwd_tx is moved below).
+    let dc_tx = fwd_tx.clone();
 
     // Main execution task.
     let runner = runner.with_progress(progress_tx);
@@ -458,8 +460,15 @@ pub async fn run_flow_stream(
             .await
         {
             Ok(result) => {
-                let output_json = serde_json::from_slice::<serde_json::Value>(&result.output)
-                    .unwrap_or(serde_json::Value::Null);
+                // Binary outputs are encoded as "hex:..." — preserve that string rather
+                // than silently dropping non-UTF-8 data (which serde_json::Null would do).
+                let output_json = match std::str::from_utf8(&result.output) {
+                    Ok(s) => serde_json::from_str::<serde_json::Value>(s)
+                        .unwrap_or_else(|_| serde_json::Value::String(s.to_string())),
+                    Err(_) => {
+                        serde_json::Value::String(format!("hex:{}", hex::encode(&result.output)))
+                    }
+                };
                 let msg = serde_json::json!({
                     "output": output_json,
                     "steps_executed": result.steps_executed,
@@ -480,7 +489,17 @@ pub async fn run_flow_stream(
     })
     .abort_handle(); // Detach JoinHandle; keep AbortHandle to cancel on disconnect.
 
-    // Progress forwarding task: abort the exec task when the SSE client disconnects.
+    // Disconnect detection: abort exec when the SSE channel is closed (client disconnects).
+    // This runs independently of the progress forwarding task so that abort fires even when
+    // the exec task emits no progress events (e.g. simple rune steps).
+    let dc_abort = exec_abort.clone();
+    tokio::spawn(async move {
+        dc_tx.closed().await;
+        dc_abort.abort();
+    });
+
+    // Progress forwarding task: serialise FlowProgressEvents to SSE "flow_progress" events.
+    // Also aborts exec on send failure (belt-and-suspenders alongside the dc task above).
     tokio::spawn(async move {
         while let Some(evt) = progress_rx.recv().await {
             let data = serde_json::to_string(&evt).unwrap_or_default();

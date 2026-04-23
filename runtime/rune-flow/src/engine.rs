@@ -1535,6 +1535,9 @@ fn uuid_simple() -> String {
 }
 
 /// 根据 RetryConfig 和当前 attempt（0-based）计算退避延迟毫秒数。
+///
+/// `attempt` is the 0-based index of the *failed* attempt that just occurred.
+/// Exponential: attempt=0 → base, attempt=1 → base*2, attempt=2 → base*4, …
 fn compute_backoff_ms(config: &crate::dag::RetryConfig, attempt: u32) -> u64 {
     use crate::dag::BackoffStrategy;
     let base = config.backoff_ms;

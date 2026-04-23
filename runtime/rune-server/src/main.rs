@@ -59,6 +59,8 @@ async fn main() -> anyhow::Result<()> {
                 config.server.http_host
             );
         }
+        // eprintln! intentional: init_telemetry is not called until after this block,
+        // so tracing is not yet initialized here — tracing::warn! would be silently dropped.
         eprintln!(
             "\n\
              ⚠️  DEV MODE ACTIVE — auth disabled, rate limiting disabled\n\

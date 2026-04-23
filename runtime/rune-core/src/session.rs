@@ -749,6 +749,10 @@ impl SessionManager {
         if ctx.outbound_tx.send(ack).await.is_err() {
             return false;
         }
+        // Reset heartbeat timer after a successful attach so that the heartbeat
+        // task (which started before Attach was received) does not count the auth
+        // validation time against the heartbeat timeout.
+        ctx.touch_heartbeat();
         true
     }
 

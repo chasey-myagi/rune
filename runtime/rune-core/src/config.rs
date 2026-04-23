@@ -382,6 +382,10 @@ impl AppConfig {
             "gate.max_upload_size_mb must be >= 1 MB"
         );
         anyhow::ensure!(
+            self.session.heartbeat_interval_secs > 0,
+            "session.heartbeat_interval_secs must be > 0"
+        );
+        anyhow::ensure!(
             self.session.heartbeat_timeout_secs > self.session.heartbeat_interval_secs,
             "session.heartbeat_timeout_secs ({}) must be > heartbeat_interval_secs ({})",
             self.session.heartbeat_timeout_secs,
@@ -797,6 +801,13 @@ http_port = 19999
     fn validate_max_upload_size_zero_fails() {
         let mut config = AppConfig::default();
         config.gate.max_upload_size_mb = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_heartbeat_interval_zero_fails() {
+        let mut config = AppConfig::default();
+        config.session.heartbeat_interval_secs = 0;
         assert!(config.validate().is_err());
     }
 

@@ -70,7 +70,8 @@ pub fn map_error(e: RuneError, request_id: Option<&str>) -> axum::response::Resp
         RuneError::Internal(_) => {
             // Log the full error chain server-side but return a generic message to the
             // client to prevent leaking internal details (file paths, connection strings, etc.)
-            tracing::error!(error = %e, "internal rune error");
+            // Use {:?} to expand the full anyhow chain including all context layers.
+            tracing::error!(error = ?e, "internal rune error");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL",
