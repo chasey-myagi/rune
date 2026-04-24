@@ -91,6 +91,13 @@ where
 
 /// 流式 Rune handler
 #[async_trait::async_trait]
+/// Handler that produces a stream of output chunks.
+///
+/// # Cancellation safety
+/// Implementations MUST be cancellation-safe: when the `execute` Future is
+/// dropped (e.g. because the client disconnected), the handler must not leak
+/// resources or leave partial state behind. The runtime relies on `Future::drop`
+/// for cleanup; there is no explicit "cancel" signal.
 pub trait StreamRuneHandler: Send + Sync + 'static {
     async fn execute(
         &self,
