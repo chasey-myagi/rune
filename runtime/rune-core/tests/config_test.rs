@@ -623,7 +623,6 @@ fn test_multiple_env_vars_all_take_effect() {
     std::env::set_var("RUNE_SERVER__GRPC_PORT", "9999");
     std::env::set_var("RUNE_SERVER__HTTP_HOST", "10.0.0.2");
     std::env::set_var("RUNE_SERVER__HTTP_PORT", "8888");
-    std::env::set_var("RUNE_SERVER__DEV_MODE", "true");
     std::env::set_var("RUNE_AUTH__ENABLED", "false");
     std::env::set_var("RUNE_STORE__DB_PATH", "/tmp/custom.db");
     std::env::set_var("RUNE_LOG__LEVEL", "warn");
@@ -662,7 +661,10 @@ fn test_multiple_env_vars_all_take_effect() {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
     );
     assert_eq!(config.server.http_port, 8888);
-    assert!(config.server.dev_mode);
+    // A27: dev_mode is intentionally NOT overridable via env var.
+    // It should remain false (default) even though RUNE_SERVER__DEV_MODE
+    // is no longer read.
+    assert!(!config.server.dev_mode);
     assert!(!config.auth.enabled);
     assert_eq!(config.store.db_path, "/tmp/custom.db");
     assert_eq!(config.log.level, "warn");
@@ -693,7 +695,6 @@ fn test_multiple_env_vars_all_take_effect() {
     std::env::remove_var("RUNE_SERVER__GRPC_PORT");
     std::env::remove_var("RUNE_SERVER__HTTP_HOST");
     std::env::remove_var("RUNE_SERVER__HTTP_PORT");
-    std::env::remove_var("RUNE_SERVER__DEV_MODE");
     std::env::remove_var("RUNE_AUTH__ENABLED");
     std::env::remove_var("RUNE_STORE__DB_PATH");
     std::env::remove_var("RUNE_LOG__LEVEL");

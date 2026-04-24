@@ -93,10 +93,11 @@ impl RuneStore {
                     rune_name: row.get(1)?,
                     status: {
                         let s: String = row.get(2)?;
-                        TaskStatus::parse(&s).unwrap_or_else(|| {
-                            tracing::warn!(status = %s, "unknown task status in db — treating as pending");
-                            TaskStatus::Pending
-                        })
+                        let st = TaskStatus::from_db(&s);
+                        if matches!(st, TaskStatus::Unknown(_)) {
+                            tracing::warn!(status = %s, "unknown task status in db — preserving as Unknown");
+                        }
+                        st
                     },
                     input: row.get(3)?,
                     output: row.get(4)?,
@@ -143,7 +144,7 @@ impl RuneStore {
                         rusqlite::params![status.as_str(), output, error, now, task_id],
                     )?;
                 }
-                TaskStatus::Pending => {
+                TaskStatus::Pending | TaskStatus::Unknown(_) => {
                     conn.execute(
                         "UPDATE tasks SET status = ?1 WHERE task_id = ?2",
                         rusqlite::params![status.as_str(), task_id],
@@ -220,13 +221,14 @@ impl RuneStore {
                         rune_name: row.get(1)?,
                         status: {
                             let s: String = row.get(2)?;
-                            TaskStatus::parse(&s).unwrap_or_else(|| {
+                            let st = TaskStatus::from_db(&s);
+                            if matches!(st, TaskStatus::Unknown(_)) {
                                 tracing::warn!(
                                     status = %s,
-                                    "unknown task status in db (list_tasks) — treating as pending"
+                                    "unknown task status in db (list_tasks) — preserving as Unknown"
                                 );
-                                TaskStatus::Pending
-                            })
+                            }
+                            st
                         },
                         input: row.get(3)?,
                         output: row.get(4)?,

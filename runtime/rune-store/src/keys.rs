@@ -9,6 +9,11 @@ use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Prefix length: "rk_" + 16 hex chars = 19 chars.
+pub const KEY_PREFIX_LEN: usize = 19;
+/// Minimum full key length: "rk_" + 32 hex chars = 35 chars total.
+pub const MIN_RAW_KEY_LEN: usize = 35;
+
 pub struct CreateKeyResult {
     pub raw_key: String,
     pub api_key: ApiKey,
@@ -60,7 +65,7 @@ impl RuneStore {
         raw_key: &str,
         expected_type: KeyType,
     ) -> StoreResult<Option<ApiKey>> {
-        if raw_key.is_empty() || !raw_key.starts_with("rk_") {
+        if raw_key.is_empty() || !raw_key.starts_with("rk_") || raw_key.len() < MIN_RAW_KEY_LEN {
             return Ok(None);
         }
         let pool = self.pool.clone();
@@ -164,7 +169,7 @@ impl RuneStore {
         expected_type: KeyType,
         secret: &[u8],
     ) -> StoreResult<Option<ApiKey>> {
-        if raw_key.is_empty() || !raw_key.starts_with("rk_") {
+        if raw_key.is_empty() || !raw_key.starts_with("rk_") || raw_key.len() < MIN_RAW_KEY_LEN {
             return Ok(None);
         }
         let pool = self.pool.clone();
@@ -276,13 +281,16 @@ fn insert_raw_key(
     key_type: KeyType,
     label: &str,
 ) -> StoreResult<ApiKey> {
-    if !raw_key.starts_with("rk_") || raw_key.len() < 35 {
+    if !raw_key.starts_with("rk_") || raw_key.len() < MIN_RAW_KEY_LEN {
         return Err(StoreError::InvalidKeyFormat(
-            "expected a key starting with 'rk_' and at least 35 characters (rk_ + 32 hex)"
-                .to_string(),
+            format!(
+                "expected a key starting with 'rk_' and at least {} characters (rk_ + {} hex chars total)",
+                MIN_RAW_KEY_LEN,
+                MIN_RAW_KEY_LEN - 3
+            ),
         ));
     }
-    let key_prefix = format!("rk_{}", &raw_key[3..19]);
+    let key_prefix = format!("rk_{}", &raw_key[3..KEY_PREFIX_LEN]);
     let key_hash = hash_key(raw_key);
     let now = now_iso8601();
     conn.execute(

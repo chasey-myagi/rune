@@ -13,6 +13,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Encode step output bytes as a JSON Value.
+/// Valid JSON is parsed into the corresponding Value;
+/// non-JSON (including binary) is preserved as `Value::String("hex:<hex>")`
+/// so no data is silently lost.
+fn encode_output_value(bytes: &[u8]) -> serde_json::Value {
+    match serde_json::from_slice(bytes) {
+        Ok(v) => v,
+        Err(_) => serde_json::Value::String(format!("hex:{}", hex::encode(bytes))),
+    }
+}
+
 /// Step 执行状态
 #[derive(Debug, Clone)]
 pub enum StepStatus {
@@ -82,6 +93,16 @@ pub enum FlowError {
     FlowStepNotFound(String),
     #[error("circular flow reference detected: {0}")]
     CircularFlowRef(String),
+    #[error(
+        "step '{step}': input_mapping key '{key}' references binary output from '{source_step}'; \
+         binary data cannot be injected via input_mapping (it is encoded as hex: strings). \
+         Use a Rune step to decode it explicitly."
+    )]
+    BinaryInInputMapping {
+        step: String,
+        key: String,
+        source_step: String,
+    },
 }
 
 /// Default step timeout when not configured.
@@ -161,7 +182,7 @@ impl FlowEngine {
     pub fn register(&mut self, flow: FlowDefinition) -> Result<u64, FlowError> {
         validate_dag(&flow)?;
         let epoch = self.next_epoch;
-        self.next_epoch += 1;
+        self.next_epoch = self.next_epoch.wrapping_add(1);
         self.epochs.insert(flow.name.clone(), epoch);
         self.flows.insert(flow.name.clone(), flow);
         Ok(epoch)
@@ -479,60 +500,52 @@ impl FlowRunner {
                         let call_stack = call_stack.clone();
                         let loop_step_name = step_def.name.clone();
                         let retry = step_def.retry.clone();
+                        let loop_deadline = std::time::Instant::now() + timeout;
                         join_set.spawn(async move {
-                            use crate::dag::RetryCondition;
                             let default_config = crate::dag::RetryConfig {
                                 max_attempts: 1,
                                 backoff_ms: 0,
                                 backoff_strategy: crate::dag::BackoffStrategy::Fixed,
                                 max_delay_ms: None,
-                                retry_on: vec![],
+                                retry_on: vec![crate::dag::RetryCondition::Any],
                             };
                             let config = retry.as_ref().unwrap_or(&default_config);
-                            let should_retry = |e: &RuneError| -> bool {
-                                if config.retry_on.is_empty()
-                                    || config.retry_on.contains(&RetryCondition::Any)
-                                {
-                                    return true;
-                                }
-                                config.retry_on.iter().any(|cond| {
-                                    matches!(
-                                        (cond, e),
-                                        (RetryCondition::Timeout, RuneError::Timeout)
-                                    )
-                                })
-                            };
-                            retry_op(config, should_retry, || {
-                                let runner = runner.clone();
-                                let lc = lc.clone();
-                                let si = si.clone();
-                                let parent_context = parent_context.clone();
-                                let flow_request_id = flow_request_id.clone();
-                                let call_stack = call_stack.clone();
-                                let loop_step_name = loop_step_name.clone();
-                                async move {
-                                    match tokio::time::timeout(
-                                        timeout,
-                                        runner.execute_loop(
-                                            &lc,
-                                            si,
-                                            parent_context,
-                                            flow_request_id,
-                                            call_stack,
-                                            loop_step_name,
-                                        ),
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(out)) => Ok(out),
-                                        Ok(Err(e)) => Err(RuneError::ExecutionFailed {
-                                            code: "LOOP_FAILED".into(),
-                                            message: e.to_string(),
-                                        }),
-                                        Err(_) => Err(RuneError::Timeout),
+                            retry_op(
+                                config,
+                                || {
+                                    let runner = runner.clone();
+                                    let lc = lc.clone();
+                                    let si = si.clone();
+                                    let parent_context = parent_context.clone();
+                                    let flow_request_id = flow_request_id.clone();
+                                    let call_stack = call_stack.clone();
+                                    let loop_step_name = loop_step_name.clone();
+                                    async move {
+                                        match tokio::time::timeout(
+                                            timeout,
+                                            runner.execute_loop(
+                                                &lc,
+                                                si,
+                                                parent_context,
+                                                flow_request_id,
+                                                call_stack,
+                                                loop_step_name,
+                                                loop_deadline,
+                                            ),
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok(out)) => Ok(out),
+                                            Ok(Err(e)) => Err(RuneError::ExecutionFailed {
+                                                code: "LOOP_FAILED".into(),
+                                                message: e.to_string(),
+                                            }),
+                                            Err(_) => Err(RuneError::Timeout),
+                                        }
                                     }
-                                }
-                            })
+                                },
+                                Some(loop_deadline),
+                            )
                             .await
                             .map(|out| (step_idx, out))
                             .map_err(|e| (step_idx, e))
@@ -675,6 +688,7 @@ impl FlowRunner {
 
             // 收集并行结果
             let mut layer_error: Option<(String, RuneError)> = None;
+            let mut panic_count = 0usize;
 
             while let Some(result) = join_set.join_next().await {
                 match result {
@@ -714,10 +728,23 @@ impl FlowRunner {
                         }
                     }
                     Err(join_err) => {
-                        // JoinError（不太可能发生）
-                        tracing::error!("join error: {}", join_err);
+                        panic_count += 1;
+                        tracing::error!("join error (task panic or abort): {}", join_err);
                     }
                 }
+            }
+
+            // If any task panicked, ensure the flow is marked as failed even if
+            // no explicit layer_error was captured (the panicked step never
+            // returned an error to populate layer_error).
+            if panic_count > 0 && layer_error.is_none() {
+                layer_error = Some((
+                    format!("{} task(s) panicked", panic_count),
+                    RuneError::ExecutionFailed {
+                        code: "TASK_PANIC".into(),
+                        message: format!("{} step task(s) panicked during execution", panic_count),
+                    },
+                ));
             }
 
             // 记录首个失败（不立即返回，允许独立分支继续执行）
@@ -802,6 +829,32 @@ impl FlowRunner {
         }
     }
 
+    /// Reject binary-encoded values injected via input_mapping.
+    /// Binary data is encoded as `hex:<hex>` strings; these cannot be
+    /// decoded by generic runes and must be rejected.
+    fn reject_hex_in_mapping(
+        value: &serde_json::Value,
+        path: &str,
+        step_name: &str,
+        key: &str,
+    ) -> Result<(), FlowError> {
+        if let serde_json::Value::String(ref s) = value {
+            if s.starts_with("hex:") {
+                let source_step = path
+                    .strip_prefix("steps.")
+                    .and_then(|p| p.split('.').next())
+                    .unwrap_or(path)
+                    .to_string();
+                return Err(FlowError::BinaryInInputMapping {
+                    step: step_name.to_string(),
+                    key: key.to_string(),
+                    source_step,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn build_step_input(
         step_def: &crate::dag::StepDefinition,
         flow_input: &Bytes,
@@ -813,6 +866,7 @@ impl FlowRunner {
             let mut result = serde_json::Map::new();
             for (key, path) in mapping {
                 let value = resolve_path(path, step_outputs, flow_input_json);
+                Self::reject_hex_in_mapping(&value, path, &step_def.name, key)?;
                 result.insert(key.clone(), value);
             }
             let bytes = serde_json::to_vec(&serde_json::Value::Object(result))
@@ -834,6 +888,7 @@ impl FlowRunner {
 
     // ─── Loop 执行 ───────────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_loop(
         &self,
         config: &LoopConfig,
@@ -842,6 +897,7 @@ impl FlowRunner {
         flow_request_id: String,
         call_stack: Vec<String>,
         loop_step_name: String,
+        loop_deadline: std::time::Instant,
     ) -> Result<Bytes, FlowError> {
         let mut current = input;
 
@@ -883,16 +939,20 @@ impl FlowRunner {
                     &iter_input_json,
                 )?;
 
-                // TODO(Important-2): Each body-step timeout is freshly allocated
-                // per iteration rather than drawing from a shrinking deadline
-                // shared across the whole loop. A loop with N iterations and
-                // step_timeout T could run for up to N×T. To enforce an aggregate
-                // loop deadline, thread a `Deadline` token through execute_loop
-                // and subtract elapsed time before each body step invocation.
+                // Cap each body-step timeout to the remaining loop deadline so that
+                // N iterations × step_timeout cannot exceed the outer loop budget.
+                let remaining = loop_deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(FlowError::StepFailed {
+                        step: format!("{loop_step_name}: loop deadline exceeded before body step"),
+                        source: RuneError::Timeout,
+                    });
+                }
                 let effective_timeout = body_step
                     .timeout_ms
                     .map(Duration::from_millis)
-                    .unwrap_or(self.step_timeout);
+                    .unwrap_or(self.step_timeout)
+                    .min(remaining);
 
                 let body_future = self.execute_body_step_kind(
                     body_step.kind.clone(),
@@ -907,7 +967,11 @@ impl FlowRunner {
                 let body_start = std::time::Instant::now();
                 let out = match tokio::time::timeout(effective_timeout, body_future).await {
                     Ok(Ok(o)) => {
-                        let duration_ms = body_start.elapsed().as_millis() as u64;
+                        let duration_ms = body_start
+                            .elapsed()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX);
                         emit(FlowProgressEvent::BodyStepDone {
                             step: loop_step_name.clone(),
                             body_step: body_step.name.clone(),
@@ -916,7 +980,11 @@ impl FlowRunner {
                         o
                     }
                     Ok(Err(e)) => {
-                        let duration_ms = body_start.elapsed().as_millis() as u64;
+                        let duration_ms = body_start
+                            .elapsed()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX);
                         emit(FlowProgressEvent::BodyStepFailed {
                             step: loop_step_name.clone(),
                             body_step: body_step.name.clone(),
@@ -929,7 +997,11 @@ impl FlowRunner {
                         });
                     }
                     Err(_) => {
-                        let duration_ms = body_start.elapsed().as_millis() as u64;
+                        let duration_ms = body_start
+                            .elapsed()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX);
                         emit(FlowProgressEvent::BodyStepFailed {
                             step: loop_step_name.clone(),
                             body_step: body_step.name.clone(),
@@ -967,7 +1039,11 @@ impl FlowRunner {
                 emit(FlowProgressEvent::LoopIterationEnd {
                     step: loop_step_name.clone(),
                     iteration: iter,
-                    duration_ms: iter_start.elapsed().as_millis() as u64,
+                    duration_ms: iter_start
+                        .elapsed()
+                        .as_millis()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
                     until_met: met,
                 });
                 if met {
@@ -977,7 +1053,11 @@ impl FlowRunner {
                 emit(FlowProgressEvent::LoopIterationEnd {
                     step: loop_step_name.clone(),
                     iteration: iter,
-                    duration_ms: iter_start.elapsed().as_millis() as u64,
+                    duration_ms: iter_start
+                        .elapsed()
+                        .as_millis()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
                     until_met: false,
                 });
             }
@@ -1086,13 +1166,10 @@ impl FlowRunner {
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
                 Ok(Ok((i, out))) => {
-                    let val = match serde_json::from_slice::<serde_json::Value>(&out) {
-                        Ok(v) => v,
-                        Err(_) => serde_json::Value::String(format!("hex:{}", hex::encode(&out))),
-                    };
-                    results[i] = Some(val);
+                    results[i] = Some(encode_output_value(&out));
                 }
-                Ok(Err((_, e))) => {
+                Ok(Err((i, e))) => {
+                    tracing::debug!("map subtask {i} failed: {e}; aborting remaining tasks");
                     join_set.abort_all();
                     return Err(e);
                 }
@@ -1157,20 +1234,24 @@ impl FlowRunner {
                         None => Err(RuneError::NotFound(rc.rune)),
                     }
                 }
-                BodyStepKind::Loop(lc) => runner
-                    .execute_loop(
-                        &lc,
-                        input,
-                        parent_context,
-                        flow_request_id,
-                        call_stack,
-                        step_name.clone(),
-                    )
-                    .await
-                    .map_err(|e| RuneError::ExecutionFailed {
-                        code: "LOOP_FAILED".into(),
-                        message: e.to_string(),
-                    }),
+                BodyStepKind::Loop(lc) => {
+                    let nested_deadline = std::time::Instant::now() + effective_timeout;
+                    runner
+                        .execute_loop(
+                            &lc,
+                            input,
+                            parent_context,
+                            flow_request_id,
+                            call_stack,
+                            step_name.clone(),
+                            nested_deadline,
+                        )
+                        .await
+                        .map_err(|e| RuneError::ExecutionFailed {
+                            code: "LOOP_FAILED".into(),
+                            message: e.to_string(),
+                        })
+                }
                 BodyStepKind::Map(mc) => runner
                     // body step 内 Map 的 over 只能引用 $input.*（当前元素），
                     // 不能引用外层 flow 的步骤输出，故传空 step_outputs。
@@ -1293,6 +1374,7 @@ impl FlowRunner {
             let mut result = serde_json::Map::new();
             for (key, path) in mapping {
                 let value = resolve_condition_value(path, body_outputs, iter_input_json);
+                Self::reject_hex_in_mapping(&value, path, &body_step.name, key)?;
                 result.insert(key.clone(), value);
             }
             let bytes = serde_json::to_vec(&serde_json::Value::Object(result))
@@ -1365,12 +1447,7 @@ fn resolve_path(
 
         // 获取 step output
         let step_output = match step_outputs.get(step_name) {
-            Some(Some(bytes)) => match serde_json::from_slice::<serde_json::Value>(bytes) {
-                Ok(v) => v,
-                // Binary (non-JSON) output: preserve as hex string, consistent with
-                // how sync/async/stream paths encode binary rune output.
-                Err(_) => serde_json::Value::String(format!("hex:{}", hex::encode(bytes))),
-            },
+            Some(Some(bytes)) => encode_output_value(bytes),
             Some(None) => serde_json::Value::Null, // skipped step
             None => serde_json::Value::Null,
         };
@@ -1500,8 +1577,7 @@ fn resolve_condition_value(
         }
         let step_name = parts[0];
         let step_output = match step_outputs.get(step_name) {
-            Some(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(bytes)
-                .unwrap_or(serde_json::Value::Null),
+            Some(Some(bytes)) => encode_output_value(bytes),
             _ => serde_json::Value::Null,
         };
 
@@ -1590,9 +1666,15 @@ fn compute_backoff_ms(config: &crate::dag::RetryConfig, attempt: u32) -> u64 {
     }
     let delay = match config.backoff_strategy {
         BackoffStrategy::Fixed => base,
-        BackoffStrategy::Exponential => base.saturating_mul(1u64 << attempt.min(62)),
+        // attempt.min(32) prevents overflow while keeping delays reasonable:
+        // 1<<32 = ~4.3B; with a typical base of 100ms this caps at ~429M seconds
+        // (about 13 years), which saturating_mul will clamp to u64::MAX ms anyway.
+        BackoffStrategy::Exponential => {
+            base.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX))
+        }
         BackoffStrategy::ExponentialJitter => {
-            let exp = base.saturating_mul(1u64 << attempt.min(62));
+            // Same 32-bit ceiling as Exponential to avoid shift overflow.
+            let exp = base.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
             // ±25% random jitter to desynchronise concurrent retriers.
             let half_range = exp / 4;
             if half_range == 0 {
@@ -1613,40 +1695,50 @@ fn compute_backoff_ms(config: &crate::dag::RetryConfig, attempt: u32) -> u64 {
 
 /// Generic retry helper used by both Rune steps and Loop steps.
 /// Calls `op` up to `max_attempts` times (min 1). On failure, waits
-/// computed backoff before retrying. `should_retry` predicate controls
+/// computed backoff before retrying. `config.should_retry` controls
 /// whether a given error triggers a retry; returning false exits immediately.
 ///
 /// Callers spawning this inside `tokio::spawn` must ensure `F: Send` and
 /// `Fut: Send`; the generic bounds here do not enforce it so the helper can
 /// also be used in non-Send async contexts.
-async fn retry_op<F, Fut, T, E, P>(
+async fn retry_op<F, Fut, T>(
     config: &crate::dag::RetryConfig,
-    should_retry: P,
     mut op: F,
-) -> Result<T, E>
+    deadline: Option<std::time::Instant>,
+) -> Result<T, RuneError>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, E>>,
-    P: Fn(&E) -> bool,
+    Fut: Future<Output = Result<T, RuneError>>,
 {
     let max = config.max_attempts.max(1);
-    for attempt in 0..max {
+    let mut attempt: u32 = 0;
+    loop {
         match op().await {
             Ok(out) => return Ok(out),
             Err(e) => {
-                if attempt + 1 < max && should_retry(&e) {
+                if attempt.saturating_add(1) < max && config.should_retry(&e) {
                     let delay = compute_backoff_ms(config, attempt);
-                    if delay > 0 {
-                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    let capped_delay = match deadline {
+                        Some(d) => {
+                            let remaining = d
+                                .saturating_duration_since(std::time::Instant::now())
+                                .as_millis()
+                                .try_into()
+                                .unwrap_or(u64::MAX);
+                            delay.min(remaining)
+                        }
+                        None => delay,
+                    };
+                    if capped_delay > 0 {
+                        tokio::time::sleep(Duration::from_millis(capped_delay)).await;
                     }
+                    attempt += 1;
                 } else {
                     return Err(e);
                 }
             }
         }
     }
-    // 不可达，但需要满足编译器
-    unreachable!("retry_op loop exhausted without returning")
 }
 
 /// 按 RetryConfig 执行 invoker.invoke_once，失败时 backoff 后重试。
@@ -1657,7 +1749,6 @@ async fn invoke_with_retry(
     input: Bytes,
     retry: Option<&crate::dag::RetryConfig>,
 ) -> Result<Bytes, RuneError> {
-    use crate::dag::RetryCondition;
     match retry {
         None => invoker.invoke_once(ctx, input).await,
         Some(config) => {
@@ -1666,33 +1757,31 @@ async fn invoke_with_retry(
             // retries Timeout (because it cannot cancel the in-flight remote execution).
             // Flow-level retry is safe here because the previous attempt has already returned
             // RuneError::Timeout — the session layer has already cleaned up the pending request.
-            let should_retry = |e: &RuneError| -> bool {
-                if config.retry_on.is_empty() || config.retry_on.contains(&RetryCondition::Any) {
-                    return true;
-                }
-                config
-                    .retry_on
-                    .iter()
-                    .any(|cond| matches!((cond, e), (RetryCondition::Timeout, RuneError::Timeout)))
-            };
             let start = std::time::Instant::now();
             let total_timeout = ctx.timeout;
-            retry_op(config, should_retry, || {
-                let elapsed = start.elapsed();
-                let remaining = total_timeout.saturating_sub(elapsed);
-                let inv = Arc::clone(&invoker);
-                let inp = input.clone();
-                let mut attempt_ctx = ctx.clone();
-                attempt_ctx.timeout = remaining;
-                attempt_ctx.disable_runtime_retry = true;
-                async move {
-                    // If the total timeout budget is exhausted, don't start another attempt.
-                    if remaining.is_zero() {
-                        return Err(RuneError::Timeout);
+            let deadline = start + total_timeout;
+            retry_op(
+                config,
+                || {
+                    let elapsed = start.elapsed();
+                    let remaining = total_timeout.saturating_sub(elapsed);
+                    let inv = Arc::clone(&invoker);
+                    let inp = input.clone();
+                    let mut attempt_ctx = ctx.clone();
+                    attempt_ctx.timeout = remaining;
+                    attempt_ctx.disable_runtime_retry = true;
+                    async move {
+                        // If the total timeout budget is exhausted or too small to be useful,
+                        // don't start another attempt that would just generate a cancel storm.
+                        const MIN_MEANINGFUL_TIMEOUT: Duration = Duration::from_millis(10);
+                        if remaining < MIN_MEANINGFUL_TIMEOUT {
+                            return Err(RuneError::Timeout);
+                        }
+                        inv.invoke_once(attempt_ctx, inp).await
                     }
-                    inv.invoke_once(attempt_ctx, inp).await
-                }
-            })
+                },
+                Some(deadline),
+            )
             .await
         }
     }
@@ -1830,7 +1919,6 @@ mod tests {
         let cc = call_count.clone();
         let result = retry_op(
             &cfg,
-            |e: &RuneError| matches!(e, RuneError::Timeout),
             || {
                 let cc = cc.clone();
                 async move {
@@ -1838,6 +1926,7 @@ mod tests {
                     Err::<bytes::Bytes, RuneError>(RuneError::Unavailable)
                 }
             },
+            None,
         )
         .await;
         // 非 Timeout 错误不应重试，只调用 1 次
@@ -1855,7 +1944,6 @@ mod tests {
         let cc = call_count.clone();
         let result = retry_op(
             &cfg,
-            |_: &RuneError| true,
             || {
                 let cc = cc.clone();
                 async move {
@@ -1863,6 +1951,7 @@ mod tests {
                     Err::<bytes::Bytes, RuneError>(RuneError::Unavailable)
                 }
             },
+            None,
         )
         .await;
         assert!(result.is_err());

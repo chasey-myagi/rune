@@ -32,6 +32,12 @@ pub struct Relay {
     caster_generation: DashMap<String, u64>,
     /// Serializes multi-map writes (register/remove_caster).
     /// Read paths do not acquire this lock — DashMap shard locks are sufficient.
+    ///
+    /// NOTE: This is intentionally a `Mutex<()>` rather than `RwLock` because
+    /// every caller that acquires it is a writer. There are no read-side users
+    /// of this lock, so `RwLock` would provide no benefit and would only add
+    /// tracking overhead. The commit message that claimed "upgrade to RwLock"
+    /// was incorrect — only the documentation was clarified.
     write_lock: Mutex<()>,
     local_key_counter: AtomicU64,
     circuit_breaker_registry: Option<Arc<CircuitBreakerRegistry>>,

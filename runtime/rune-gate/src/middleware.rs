@@ -1,7 +1,8 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderValue, StatusCode},
     middleware::Next,
 };
@@ -11,11 +12,39 @@ use crate::error::error_response;
 use crate::handlers::rune::parse_labels_header;
 use crate::state::GateState;
 
-/// Extract the client IP from `X-Forwarded-For` header (first address).
-/// Returns an empty string if the header is absent or its value is not a valid IP address.
-/// Note: X-Forwarded-For is client-controlled and can be forged; this field is for
-/// informational audit logging only, not for security decisions.
-fn extract_client_ip(req: &axum::extract::Request) -> String {
+use crate::state::TrustedCidr;
+
+/// Extract the client IP for audit logging.
+///
+/// If `trust_proxy` is configured **and** the direct TCP connection
+/// originates from an address inside one of the configured CIDR ranges,
+/// reads the first address from `X-Forwarded-For`. Otherwise falls back
+/// to the direct peer IP from `ConnectInfo`. This prevents attackers on
+/// untrusted networks from forging the audit field `last_used_ip` while
+/// still recording *some* IP when no proxy is in use.
+fn extract_client_ip(req: &axum::extract::Request, trust_proxy: Option<&[TrustedCidr]>) -> String {
+    let remote_addr = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.ip());
+
+    let trust_proxy = match trust_proxy {
+        Some(v) if !v.is_empty() => v,
+        // No trusted proxy configured — use the direct peer IP.
+        _ => return remote_addr.map(|a| a.to_string()).unwrap_or_default(),
+    };
+
+    // Verify the direct connection comes from a trusted proxy range.
+    let is_trusted = remote_addr.map_or(false, |addr| {
+        trust_proxy.iter().any(|cidr| cidr.contains(&addr))
+    });
+
+    if !is_trusted {
+        // Connection did not come from a trusted proxy — use direct peer IP
+        // rather than an empty string so the audit log is still useful.
+        return remote_addr.map(|a| a.to_string()).unwrap_or_default();
+    }
+
     req.headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -23,7 +52,7 @@ fn extract_client_ip(req: &axum::extract::Request) -> String {
         .map(|s| s.trim())
         .filter(|s| s.parse::<std::net::IpAddr>().is_ok())
         .map(|s| s.to_string())
-        .unwrap_or_default()
+        .unwrap_or_else(|| remote_addr.map(|a| a.to_string()).unwrap_or_default())
 }
 
 /// Append hardened security response headers to every reply.
@@ -209,7 +238,7 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    let client_ip = extract_client_ip(&req);
+    let client_ip = extract_client_ip(&req, state.auth.trust_proxy.as_ref().map(|v| v.as_slice()));
 
     let auth_header = req
         .headers()
@@ -228,16 +257,29 @@ pub async fn auth_middleware(
                 // Only attempt the audit update for well-formed keys (rk_ + 16 hex = 19 chars).
                 // Non-standard keys have no matching row in api_keys; skip rather than
                 // passing the full raw key as a prefix (which would silently find nothing).
-                if key.starts_with("rk_") && key.len() >= 19 {
-                    let key_prefix = key[..19].to_string();
+                if key.starts_with("rk_") && key.len() >= rune_store::keys::KEY_PREFIX_LEN {
+                    let key_prefix = key[..rune_store::keys::KEY_PREFIX_LEN].to_string();
                     let store = state.admin.store.clone();
                     let now = rune_core::time_utils::now_iso8601();
+                    let semaphore = state.auth.audit_semaphore.clone();
                     tokio::spawn(async move {
+                        // Acquire a permit to prevent unbounded task spawning
+                        // under high QPS. If all permits are taken, drop the
+                        // audit update rather than queueing indefinitely.
+                        let _permit = match semaphore.try_acquire() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "audit log dropped: too many concurrent audit writes"
+                                );
+                                return;
+                            }
+                        };
                         if let Err(e) = store
                             .update_key_last_used(&key_prefix, &now, &client_ip)
                             .await
                         {
-                            tracing::debug!(
+                            tracing::warn!(
                                 error = %e,
                                 "failed to update key last_used audit fields"
                             );

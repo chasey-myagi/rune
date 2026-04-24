@@ -22,6 +22,11 @@ pub fn error_response_with_id(
                 "request_id".to_string(),
                 serde_json::Value::String(request_id.to_string()),
             );
+        } else {
+            tracing::warn!(
+                request_id = %request_id,
+                "error JSON was not an object — request_id could not be inserted"
+            );
         }
     }
     (status, Json(serde_json::json!({ "error": error }))).into_response()
@@ -140,6 +145,12 @@ pub fn map_flow_error(e: FlowError, request_id: Option<&str>) -> axum::response:
         FlowError::CircularFlowRef(_) => error_response_with_id(
             StatusCode::BAD_REQUEST,
             "CIRCULAR_FLOW_REF",
+            &e.to_string(),
+            request_id,
+        ),
+        FlowError::BinaryInInputMapping { .. } => error_response_with_id(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "BINARY_IN_INPUT_MAPPING",
             &e.to_string(),
             request_id,
         ),

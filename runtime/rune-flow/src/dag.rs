@@ -1,6 +1,10 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+// Re-export RuneError so RetryConfig::should_retry can reference it without
+// forcing every caller to import it.
+use rune_core::rune::RuneError;
+
 /// DAG Flow 定义
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowDefinition {
@@ -124,7 +128,12 @@ pub enum RetryCondition {
     Timeout,
 }
 
-/// Step 失败后的重试策略（PR-7 实现执行逻辑）
+/// Retry configuration for a **single flow step**.
+///
+/// Controls how many times a step is retried within the flow engine
+/// before the step is marked as failed. This is distinct from
+/// `rune_core::config::RetryConfig` which governs relay-level retries
+/// for cross-caster RPC calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
     /// 含首次执行，必须 >= 1
@@ -134,9 +143,29 @@ pub struct RetryConfig {
     pub backoff_strategy: BackoffStrategy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_delay_ms: Option<u64>,
-    /// 空列表等价于 [Any] — 重试所有错误
-    #[serde(default)]
+    /// 重试触发条件列表。省略该字段或显式指定 ["any"] 表示重试所有错误。
+    /// 空列表 [] 是无效的——请显式使用 ["any"] 或省略该字段。
+    #[serde(default = "retry_all")]
     pub retry_on: Vec<RetryCondition>,
+}
+
+fn retry_all() -> Vec<RetryCondition> {
+    vec![RetryCondition::Any]
+}
+
+impl RetryConfig {
+    /// Returns true if the given error should trigger a retry according to
+    /// `retry_on`. Containing `RetryCondition::Any` means "retry all errors".
+    /// An empty `retry_on` is invalid (validation rejects it) and will return false.
+    pub fn should_retry(&self, e: &RuneError) -> bool {
+        // Backward compat: empty retry_on means "retry all" (same as [Any]).
+        if self.retry_on.is_empty() || self.retry_on.contains(&RetryCondition::Any) {
+            return true;
+        }
+        self.retry_on
+            .iter()
+            .any(|cond| matches!((cond, e), (RetryCondition::Timeout, RuneError::Timeout)))
+    }
 }
 
 // ─── Serde for StepDefinition ────────────────────────────────────────────────
@@ -570,6 +599,8 @@ fn validate_retry_config(step_name: &str, retry: &Option<RetryConfig>) -> Result
                 reason: "max_attempts must be >= 1 (includes the initial attempt)".into(),
             });
         }
+        // Empty retry_on is accepted for backward compatibility
+        // (it is treated as [Any] by should_retry).
         if let Some(max_delay) = r.max_delay_ms {
             if max_delay < r.backoff_ms {
                 return Err(DagError::InvalidRetryConfig {
@@ -821,7 +852,7 @@ mod tests {
             backoff_ms: 500,
             backoff_strategy: BackoffStrategy::Exponential,
             max_delay_ms: Some(200), // 200 < 500，非法
-            retry_on: vec![],
+            retry_on: vec![RetryCondition::Any],
         }));
         let result = validate_dag(&flow);
         assert!(
@@ -839,7 +870,7 @@ mod tests {
             backoff_ms: 100,
             backoff_strategy: BackoffStrategy::Exponential,
             max_delay_ms: Some(1000),
-            retry_on: vec![],
+            retry_on: vec![RetryCondition::Any],
         }));
         assert!(validate_dag(&flow).is_ok());
     }
@@ -853,6 +884,6 @@ mod tests {
         assert_eq!(cfg.backoff_ms, 100);
         assert_eq!(cfg.backoff_strategy, BackoffStrategy::Fixed);
         assert_eq!(cfg.max_delay_ms, None);
-        assert!(cfg.retry_on.is_empty());
+        assert_eq!(cfg.retry_on, vec![RetryCondition::Any]);
     }
 }

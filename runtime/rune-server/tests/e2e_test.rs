@@ -169,9 +169,11 @@ fn build_test_state(auth_enabled: bool) -> (GateState, Arc<RuneStore>) {
 
     let state = GateState {
         auth: gate::AuthState {
+            trust_proxy: None,
             key_verifier,
             auth_enabled,
             exempt_routes: Arc::new(vec!["/health".to_string()]),
+            audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
         },
         rune: gate::RuneState {
             relay,

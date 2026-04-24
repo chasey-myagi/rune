@@ -32,13 +32,19 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     // ── CLI + Config ──
     let cli = Cli::parse();
-    let mut config = AppConfig::load(cli.config.as_deref())?;
+    let mut config = if cli.dev && cli.config.is_none() {
+        // dev mode with no explicit config is the only path that may
+        // start with built-in defaults. Production usage must supply a file.
+        AppConfig::default()
+    } else {
+        AppConfig::load(cli.config.as_deref())?
+    };
     if cli.dev {
         config.apply_dev_mode();
     }
     config.apply_env_overrides();
 
-    // A27: prevent env vars from partially overriding dev mode invariants.
+    // prevent env vars from partially overriding dev mode invariants.
     // If dev mode is active (set by --dev flag or RUNE_SERVER__DEV_MODE=true), auth must
     // remain disabled regardless of RUNE_AUTH__ENABLED being set in the environment.
     if config.server.dev_mode {
@@ -192,7 +198,8 @@ async fn main() -> anyhow::Result<()> {
             make_handler(|_ctx, _input| async {
                 Ok(Bytes::from(r#"{"message":"hello from local rune!"}"#))
             }),
-        );
+        )
+        .map_err(|e| anyhow::anyhow!("failed to register demo rune 'hello': {e}"))?;
 
         // step_b: local Rust step (adds step_b field to JSON)
         app.rune(
@@ -219,7 +226,8 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Ok(Bytes::from(serde_json::to_vec(&v).unwrap()))
             }),
-        );
+        )
+        .map_err(|e| anyhow::anyhow!("failed to register demo rune 'step_b': {e}"))?;
 
         tracing::info!("registered demo runes: hello, step_b");
     }
@@ -375,48 +383,24 @@ async fn main() -> anyhow::Result<()> {
             key_verifier,
             auth_enabled: config.auth.enabled,
             exempt_routes: Arc::new(config.auth.exempt_routes.clone()),
+            trust_proxy: config.gate.trust_proxy.as_ref().map(|v| {
+                let parsed: Result<Vec<_>, _> =
+                    v.iter().map(|s| gate::TrustedCidr::parse(s)).collect();
+                match parsed {
+                    Ok(cidrs) => Arc::new(cidrs),
+                    Err(e) => {
+                        tracing::error!("failed to parse trust_proxy CIDR: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }),
+            audit_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
         },
         rune: gate::RuneState {
             relay: Arc::clone(&running.relay),
             resolver: Arc::clone(&running.resolver),
             session_mgr: Arc::clone(&running.session_mgr),
-            file_broker: Arc::new({
-                // Use configured disk_spill_dir; default to $TMPDIR/rune-uploads.
-                // This ensures large uploads are spilled to disk rather than
-                // accumulating indefinitely in memory (OOM risk).
-                let dir = if let Some(ref d) = config.gate.disk_spill_dir {
-                    if d.is_empty() {
-                        None // empty string = force in-memory mode
-                    } else {
-                        Some(std::path::PathBuf::from(d))
-                    }
-                } else {
-                    Some(std::env::temp_dir().join("rune-uploads"))
-                };
-                match dir {
-                    Some(d) => {
-                        if let Err(e) = std::fs::create_dir_all(&d) {
-                            tracing::warn!(path = %d.display(), error = %e, "failed to create disk_spill_dir");
-                            gate::FileBroker::new()
-                        } else {
-                            // B7: clean up orphaned files from previous runs (process crash).
-                            // Use spawn_blocking to avoid blocking tokio worker threads during startup.
-                            let d_clean = d.clone();
-                            tokio::task::spawn_blocking(move || {
-                                if let Ok(rd) = std::fs::read_dir(&d_clean) {
-                                    for entry in rd.flatten() {
-                                        let _ = std::fs::remove_file(entry.path());
-                                    }
-                                }
-                            })
-                            .await
-                            .ok();
-                            gate::FileBroker::with_disk_dir(d)
-                        }
-                    }
-                    None => gate::FileBroker::new(),
-                }
-            }),
+            file_broker: Arc::new(init_file_broker(&config.gate.disk_spill_dir).await),
             max_upload_size_mb: config.gate.max_upload_size_mb,
             request_timeout: config.default_timeout(),
         },
@@ -671,126 +655,54 @@ async fn main() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Return an ISO-8601 timestamp for `days` days ago, used as a DELETE cutoff.
+/// Initialise the FileBroker with an optional disk spill directory.
+/// Defaults to `$TMPDIR/rune-uploads`; an empty string forces in-memory mode.
+async fn init_file_broker(disk_spill_dir: &Option<String>) -> gate::FileBroker {
+    let dir = if let Some(ref d) = disk_spill_dir {
+        if d.is_empty() {
+            // empty string = force in-memory mode
+            return gate::FileBroker::new();
+        } else {
+            Some(std::path::PathBuf::from(d))
+        }
+    } else {
+        Some(std::env::temp_dir().join("rune-uploads"))
+    };
+
+    let Some(d) = dir else {
+        return gate::FileBroker::new();
+    };
+
+    if let Err(e) = std::fs::create_dir_all(&d) {
+        tracing::warn!(path = %d.display(), error = %e, "failed to create disk_spill_dir");
+        return gate::FileBroker::new();
+    }
+
+    // clean up orphaned files from previous runs (process crash).
+    // Only delete files with the `rune-` prefix to avoid
+    // removing unrelated data if disk_spill_dir is shared.
+    let d_clean = d.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(rd) = std::fs::read_dir(&d_clean) {
+            for entry in rd.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with("rune-") {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .ok();
+
+    gate::FileBroker::with_disk_dir(d)
+}
+
 fn chrono_days_ago(days: u32) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .saturating_sub(u64::from(days) * 86_400);
-    // Format as RFC-3339 / ISO-8601 to match the timestamps stored by rune-store.
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let total_days = secs / 86_400;
-    // Simple Gregorian calendar reconstruction (no external dep).
-    let (y, mo, d) = days_to_ymd(total_days);
-    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
-}
-
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    // Days since 1970-01-01
-    let mut year = 1970u64;
-    loop {
-        let leap = is_leap(year);
-        let days_in_year = if leap { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-    let leap = is_leap(year);
-    let month_days = [
-        31u64,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 1u64;
-    for &md in &month_days {
-        if days < md {
-            break;
-        }
-        days -= md;
-        month += 1;
-    }
-    (year, month, days + 1)
-}
-
-fn is_leap(y: u64) -> bool {
-    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
-}
-
-#[cfg(test)]
-mod calendar_tests {
-    use super::{days_to_ymd, is_leap};
-
-    #[test]
-    fn is_leap_rules() {
-        assert!(is_leap(2000)); // divisible by 400 → leap
-        assert!(!is_leap(1900)); // divisible by 100 but not 400 → not leap
-        assert!(is_leap(2024)); // divisible by 4, not 100 → leap
-        assert!(!is_leap(2023)); // not divisible by 4 → not leap
-    }
-
-    #[test]
-    fn epoch_is_1970_jan_01() {
-        assert_eq!(days_to_ymd(0), (1970, 1, 1));
-    }
-
-    #[test]
-    fn year_2000_is_leap_feb_29_exists() {
-        // 2000-02-29: days since epoch for 2000-02-01 = 10988, +28 = 11016
-        // 1970..1999 = 30 years; 7 leaps (72,76,80,84,88,92,96) = 30*365+7 = 10957
-        // Jan 2000 = 31 days → 10957+31 = 10988 → Feb 1
-        // Feb 29 = 10988+28 = 11016
-        assert_eq!(days_to_ymd(11016), (2000, 2, 29));
-    }
-
-    #[test]
-    fn year_1900_has_no_feb_29() {
-        // 1900 is before the epoch so we can only test is_leap for it.
-        assert!(!is_leap(1900));
-        // 2100 is also not a leap year. Verify via days_to_ymd that 2100-02-28 + 1
-        // jumps directly to 2100-03-01 (no Feb 29).
-        // Days from epoch to 2100-01-01:
-        //   1970..2099 = 130 years; leap years in [1972..2096] step 4 = 32 leaps
-        //   (2000 counts as leap; 2100 is outside this range)
-        //   130*365+32 = 47482 → 2100-01-01
-        //   Jan=31, Feb=28 (non-leap) → 2100-03-01 = 47482+31+28 = 47541
-        assert!(!is_leap(2100));
-        assert_eq!(days_to_ymd(47541), (2100, 3, 1));
-        // And the day before is the last of Feb (28th, not 29th):
-        assert_eq!(days_to_ymd(47540), (2100, 2, 28));
-    }
-
-    #[test]
-    fn month_rollover_leap_day_plus_one() {
-        // 2024-02-29 + 1 day = 2024-03-01
-        // days from epoch to 2024-02-29:
-        // 1970..2023 = 54 years; leaps: 72,76,80,84,88,92,96,00,04,08,12,16,20 = 13
-        // 54*365+13 = 19723 → Jan 1 2024
-        // Jan=31, Feb (leap)=29 → Feb 29 = 19723+31+28 = 19782
-        assert_eq!(days_to_ymd(19782), (2024, 2, 29));
-        assert_eq!(days_to_ymd(19783), (2024, 3, 1));
-    }
-
-    #[test]
-    fn year_boundary_dec_31_to_jan_01() {
-        // 2023-12-31 → 2024-01-01
-        // 2024-01-01 = 19723 (from above test)
-        assert_eq!(days_to_ymd(19722), (2023, 12, 31));
-        assert_eq!(days_to_ymd(19723), (2024, 1, 1));
-    }
+    (chrono::Utc::now() - chrono::Duration::days(i64::from(days)))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------

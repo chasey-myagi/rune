@@ -72,71 +72,75 @@ pub async fn create_flow(
         );
     }
 
-    // Phase 1: Register in engine under write lock (validates DAG + conflicts).
-    // Release lock before I/O to avoid blocking concurrent reads.
-    // Returns a registration epoch used for safe rollback in Phase 2.
-    let reg_epoch = {
-        let mut engine = state.flow.flow_engine.write().await;
-
-        if engine.get(&flow.name).is_some() {
+    // Phase 1: Persist to store first.
+    // If this fails the engine is untouched; if it succeeds we guarantee
+    // that the flow exists in the store before exposing it via the engine,
+    // eliminating the "engine has it but store does not" race window (S6).
+    match state.admin.store.create_flow(&flow).await {
+        Err(StoreError::DuplicateFlow(_)) => {
             return error_response(
                 StatusCode::CONFLICT,
                 "CONFLICT",
                 &format!("flow '{}' already exists", flow.name),
             );
         }
-
-        // Check gate_path conflict with existing flows
-        if let Some(ref gate_path) = flow.gate_path {
-            if let Some(existing) = engine.find_by_gate_path(gate_path, &flow.name) {
-                return error_response(
-                    StatusCode::CONFLICT,
-                    "CONFLICT",
-                    &format!(
-                        "gate_path '{}' is already used by flow '{}'",
-                        gate_path, existing
-                    ),
-                );
-            }
-        }
-
-        match engine.register(flow.clone()) {
-            Ok(epoch) => epoch,
-            Err(e) => return error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string()),
-        }
-    }; // Write lock released here — concurrent reads are no longer blocked.
-
-    // Phase 2: Persist to store without holding engine lock.
-    // On failure, rollback using the epoch so we only remove the flow we
-    // registered (not a different flow that may have registered with the
-    // same name after our lock release).
-    match state.admin.store.create_flow(&flow).await {
-        Ok(()) => (StatusCode::CREATED, Json(serde_json::json!(flow))).into_response(),
-        Err(StoreError::DuplicateFlow(_)) => {
-            state
-                .flow
-                .flow_engine
-                .write()
-                .await
-                .remove_if_epoch_matches(&flow.name, reg_epoch);
-            error_response(
-                StatusCode::CONFLICT,
-                "CONFLICT",
-                &format!("flow '{}' already exists", flow.name),
-            )
-        }
         Err(e) => {
-            state
-                .flow
-                .flow_engine
-                .write()
-                .await
-                .remove_if_epoch_matches(&flow.name, reg_epoch);
-            error_response(
+            return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL",
                 &e.to_string(),
+            );
+        }
+        Ok(()) => {}
+    }
+
+    // Phase 2: Register in engine under write lock.
+    // The flow is already persisted, so there is no rollback race.
+    let mut engine = state.flow.flow_engine.write().await;
+
+    /// Rollback the store write and log any error.
+    async fn rollback_store(store: &rune_store::RuneStore, flow_name: &str, reason: &str) {
+        if let Err(e) = store.delete_flow(flow_name).await {
+            tracing::error!(flow = %flow_name, error = %e, "failed to rollback store after {}", reason);
+        }
+    }
+
+    // Check name conflict with existing flows (including built-in flows that
+    // have no store row, e.g. "pipeline" registered in main.rs).
+    if engine.get(&flow.name).is_some() {
+        rollback_store(&state.admin.store, &flow.name, "engine name conflict").await;
+        return error_response(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            &format!("flow '{}' already exists", flow.name),
+        );
+    }
+
+    // Check gate_path conflict with existing flows
+    if let Some(ref gate_path) = flow.gate_path {
+        if let Some(existing) = engine.find_by_gate_path(gate_path, &flow.name) {
+            rollback_store(&state.admin.store, &flow.name, "gate_path conflict").await;
+            return error_response(
+                StatusCode::CONFLICT,
+                "CONFLICT",
+                &format!(
+                    "gate_path '{}' is already used by flow '{}'",
+                    gate_path, existing
+                ),
+            );
+        }
+    }
+
+    match engine.register(flow.clone()) {
+        Ok(_) => (StatusCode::CREATED, Json(serde_json::json!(flow))).into_response(),
+        Err(e) => {
+            rollback_store(
+                &state.admin.store,
+                &flow.name,
+                "engine registration failure",
             )
+            .await;
+            error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string())
         }
     }
 }
@@ -362,10 +366,7 @@ pub async fn run_flow_async(
     request_id: String,
 ) -> axum::response::Response {
     let task_id = request_id.clone();
-    let input_str = match std::str::from_utf8(&body) {
-        Ok(s) => s.to_string(),
-        Err(_) => format!("hex:{}", hex::encode(&body)),
-    };
+    let input_str = crate::handlers::encode_binary_output(&body);
 
     // Insert task and mark it Running atomically.  A single transaction
     // prevents a crash between the two steps from leaving the task in
@@ -492,9 +493,12 @@ pub async fn run_flow_stream(
     let fwd_tx = event_tx.clone();
     // Also clone for the disconnect-detection task (before fwd_tx is moved below).
     let dc_tx = fwd_tx.clone();
+    // Clone for the panic monitor task.
+    let panic_event_tx = event_tx.clone();
 
-    // Main execution task — keep JoinHandle so the DC task can select! on completion.
+    // Main execution task — keep JoinHandle so the panic monitor can detect panics.
     let runner = runner.with_progress(progress_tx);
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let exec_handle = tokio::spawn(async move {
         match runner
             .execute_flow_with_context(&flow_def, body, trace_context.clone(), Some(request_id))
@@ -527,8 +531,23 @@ pub async fn run_flow_stream(
                     .await;
             }
         }
+        let _ = done_tx.send(());
     });
     let exec_abort = exec_handle.abort_handle();
+
+    // Panic monitor: if the exec task panics, the SSE stream would otherwise
+    // silently end without any error event. Detect the panic and send an
+    // explicit error event so the client knows something went wrong.
+    tokio::spawn(async move {
+        if let Err(e) = exec_handle.await {
+            if e.is_panic() {
+                tracing::error!("stream flow task panicked");
+                let _ = panic_event_tx
+                    .send(Ok(Event::default().event("error").data("internal panic")))
+                    .await;
+            }
+        }
+    });
 
     // Disconnect detection: abort exec when the client disconnects (dc_tx.closed() fires).
     // Uses select! so this task exits naturally when exec completes normally — avoiding the
@@ -536,7 +555,7 @@ pub async fn run_flow_stream(
     // senders to drop.
     tokio::spawn(async move {
         tokio::select! {
-            _ = exec_handle => {}           // exec finished; exit without aborting
+            _ = done_rx => {}           // exec finished; exit without aborting
             _ = dc_tx.closed() => { exec_abort.abort(); }  // client disconnected; abort exec
         }
     });

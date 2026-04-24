@@ -280,9 +280,11 @@ fn build_guarantee_state() -> (GateState, Arc<Relay>, Arc<RuneStore>) {
 
     let state = GateState {
         auth: gate::AuthState {
+            trust_proxy: None,
             key_verifier,
             auth_enabled: false,
             exempt_routes: Arc::new(vec!["/health".to_string()]),
+            audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
         },
         rune: gate::RuneState {
             relay: Arc::clone(&relay),

@@ -139,6 +139,8 @@ impl RetryInvoker {
     }
 
     fn backoff_delay_ms(&self, attempt: u32) -> u64 {
+        // attempt=1 (first retry after the initial failure) → exponent=0 → base_delay*1.
+        // .max(0) guards against u32→i32 wrap-around if attempt ever exceeds i32::MAX.
         let exponent = (attempt.saturating_sub(1)) as i32;
         let base_delay = (self.config.base_delay_ms as f64)
             * self.config.backoff_multiplier.powi(exponent.max(0));
@@ -324,6 +326,7 @@ mod tests {
                 success_threshold: 1,
                 reset_timeout_ms: 1,
                 half_open_max_permits: 1,
+                ..Default::default()
             },
         }
     }
@@ -491,6 +494,7 @@ mod tests {
                 success_threshold: 1,
                 reset_timeout_ms: 60_000,
                 half_open_max_permits: 1,
+                ..Default::default()
             },
             ..retry_config()
         };
@@ -523,6 +527,7 @@ mod tests {
                 success_threshold: 1,
                 reset_timeout_ms: 60_000,
                 half_open_max_permits: 1,
+                ..Default::default()
             },
             ..retry_config()
         };
@@ -570,6 +575,7 @@ mod tests {
                 success_threshold: 1,
                 reset_timeout_ms: 60_000,
                 half_open_max_permits: 1,
+                ..Default::default()
             },
             ..retry_config()
         };
@@ -608,6 +614,7 @@ mod tests {
                 success_threshold: 1,
                 reset_timeout_ms: 60_000,
                 half_open_max_permits: 1,
+                ..Default::default()
             },
             ..retry_config()
         };
@@ -1040,6 +1047,7 @@ mod tests {
             success_threshold: 1,
             reset_timeout_ms: 1,
             half_open_max_permits: 1,
+            ..Default::default()
         };
         let breaker = Arc::new(CircuitBreaker::new("test-caster".into(), config.clone()));
         // Trip the breaker

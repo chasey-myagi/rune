@@ -1,6 +1,5 @@
 use crate::models::{ApiKey, KeyType};
 use dashmap::DashMap;
-use rand::Rng;
 use std::time::{Duration, Instant};
 
 struct CacheEntry {
@@ -95,57 +94,34 @@ impl KeyCache {
         self.negatives
             .retain(|_, inserted_at| inserted_at.elapsed() <= negative_ttl);
 
-        // Phase 2: if still over limit, randomly drop ~25% of entries.
-        // TODO(B8): random eviction can discard hot keys. Replace with an LRU
-        // structure (e.g. `lru` crate or a DashMap + linked-list tombstone
-        // scheme) so that the least-recently-used entries are evicted instead.
+        // Phase 2: if still over limit, evict randomly.
+        // A true LRU (e.g. `lru` crate or a linked-list) would be better,
+        // but random eviction is O(1) and avoids the allocation/sort overhead
+        // of a "sort all keys" approach. See TODO below.
         let total = self.entries.len() + self.negatives.len();
         if total >= self.max_entries {
-            let mut rng = rand::rng();
-            // Keep ~75% — retain returns true to keep, false to drop
-            self.negatives.retain(|_, _| rng.random_ratio(3, 4));
-            // Only trim entries if negatives purge wasn't enough
-            if self.entries.len() + self.negatives.len() >= self.max_entries {
-                self.entries.retain(|_, _| rng.random_ratio(3, 4));
-            }
+            let target = self.max_entries.saturating_sub(1);
 
-            // Phase 3: hard cap — if probabilistic eviction left us over limit,
-            // remove excess items one-by-one (negatives first, then entries).
-            // We target max_entries - 1 to reserve one slot for the insert
-            // that triggered this eviction.
-            let mut over = (self.entries.len() + self.negatives.len())
-                .saturating_sub(self.max_entries.saturating_sub(1));
-            if over > 0 {
-                let neg_keys: Vec<String> = self
-                    .negatives
-                    .iter()
-                    .take(over)
-                    .map(|r| r.key().clone())
-                    .collect();
-                for k in neg_keys {
-                    self.negatives.remove(&k);
-                    over -= 1;
-                    if over == 0 {
-                        break;
-                    }
+            // Random eviction for negatives — O(1) per removal, no allocations.
+            while self.negatives.len() + self.entries.len() > target && !self.negatives.is_empty() {
+                if let Some(entry) = self.negatives.iter().next() {
+                    let key = entry.key().clone();
+                    drop(entry);
+                    self.negatives.remove(&key);
                 }
             }
-            if over > 0 {
-                let ent_keys: Vec<String> = self
-                    .entries
-                    .iter()
-                    .take(over)
-                    .map(|r| r.key().clone())
-                    .collect();
-                for k in ent_keys {
-                    self.entries.remove(&k);
-                    over -= 1;
-                    if over == 0 {
-                        break;
-                    }
+
+            // Random eviction for entries.
+            while self.negatives.len() + self.entries.len() > target && !self.entries.is_empty() {
+                if let Some(entry) = self.entries.iter().next() {
+                    let key = entry.key().clone();
+                    drop(entry);
+                    self.entries.remove(&key);
                 }
             }
         }
+        // TODO: replace random eviction with a real LRU (e.g. `lru` crate)
+        // if cache hit ratio becomes a concern.
     }
 
     /// Remove all cache entries for a specific key hash (across all key types).

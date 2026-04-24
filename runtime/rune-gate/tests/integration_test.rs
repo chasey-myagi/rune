@@ -55,9 +55,11 @@ fn make_state(auth_enabled: bool) -> GateState {
     )));
     GateState {
         auth: gate::AuthState {
+            trust_proxy: None,
             key_verifier,
             auth_enabled,
             exempt_routes: Arc::new(vec!["/health".to_string()]),
+            audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
         },
         rune: gate::RuneState {
             relay,
@@ -909,9 +911,11 @@ async fn test_mixed_sync_and_stream_runes() {
     )));
     let state = GateState {
         auth: gate::AuthState {
+            trust_proxy: None,
             key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
             auth_enabled: false,
             exempt_routes: Arc::new(vec!["/health".to_string()]),
+            audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
         },
         rune: gate::RuneState {
             relay,
@@ -1147,9 +1151,11 @@ async fn test_stats_accumulate_across_runes() {
     )));
     let state = GateState {
         auth: gate::AuthState {
+            trust_proxy: None,
             key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
             auth_enabled: false,
             exempt_routes: Arc::new(vec!["/health".to_string()]),
+            audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
         },
         rune: gate::RuneState {
             relay,

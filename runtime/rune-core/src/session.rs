@@ -604,7 +604,7 @@ impl SessionManager {
         if ctx.is_active() {
             tracing::warn!(
                 caster_id = %ctx.caster_id.as_deref().unwrap_or("?"),
-                "duplicate CasterAttach on active session — ignoring"
+                "duplicate CasterAttach on active session — rejecting but keeping session alive"
             );
             // Send a reject ACK so the Caster can distinguish "server rejected"
             // from a silent network drop (important for SDK reconnect logic).
@@ -616,13 +616,47 @@ impl SessionManager {
                     protocol_version: PROTOCOL_VERSION.to_string(),
                 })),
             };
-            let _ = ctx.outbound_tx.send(ack).await;
-            return false;
+            if ctx.outbound_tx.send(ack).await.is_err() {
+                tracing::warn!(
+                    caster_id = %ctx.caster_id.as_deref().unwrap_or("?"),
+                    "failed to send duplicate-attach reject ACK — stream already closed"
+                );
+            }
+            // Return true so the session loop continues; the existing active session
+            // must NOT be torn down by a duplicate attach from the same connection.
+            return true;
         }
 
         let id = attach.caster_id.clone();
         let max_conc = attach.max_concurrent;
         let role = CasterRole::from_proto(&attach.role);
+
+        // B3: Verify caster's protocol version BEFORE any state mutation.
+        // Empty/missing is treated as backward-compatible (old casters that
+        // don't send this field yet).
+        if !attach.protocol_version.is_empty() && attach.protocol_version != PROTOCOL_VERSION {
+            tracing::warn!(
+                caster_id = %id,
+                caster_version = %attach.protocol_version,
+                server_version = %PROTOCOL_VERSION,
+                "caster protocol version mismatch — rejecting attach"
+            );
+            let ack = SessionMessage {
+                payload: Some(session_message::Payload::AttachAck(AttachAck {
+                    accepted: false,
+                    reason: format!(
+                        "protocol version mismatch: caster={}, server={}",
+                        attach.protocol_version, PROTOCOL_VERSION
+                    ),
+                    supported_features: vec![],
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                })),
+            };
+            if ctx.outbound_tx.send(ack).await.is_err() {
+                tracing::warn!(caster_id = %id, "failed to send reject ACK — stream already closed");
+            }
+            return false;
+        }
 
         // ── Auth check ──
         if !self.dev_mode {
@@ -756,10 +790,6 @@ impl SessionManager {
         ctx.state = SessionState::Active;
         ctx.caster_id = Some(id);
 
-        // TODO(B3): `CasterAttach` proto message has no `protocol_version` field,
-        // so we cannot verify the client's protocol version at attach time.
-        // When the proto is next bumped, add `string protocol_version = 7` to
-        // `CasterAttach` and reject mismatches here (log + send accepted=false).
         let ack = SessionMessage {
             payload: Some(session_message::Payload::AttachAck(AttachAck {
                 accepted: true,
@@ -772,6 +802,11 @@ impl SessionManager {
             })),
         };
         if ctx.outbound_tx.send(ack).await.is_err() {
+            // Rollback: the attach was not successfully acknowledged.
+            // Revert state so that is_active() remains false and subsequent
+            // retry / cleanup paths see a consistent session.
+            ctx.state = SessionState::Attaching;
+            ctx.caster_id = None;
             return false;
         }
         // Reset heartbeat timer after a successful attach so that the heartbeat
@@ -783,6 +818,15 @@ impl SessionManager {
 
     async fn handle_execute_result(ctx: &SessionContext, result: rune_proto::ExecuteResult) {
         let req_id = result.request_id.clone();
+        // B2: FileAttachment is defined in proto but not implemented in the runtime.
+        // Warn when a caster sends attachments so the operator knows they are dropped.
+        if !result.attachments.is_empty() {
+            tracing::warn!(
+                request_id = %req_id,
+                count = result.attachments.len(),
+                "ExecuteResult contains attachments which are not yet supported — attachments ignored"
+            );
+        }
         if let Some((_, p)) = ctx.pending.remove(&req_id) {
             ctx.request_index.remove(&req_id);
             abort_timeout_handle(&ctx.timeout_handles, &req_id);
@@ -1037,6 +1081,7 @@ impl SessionManager {
                     input: input.to_vec(),
                     context,
                     timeout_ms: safe_timeout_ms(timeout),
+                    attachments: vec![],
                 })),
             };
 
@@ -1107,6 +1152,7 @@ impl SessionManager {
                     input: input.to_vec(),
                     context,
                     timeout_ms: safe_timeout_ms(timeout),
+                    attachments: vec![],
                 })),
             };
 
@@ -1130,18 +1176,25 @@ impl SessionManager {
     }
 
     /// Cancel a request by its request_id using the O(1) reverse index.
-    /// Returns true if the request was found in the index (the downstream cancel
-    /// call may still be a no-op if the session was cleaned up in the narrow
-    /// window between `request_index.get` and `cancel`). The `cancel` function
-    /// acts as the authoritative gate, so correctness holds regardless.
-    pub async fn cancel_by_request_id(&self, request_id: &str, reason: &str) -> bool {
+    ///
+    /// - `Ok(true)`: the request was found and the cancel message was delivered.
+    /// - `Ok(false)`: the request_id was not found in the index (already completed
+    ///   or never existed).
+    /// - `Err(RuneError::Unavailable)`: the request was found but the caster's
+    ///   outbound channel is closed (session disconnected between index lookup
+    ///   and send).
+    pub async fn cancel_by_request_id(
+        &self,
+        request_id: &str,
+        reason: &str,
+    ) -> Result<bool, RuneError> {
         if let Some(entry) = self.request_index.get(request_id) {
             let caster_id = entry.value().clone();
             drop(entry);
-            let _ = self.cancel(&caster_id, request_id, reason).await;
-            return true;
+            self.cancel(&caster_id, request_id, reason).await?;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     pub async fn cancel(
@@ -1171,14 +1224,16 @@ impl SessionManager {
                 reason: reason.to_string(),
             })),
         };
-        if session.outbound.send(msg).await.is_err() {
+        let outbound = session.outbound.clone();
+        drop(session);
+        outbound.send(msg).await.map_err(|_| {
             tracing::warn!(
                 caster_id = %caster_id,
                 request_id = %request_id,
                 "cancel message not delivered — caster channel closed"
             );
-        }
-        Ok(())
+            RuneError::Unavailable
+        })
     }
 
     pub async fn send_message(
@@ -1634,7 +1689,10 @@ mod tests {
         let cancelled = mgr
             .cancel_by_request_id("cross-req-1", "user cancelled")
             .await;
-        assert!(cancelled, "cancel_by_request_id should find the request");
+        assert!(
+            cancelled.unwrap(),
+            "cancel_by_request_id should find the request"
+        );
 
         // Verify the request was resolved with an error
         let result = handle.await.unwrap();
@@ -1649,7 +1707,7 @@ mod tests {
         let mgr = default_session_manager();
         let cancelled = mgr.cancel_by_request_id("does-not-exist", "reason").await;
         assert!(
-            !cancelled,
+            !cancelled.unwrap(),
             "cancel should return false for non-existent request"
         );
     }
@@ -1945,7 +2003,7 @@ mod tests {
 
         // Cancel only req-1 (on caster-1)
         let cancelled = mgr.cancel_by_request_id("req-1", "cancelled by test").await;
-        assert!(cancelled);
+        assert!(cancelled.unwrap());
 
         // caster-1's request should be cancelled
         assert!(

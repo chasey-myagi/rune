@@ -86,9 +86,11 @@ mod tests {
 
         GateState {
             auth: AuthState {
+                trust_proxy: None,
                 key_verifier,
                 auth_enabled: false,
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
+                audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             },
             rune: RuneState {
                 relay,
@@ -1045,9 +1047,11 @@ mod tests {
         )));
         let state = GateState {
             auth: AuthState {
+                trust_proxy: None,
                 key_verifier,
                 auth_enabled: false,
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
+                audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             },
             rune: RuneState {
                 relay,
@@ -1430,9 +1434,11 @@ mod tests {
         )));
         let state = GateState {
             auth: AuthState {
+                trust_proxy: None,
                 key_verifier,
                 auth_enabled: false,
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
+                audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             },
             rune: RuneState {
                 relay,
@@ -1995,9 +2001,11 @@ mod tests {
         )));
         let state = GateState {
             auth: AuthState {
+                trust_proxy: None,
                 key_verifier,
                 auth_enabled: false,
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
+                audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             },
             rune: RuneState {
                 relay,
@@ -2096,9 +2104,11 @@ mod tests {
         )));
         let state = GateState {
             auth: AuthState {
+                trust_proxy: None,
                 key_verifier,
                 auth_enabled: false,
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
+                audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             },
             rune: RuneState {
                 relay,
@@ -2188,9 +2198,11 @@ mod tests {
         )));
         let state = GateState {
             auth: AuthState {
+                trust_proxy: None,
                 key_verifier,
                 auth_enabled: false,
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
+                audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             },
             rune: RuneState {
                 relay,
@@ -4103,9 +4115,11 @@ mod tests {
         )));
         GateState {
             auth: AuthState {
+                trust_proxy: None,
                 key_verifier,
                 auth_enabled: false,
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
+                audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             },
             rune: RuneState {
                 relay,
@@ -6065,9 +6079,11 @@ mod tests {
 
         let state = GateState {
             auth: AuthState {
+                trust_proxy: None,
                 key_verifier,
                 auth_enabled: !dev_mode,
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
+                audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             },
             rune: RuneState {
                 relay,
@@ -6167,9 +6183,11 @@ mod tests {
         (
             GateState {
                 auth: AuthState {
+                    trust_proxy: None,
                     key_verifier: Arc::new(NoopVerifier),
                     auth_enabled: false,
                     exempt_routes: Arc::new(vec!["/health".to_string()]),
+                    audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
                 },
                 rune: RuneState {
                     relay,
@@ -6675,9 +6693,11 @@ mod tests {
 
         let state = GateState {
             auth: AuthState {
+                trust_proxy: None,
                 key_verifier,
                 auth_enabled: false,
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
+                audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             },
             rune: RuneState {
                 relay,
@@ -6776,9 +6796,11 @@ mod tests {
 
         let state = GateState {
             auth: AuthState {
+                trust_proxy: None,
                 key_verifier,
                 auth_enabled: false,
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
+                audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             },
             rune: RuneState {
                 relay,
@@ -7526,9 +7548,11 @@ mod tests {
 
         let state = GateState {
             auth: AuthState {
+                trust_proxy: None,
                 key_verifier,
                 auth_enabled: false,
                 exempt_routes: Arc::new(vec!["/health".to_string()]),
+                audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             },
             rune: RuneState {
                 relay,
@@ -8276,7 +8300,7 @@ mod tests {
             .await;
 
         // Wait for the file to expire
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
 
         // The first store() triggered eviction (last_eviction_secs was 0, epoch was just created).
         // But now, the eviction interval hasn't elapsed yet (3600s), so subsequent store()
@@ -8323,7 +8347,7 @@ mod tests {
         assert_eq!(broker.entry_count(), 1);
 
         // Wait for it to expire
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
 
         // Next store() should trigger eviction because interval is 0
         let _id2 = broker

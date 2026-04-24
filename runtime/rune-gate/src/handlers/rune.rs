@@ -513,7 +513,7 @@ pub async fn sync_execute_multipart(
                 match serde_json::from_slice::<serde_json::Value>(&output) {
                     Ok(json) => json,
                     Err(_) => {
-                        serde_json::json!({"output": format!("hex:{}", hex::encode(&output))})
+                        serde_json::json!({"output": crate::handlers::encode_binary_output(&output)})
                     }
                 }
             };
@@ -573,14 +573,11 @@ pub async fn stream_execute(
                             output_size += data.len() as i64;
                             // Non-UTF-8 binary output is encoded as "hex:<lowercase-hex>".
                             // Clients should check for this prefix to recover the raw bytes.
-                            let event = Event::default().event("message").data(
-                                match std::str::from_utf8(&data) {
-                                    Ok(s) => s.to_owned(),
-                                    Err(_) => format!("hex:{}", hex::encode(&data)),
-                                },
-                            );
+                            let event = Event::default()
+                                .event("message")
+                                .data(crate::handlers::encode_binary_output(&data));
                             if tx.send(Ok(event)).await.is_err() {
-                                state_clone
+                                let _ = state_clone
                                     .rune
                                     .session_mgr
                                     .cancel_by_request_id(&req_id, "SSE client disconnected")
@@ -648,10 +645,7 @@ pub async fn async_execute(
     let trace_context = ctx.context.clone();
     let task_id = request_id.clone();
     let rune_name = ctx.rune_name.clone();
-    let input_str = match std::str::from_utf8(&body) {
-        Ok(s) => s.to_string(),
-        Err(_) => format!("hex:{}", hex::encode(&body)),
-    };
+    let input_str = crate::handlers::encode_binary_output(&body);
 
     // Insert task and mark it Running atomically.  A single transaction
     // prevents a crash between the two steps from leaving the task in
@@ -685,10 +679,7 @@ pub async fn async_execute(
         // Atomically complete the task only if it has not been cancelled (CAS).
         let (status, output_size) = match result {
             Ok(ref output) => {
-                let output_str = match std::str::from_utf8(output) {
-                    Ok(s) => s.to_string(),
-                    Err(_) => format!("hex:{}", hex::encode(output)),
-                };
+                let output_str = crate::handlers::encode_binary_output(output);
                 let size = output.len() as i64;
                 let updated = store
                     .complete_task_if_not_cancelled(

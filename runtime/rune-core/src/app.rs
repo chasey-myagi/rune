@@ -97,29 +97,32 @@ impl App {
         }
     }
 
-    pub fn rune(&mut self, config: RuneConfig, handler: RuneHandler) -> &mut Self {
-        if let Err(e) = self
-            .relay
+    pub fn rune(
+        &mut self,
+        config: RuneConfig,
+        handler: RuneHandler,
+    ) -> Result<&mut Self, anyhow::Error> {
+        self.relay
             .register(config, Arc::new(LocalInvoker::new(handler)), None)
-        {
-            tracing::error!(error = %e, "route conflict in local rune registration");
-        }
-        self
+            .map_err(|e| anyhow::anyhow!("route conflict in local rune registration: {e}"))?;
+        Ok(self)
     }
 
     pub fn stream_rune(
         &mut self,
         config: RuneConfig,
         handler: impl StreamRuneHandler,
-    ) -> &mut Self {
-        if let Err(e) = self.relay.register(
-            config,
-            Arc::new(LocalStreamInvoker::new(Arc::new(handler))),
-            None,
-        ) {
-            tracing::error!(error = %e, "route conflict in local stream rune registration");
-        }
-        self
+    ) -> Result<&mut Self, anyhow::Error> {
+        self.relay
+            .register(
+                config,
+                Arc::new(LocalStreamInvoker::new(Arc::new(handler))),
+                None,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!("route conflict in local stream rune registration: {e}")
+            })?;
+        Ok(self)
     }
 
     pub fn set_resolver(&mut self, r: impl Resolver + 'static) -> &mut Self {
@@ -130,6 +133,33 @@ impl App {
     /// Start the gRPC server and block until shutdown signal (SIGINT / ctrl-c).
     pub async fn run(self) -> anyhow::Result<()> {
         let grpc_addr = self.config.grpc_addr();
+
+        // Periodic cleanup of idle circuit breakers to prevent unbounded
+        // memory growth from transient caster IDs.
+        let (cb_shutdown_tx, mut cb_shutdown_rx) = tokio::sync::watch::channel(false);
+        let cb_handle = if let Some(cb_registry) = self.relay.circuit_breaker_registry() {
+            let cleanup_interval = std::time::Duration::from_secs(
+                self.config.retry.circuit_breaker.cleanup_interval_secs,
+            );
+            let cleanup_idle = std::time::Duration::from_secs(
+                self.config.retry.circuit_breaker.cleanup_idle_timeout_secs,
+            );
+            Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(cleanup_interval);
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            cb_registry.cleanup_stale(cleanup_idle);
+                            tracing::debug!("circuit breaker registry stale cleanup completed");
+                        }
+                        _ = cb_shutdown_rx.changed() => break,
+                    }
+                }
+                tracing::debug!("circuit breaker cleanup task exited");
+            }))
+        } else {
+            None
+        };
 
         let grpc_service = RuneGrpcService {
             relay: Arc::clone(&self.relay),
@@ -144,7 +174,13 @@ impl App {
                 #[cfg(unix)]
                 {
                     use tokio::signal::unix::{signal, SignalKind};
-                    let mut sigterm = signal(SignalKind::terminate()).ok();
+                    let mut sigterm = match signal(SignalKind::terminate()) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            tracing::warn!("failed to register SIGTERM handler: {}", e);
+                            None
+                        }
+                    };
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => {}
                         _ = async {
@@ -159,8 +195,19 @@ impl App {
                 #[cfg(not(unix))]
                 tokio::signal::ctrl_c().await.ok();
                 tracing::info!("shutdown signal received");
+                let _ = cb_shutdown_tx.send(true);
             })
             .await?;
+
+        // Gracefully wait for the circuit breaker cleanup task to exit.
+        if let Some(h) = cb_handle {
+            if tokio::time::timeout(std::time::Duration::from_secs(5), h)
+                .await
+                .is_err()
+            {
+                tracing::warn!("circuit breaker cleanup task did not shut down within 5s");
+            }
+        }
 
         Ok(())
     }
@@ -294,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn app_register_rune_resolvable() {
         let mut app = App::new();
-        app.rune(echo_config("echo"), echo_handler());
+        app.rune(echo_config("echo"), echo_handler()).unwrap();
 
         let resolver = RoundRobinResolver::new();
         let invoker = app
@@ -311,7 +358,7 @@ mod tests {
     #[test]
     fn app_register_rune_appears_in_list() {
         let mut app = App::new();
-        app.rune(echo_config("my_rune"), echo_handler());
+        app.rune(echo_config("my_rune"), echo_handler()).unwrap();
         let list = app.relay.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].0, "my_rune");
@@ -325,9 +372,9 @@ mod tests {
     #[test]
     fn app_register_multiple_runes_all_listed() {
         let mut app = App::new();
-        app.rune(echo_config("rune_a"), echo_handler());
-        app.rune(echo_config("rune_b"), echo_handler());
-        app.rune(echo_config("rune_c"), echo_handler());
+        app.rune(echo_config("rune_a"), echo_handler()).unwrap();
+        app.rune(echo_config("rune_b"), echo_handler()).unwrap();
+        app.rune(echo_config("rune_c"), echo_handler()).unwrap();
         let list = app.relay.list();
         assert_eq!(list.len(), 3);
         let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
@@ -364,7 +411,7 @@ mod tests {
             supports_stream: true,
             ..echo_config("streamer")
         };
-        app.stream_rune(cfg, TestStreamHandler);
+        app.stream_rune(cfg, TestStreamHandler).unwrap();
 
         let resolver = RoundRobinResolver::new();
         let invoker = app
@@ -394,7 +441,7 @@ mod tests {
             }),
             ..echo_config("gated")
         };
-        app.rune(cfg, echo_handler());
+        app.rune(cfg, echo_handler()).unwrap();
         let list = app.relay.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].0, "gated");
@@ -413,7 +460,7 @@ mod tests {
             output_schema: Some(r#"{"type":"string"}"#.into()),
             ..echo_config("schema_rune")
         };
-        app.rune(cfg, echo_handler());
+        app.rune(cfg, echo_handler()).unwrap();
 
         // Verify the rune is registered and works
         let resolver = RoundRobinResolver::new();
@@ -434,8 +481,8 @@ mod tests {
         let mut app = App::new();
         let h1 = make_handler(|_ctx, _input| async { Ok(Bytes::from("v1")) });
         let h2 = make_handler(|_ctx, _input| async { Ok(Bytes::from("v2")) });
-        app.rune(echo_config("dup"), h1);
-        app.rune(echo_config("dup"), h2);
+        app.rune(echo_config("dup"), h1).unwrap();
+        app.rune(echo_config("dup"), h2).unwrap();
 
         // Both should be registered as candidates
         let entries = app.relay.find("dup").unwrap();
@@ -449,7 +496,7 @@ mod tests {
     #[test]
     fn app_build_returns_complete_running_app() {
         let mut app = App::new();
-        app.rune(echo_config("built_rune"), echo_handler());
+        app.rune(echo_config("built_rune"), echo_handler()).unwrap();
         let running = app.build();
 
         // Verify all components are present
@@ -467,7 +514,7 @@ mod tests {
     #[tokio::test]
     async fn app_set_resolver_replaces_default() {
         let mut app = App::new();
-        app.rune(echo_config("res_rune"), echo_handler());
+        app.rune(echo_config("res_rune"), echo_handler()).unwrap();
 
         // Use a custom resolver that always picks the first
         struct FirstResolver;
@@ -505,7 +552,9 @@ mod tests {
     fn app_builder_chaining() {
         let mut app = App::new();
         app.rune(echo_config("a"), echo_handler())
-            .rune(echo_config("b"), echo_handler());
+            .unwrap()
+            .rune(echo_config("b"), echo_handler())
+            .unwrap();
 
         let list = app.relay.list();
         assert_eq!(list.len(), 2);
@@ -516,7 +565,7 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn app_register_conflicting_gate_paths_logs_error() {
+    fn app_register_conflicting_gate_paths_panics() {
         let mut app = App::new();
         let cfg1 = RuneConfig {
             gate: Some(GateConfig {
@@ -532,10 +581,19 @@ mod tests {
             }),
             ..echo_config("rune_y")
         };
-        app.rune(cfg1, echo_handler());
-        app.rune(cfg2, echo_handler()); // logs error, does not panic
+        app.rune(cfg1, echo_handler()).unwrap();
 
-        // Only rune_x was registered (rune_y failed with conflict)
+        // A route conflict is a programming error — the process should panic
+        // so the mistake is caught at startup, not silently ignored.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.rune(cfg2, echo_handler()).unwrap();
+        }));
+        assert!(
+            result.is_err(),
+            "expected panic on route conflict, but it did not panic"
+        );
+
+        // Only rune_x was registered (rune_y failed with conflict before panic)
         let list = app.relay.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].0, "rune_x");

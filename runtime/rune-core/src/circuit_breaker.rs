@@ -36,10 +36,12 @@ struct CBInner {
     consecutive_successes: u32,
     half_open_permits: u32,
     opened_at: Option<Instant>,
+    last_activity_at: Instant,
 }
 
 impl CircuitBreaker {
     pub fn new(caster_id: String, config: CircuitBreakerConfig) -> Self {
+        let now = Instant::now();
         Self {
             inner: Mutex::new(CBInner {
                 state: CBState::Closed,
@@ -47,6 +49,7 @@ impl CircuitBreaker {
                 consecutive_successes: 0,
                 half_open_permits: 0,
                 opened_at: None,
+                last_activity_at: now,
             }),
             config,
             caster_id,
@@ -59,6 +62,7 @@ impl CircuitBreaker {
         }
 
         let mut inner = self.inner.lock();
+        inner.last_activity_at = Instant::now();
         match inner.state {
             CBState::Closed => Ok(CBPermit::new(Arc::clone(self), false)),
             CBState::Open => {
@@ -89,6 +93,7 @@ impl CircuitBreaker {
         }
 
         let mut inner = self.inner.lock();
+        inner.last_activity_at = Instant::now();
         match inner.state {
             CBState::Closed => {
                 inner.consecutive_failures = 0;
@@ -113,6 +118,7 @@ impl CircuitBreaker {
         }
 
         let mut inner = self.inner.lock();
+        inner.last_activity_at = Instant::now();
         match inner.state {
             CBState::Closed => {
                 inner.consecutive_successes = 0;
@@ -142,6 +148,15 @@ impl CircuitBreaker {
                 .opened_at
                 .map(|opened_at| opened_at.elapsed().as_millis()),
         }
+    }
+
+    /// Returns true if the breaker has been idle for longer than `max_idle`.
+    /// All states (Closed, Open, HalfOpen) are eligible for cleanup — a zombie
+    /// breaker that has not seen any activity for hours should not keep eating
+    /// memory regardless of its state.
+    pub fn is_stale(&self, max_idle: Duration) -> bool {
+        let inner = self.inner.lock();
+        inner.last_activity_at.elapsed() > max_idle
     }
 
     fn take_half_open_permit(self: &Arc<Self>, inner: &mut CBInner) -> Result<CBPermit, RuneError> {
@@ -225,6 +240,14 @@ impl CircuitBreakerRegistry {
         self.breakers.remove(caster_id);
     }
 
+    /// Remove breakers that have been idle for longer than `max_idle` and are
+    /// not currently Open. Prevents unbounded memory growth when casters use
+    /// transient IDs or reconnect frequently.
+    pub fn cleanup_stale(&self, max_idle: Duration) {
+        self.breakers
+            .retain(|_, breaker| !breaker.is_stale(max_idle));
+    }
+
     pub fn states(&self) -> Vec<CircuitBreakerSnapshot> {
         let mut states: Vec<_> = self
             .breakers
@@ -247,6 +270,7 @@ mod tests {
             success_threshold: 2,
             reset_timeout_ms: 5,
             half_open_max_permits: 1,
+            ..Default::default()
         }
     }
 

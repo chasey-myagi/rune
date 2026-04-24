@@ -4,6 +4,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use rune_core::rune::RuneError;
 use rune_store::TaskStatus;
 
 use crate::error::error_response;
@@ -51,54 +52,120 @@ pub async fn get_task(State(state): State<GateState>, Path(id): Path<String>) ->
     }
 }
 
+/// Helper: update store to Cancelled and return the appropriate response.
+async fn mark_cancelled_in_store(
+    store: &rune_store::RuneStore,
+    id: &str,
+    note: Option<&str>,
+) -> axum::response::Response {
+    if let Err(e) = store
+        .update_task_status(id, TaskStatus::Cancelled, None, Some("cancelled by user"))
+        .await
+    {
+        tracing::error!("Failed to update task status in store: {}", e);
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL",
+            &format!("store update failed: {}", e),
+        );
+    }
+    let mut body = serde_json::json!({"task_id": id, "status": "cancelled"});
+    if let Some(n) = note {
+        body["note"] = serde_json::json!(n);
+    }
+    (StatusCode::OK, Json(body)).into_response()
+}
+
 pub async fn delete_task(
     State(state): State<GateState>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
-    match state.admin.store.get_task(&id).await {
-        Ok(None) => error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "task not found"),
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL",
-            &e.to_string(),
-        ),
-        Ok(Some(task)) => match task.status {
-            TaskStatus::Completed | TaskStatus::Failed => error_response(
-                StatusCode::CONFLICT,
-                "CONFLICT",
-                &format!("task already {}", task.status.as_str()),
-            ),
-            TaskStatus::Cancelled => (
-                StatusCode::OK,
-                Json(serde_json::json!({"task_id": id, "status": "cancelled"})),
+) -> axum::response::Response {
+    let task = match state.admin.store.get_task(&id).await {
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "task not found"),
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL",
+                &e.to_string(),
             )
-                .into_response(),
-            _ => {
-                // running or pending — cancel
-                state
-                    .rune
-                    .session_mgr
-                    .cancel_by_request_id(&id, "cancelled by user")
-                    .await;
-                if let Err(e) = state
-                    .admin
-                    .store
-                    .update_task_status(&id, TaskStatus::Cancelled, None, Some("cancelled by user"))
-                    .await
-                {
-                    tracing::error!("Failed to update task status in store: {}", e);
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "INTERNAL",
-                        &format!("cancel signal sent but store update failed: {}", e),
-                    );
+        }
+        Ok(Some(t)) => t,
+    };
+
+    match task.status {
+        TaskStatus::Completed | TaskStatus::Failed => error_response(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            &format!("task already {}", task.status.as_str()),
+        ),
+        TaskStatus::Cancelled => (
+            StatusCode::OK,
+            Json(serde_json::json!({"task_id": id, "status": "cancelled"})),
+        )
+            .into_response(),
+        _ => {
+            // running or pending — cancel
+            match state
+                .rune
+                .session_mgr
+                .cancel_by_request_id(&id, "cancelled by user")
+                .await
+            {
+                Ok(true) => mark_cancelled_in_store(&state.admin.store, &id, None).await,
+                Ok(false) => {
+                    // Request already gone from index — task likely finished just now.
+                    // Return current state so the client can see what happened.
+                    match state.admin.store.get_task(&id).await {
+                        Ok(Some(task)) => {
+                            (StatusCode::OK, Json(serde_json::json!(task))).into_response()
+                        }
+                        Ok(None) => {
+                            error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "task not found")
+                        }
+                        Err(e) => error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "INTERNAL",
+                            &e.to_string(),
+                        ),
+                    }
                 }
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({"task_id": id, "status": "cancelled"})),
-                )
-                    .into_response()
+                Err(RuneError::Unavailable) => {
+                    // Caster disconnected; we cannot confirm the task is stopped.
+                    // Still mark as cancelled per user intent, but return 202 Accepted.
+                    if let Err(e) = state
+                        .admin
+                        .store
+                        .update_task_status(
+                            &id,
+                            TaskStatus::Cancelled,
+                            None,
+                            Some("cancelled by user"),
+                        )
+                        .await
+                    {
+                        tracing::error!("Failed to update task status in store: {}", e);
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "INTERNAL",
+                            &format!("store update failed: {}", e),
+                        );
+                    }
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(serde_json::json!({
+                            "task_id": id,
+                            "status": "cancelled",
+                            "note": "caster was unavailable"
+                        })),
+                    )
+                        .into_response()
+                }
+                Err(_) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL",
+                    "cancel failed",
+                ),
             }
-        },
+        }
     }
 }

@@ -80,6 +80,7 @@ fn make_attach_msg_with_key(
     SessionMessage {
         payload: Some(session_message::Payload::Attach(CasterAttach {
             caster_id: caster_id.into(),
+            protocol_version: String::new(),
             runes,
             labels: Default::default(),
             max_concurrent,
@@ -122,6 +123,7 @@ fn make_result_msg(request_id: &str, output: &[u8]) -> SessionMessage {
             status: Status::Completed as i32,
             output: output.to_vec(),
             error: None,
+            attachments: vec![],
         })),
     }
 }
@@ -788,6 +790,7 @@ async fn test_fix_timeout_trips_cb_but_never_retries_integration() {
             success_threshold: 1,
             reset_timeout_ms: 60_000,
             half_open_max_permits: 1,
+            ..Default::default()
         },
     };
 

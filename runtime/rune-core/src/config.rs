@@ -117,6 +117,12 @@ pub struct GateServerConfig {
     /// pure in-memory mode (not recommended for production with large files).
     #[serde(default)]
     pub disk_spill_dir: Option<String>,
+    /// CIDR ranges of trusted reverse proxies (e.g. ["10.0.0.0/8", "172.16.0.0/12"]).
+    /// Only when the direct connection originates from one of these ranges will
+    /// the `X-Forwarded-For` header be used for `last_used_ip` audit logging.
+    /// If unset or empty, `X-Forwarded-For` is ignored and `last_used_ip` will be empty.
+    #[serde(default)]
+    pub trust_proxy: Option<Vec<String>>,
 }
 
 impl Default for GateServerConfig {
@@ -125,6 +131,7 @@ impl Default for GateServerConfig {
             cors_origins: Vec::new(),
             max_upload_size_mb: 10,
             disk_spill_dir: None,
+            trust_proxy: None,
         }
     }
 }
@@ -151,6 +158,10 @@ pub struct CircuitBreakerConfig {
     pub success_threshold: u32,
     pub reset_timeout_ms: u64,
     pub half_open_max_permits: u32,
+    /// Interval between periodic stale circuit-breaker cleanups (seconds).
+    pub cleanup_interval_secs: u64,
+    /// Idle timeout after which a circuit breaker is considered stale (seconds).
+    pub cleanup_idle_timeout_secs: u64,
 }
 
 impl Default for CircuitBreakerConfig {
@@ -161,10 +172,18 @@ impl Default for CircuitBreakerConfig {
             success_threshold: 2,
             reset_timeout_ms: 30_000,
             half_open_max_permits: 1,
+            cleanup_interval_secs: 3600,
+            cleanup_idle_timeout_secs: 7200,
         }
     }
 }
 
+/// Retry configuration for the **relay layer** (cross-caster RPC calls).
+///
+/// Controls how many times the runtime retries a failed remote execution
+/// before returning an error to the caller. This is distinct from
+/// `rune_flow::dag::RetryConfig` which governs per-step retries inside
+/// the flow engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RetryConfig {
@@ -306,7 +325,7 @@ pub struct AppConfig {
 impl AppConfig {
     /// Load configuration from a TOML file (accepts any path type).
     ///
-    /// If the file does not exist, returns default configuration.
+    /// If the file does not exist, returns an error.
     /// If the file exists but contains invalid TOML, returns an error.
     pub fn from_path(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())
@@ -348,11 +367,12 @@ impl AppConfig {
             }
         }
 
-        tracing::warn!(
-            "no rune.toml found in current directory or ~/.config/rune/; \
-             starting with built-in defaults — this may not be what you intended in production"
-        );
-        Ok(Self::default())
+        anyhow::bail!(
+            "no configuration file found. \
+             Expected ./rune.toml or ~/.config/rune/rune.toml. \
+             Create one or use --config <path> to specify a file, \
+             or use --dev to start with built-in defaults."
+        )
     }
 
     /// Serialize the current configuration to a TOML string.
@@ -459,7 +479,10 @@ impl AppConfig {
         env_override!("RUNE_SERVER__GRPC_PORT", self.server.grpc_port, u16);
         env_override!("RUNE_SERVER__HTTP_HOST", self.server.http_host, IpAddr);
         env_override!("RUNE_SERVER__HTTP_PORT", self.server.http_port, u16);
-        env_override!("RUNE_SERVER__DEV_MODE", self.server.dev_mode, bool);
+        // dev_mode is a security-sensitive flag. It can be set via
+        // config file or --dev CLI flag, but NOT via environment variable
+        // to prevent accidental production exposure (e.g. a stray env var
+        // in a CI/CD pipeline or container orchestrator).
         env_override!(
             "RUNE_SERVER__DRAIN_TIMEOUT_SECS",
             self.server.drain_timeout_secs,

@@ -100,6 +100,11 @@ impl FileBroker {
     }
 
     /// Create a FileBroker that spills large files into `dir`.
+    ///
+    /// NOTE: The caller is responsible for cleaning up orphaned spill files
+    /// before constructing the broker (e.g. via `spawn_blocking` during startup).
+    /// This avoids double-cleanup when both the startup code and the constructor
+    /// try to clear the same directory.
     pub fn with_disk_dir(dir: PathBuf) -> Self {
         Self {
             files: Arc::new(DashMap::new()),
