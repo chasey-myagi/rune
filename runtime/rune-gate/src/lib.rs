@@ -19,7 +19,7 @@ pub use rate_limit::RateLimitState;
 pub use router::build_router;
 pub use shutdown::ShutdownCoordinator;
 pub use state::{AdminState, AuthState, FlowState, GateState, RuneState};
-pub use state::{CreateKeyRequest, LogQuery, RunParams};
+pub use state::{CreateKeyRequest, LogQuery, RunParams, TrustedCidr};
 
 #[cfg(test)]
 mod gate_tests;

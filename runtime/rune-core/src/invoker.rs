@@ -45,7 +45,10 @@ impl RuneInvoker for LocalInvoker {
         ctx: RuneContext,
         input: Bytes,
     ) -> Result<mpsc::Receiver<Result<Bytes, RuneError>>, RuneError> {
-        // Fallback: call unary handler, wrap result as single-item stream
+        // Intentional fallback: this rune was registered with a unary handler,
+        // not a StreamRuneHandler. Callers routing stream requests here must
+        // accept single-chunk responses.
+        tracing::debug!(rune = %ctx.rune_name, "invoke_stream on unary handler — degrading to single-chunk stream");
         let result = (self.handler)(ctx, input).await;
         let (tx, rx) = mpsc::channel(1);
         let _ = tx.send(result).await;

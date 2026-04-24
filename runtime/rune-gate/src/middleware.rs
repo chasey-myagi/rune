@@ -35,9 +35,8 @@ fn extract_client_ip(req: &axum::extract::Request, trust_proxy: Option<&[Trusted
     };
 
     // Verify the direct connection comes from a trusted proxy range.
-    let is_trusted = remote_addr.map_or(false, |addr| {
-        trust_proxy.iter().any(|cidr| cidr.contains(&addr))
-    });
+    let is_trusted =
+        remote_addr.is_some_and(|addr| trust_proxy.iter().any(|cidr| cidr.contains(&addr)));
 
     if !is_trusted {
         // Connection did not come from a trusted proxy — use direct peer IP
