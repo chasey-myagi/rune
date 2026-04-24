@@ -512,6 +512,8 @@ impl SessionManager {
                 }
             };
 
+            // clippy::collapsible_match false positive: match guard can't contain .await
+            #[allow(clippy::collapsible_match)]
             match msg.payload {
                 Some(session_message::Payload::Attach(attach)) => {
                     if !self.handle_attach(&mut ctx, attach).await {
