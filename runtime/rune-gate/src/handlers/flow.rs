@@ -96,18 +96,26 @@ pub async fn create_flow(
 
     // Phase 2: Register in engine under write lock.
     // The flow is already persisted, so there is no rollback race.
+    // CRITICAL: do NOT await any store operation while holding the engine
+    // write lock — that creates a lock-order inversion with the store lock.
     let mut engine = state.flow.flow_engine.write().await;
 
     /// Rollback the store write and log any error.
     async fn rollback_store(store: &rune_store::RuneStore, flow_name: &str, reason: &str) {
         if let Err(e) = store.delete_flow(flow_name).await {
-            tracing::error!(flow = %flow_name, error = %e, "failed to rollback store after {}", reason);
+            tracing::error!(
+                flow = %flow_name,
+                error = %e,
+                "failed to rollback store after {}",
+                reason
+            );
         }
     }
 
     // Check name conflict with existing flows (including built-in flows that
     // have no store row, e.g. "pipeline" registered in main.rs).
     if engine.get(&flow.name).is_some() {
+        drop(engine);
         rollback_store(&state.admin.store, &flow.name, "engine name conflict").await;
         return error_response(
             StatusCode::CONFLICT,
@@ -119,6 +127,8 @@ pub async fn create_flow(
     // Check gate_path conflict with existing flows
     if let Some(ref gate_path) = flow.gate_path {
         if let Some(existing) = engine.find_by_gate_path(gate_path, &flow.name) {
+            let existing = existing.to_string(); // clone before drop
+            drop(engine);
             rollback_store(&state.admin.store, &flow.name, "gate_path conflict").await;
             return error_response(
                 StatusCode::CONFLICT,
@@ -132,15 +142,20 @@ pub async fn create_flow(
     }
 
     match engine.register(flow.clone()) {
-        Ok(_) => (StatusCode::CREATED, Json(serde_json::json!(flow))).into_response(),
+        Ok(_) => {
+            drop(engine);
+            (StatusCode::CREATED, Json(serde_json::json!(flow))).into_response()
+        }
         Err(e) => {
+            let msg = e.to_string();
+            drop(engine);
             rollback_store(
                 &state.admin.store,
                 &flow.name,
                 "engine registration failure",
             )
             .await;
-            error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &e.to_string())
+            error_response(StatusCode::BAD_REQUEST, "DAG_ERROR", &msg)
         }
     }
 }

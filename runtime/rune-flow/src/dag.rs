@@ -158,8 +158,7 @@ impl RetryConfig {
     /// `retry_on`. Containing `RetryCondition::Any` means "retry all errors".
     /// An empty `retry_on` is treated as "retry all" for backward compatibility.
     pub fn should_retry(&self, e: &RuneError) -> bool {
-        // Backward compat: empty retry_on means "retry all" (same as [Any]).
-        if self.retry_on.is_empty() || self.retry_on.contains(&RetryCondition::Any) {
+        if self.retry_on.contains(&RetryCondition::Any) {
             return true;
         }
         self.retry_on
@@ -599,8 +598,12 @@ fn validate_retry_config(step_name: &str, retry: &Option<RetryConfig>) -> Result
                 reason: "max_attempts must be >= 1 (includes the initial attempt)".into(),
             });
         }
-        // Empty retry_on is accepted for backward compatibility
-        // (it is treated as [Any] by should_retry).
+        if r.retry_on.is_empty() {
+            return Err(DagError::InvalidRetryConfig {
+                step: step_name.to_string(),
+                reason: "retry_on cannot be empty; use ['any'] or omit the field".into(),
+            });
+        }
         if let Some(max_delay) = r.max_delay_ms {
             if max_delay < r.backoff_ms {
                 return Err(DagError::InvalidRetryConfig {

@@ -23,7 +23,7 @@ pub fn error_response_with_id(
                 serde_json::Value::String(request_id.to_string()),
             );
         } else {
-            tracing::warn!(
+            tracing::error!(
                 request_id = %request_id,
                 "error JSON was not an object — request_id could not be inserted"
             );

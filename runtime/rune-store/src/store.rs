@@ -186,20 +186,17 @@ impl RuneStore {
         )?;
 
         // v1.3.1 migration: add audit columns to api_keys.
-        // SQLite does not support IF NOT EXISTS for ALTER TABLE, so we query
-        // PRAGMA table_info to determine which columns already exist. This is
-        // robust across SQLite versions and locales, unlike error-string matching.
-        let existing_cols: std::collections::HashSet<String> = conn
-            .prepare("PRAGMA table_info(api_keys)")?
-            .query_map([], |row| row.get::<_, String>("name"))?
-            .filter_map(|r| r.ok())
-            .collect();
-        if !existing_cols.contains("last_used_at") {
-            conn.execute("ALTER TABLE api_keys ADD COLUMN last_used_at TEXT", [])?;
-        }
-        if !existing_cols.contains("last_used_ip") {
-            conn.execute("ALTER TABLE api_keys ADD COLUMN last_used_ip  TEXT", [])?;
-        }
+        // SQLite 3.37.0+ supports IF NOT EXISTS for ALTER TABLE ADD COLUMN,
+        // which is atomic and safe against concurrent startup (unlike
+        // PRAGMA table_info + conditional ALTER, which is a TOCTOU race).
+        conn.execute(
+            "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS last_used_at TEXT",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS last_used_ip  TEXT",
+            [],
+        )?;
 
         Ok(())
     }
