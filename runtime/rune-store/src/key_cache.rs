@@ -94,15 +94,15 @@ impl KeyCache {
         self.negatives
             .retain(|_, inserted_at| inserted_at.elapsed() <= negative_ttl);
 
-        // Phase 2: if still over limit, evict randomly.
+        // Phase 2: if still over limit, evict arbitrarily.
         // A true LRU (e.g. `lru` crate or a linked-list) would be better,
-        // but random eviction is O(1) and avoids the allocation/sort overhead
+        // but arbitrary-order eviction avoids the allocation/sort overhead
         // of a "sort all keys" approach. See TODO below.
         let total = self.entries.len() + self.negatives.len();
         if total >= self.max_entries {
             let target = self.max_entries.saturating_sub(1);
 
-            // Random eviction for negatives — O(1) per removal, no allocations.
+            // Arbitrary-order eviction for negatives — no allocations per removal.
             while self.negatives.len() + self.entries.len() > target && !self.negatives.is_empty() {
                 if let Some(entry) = self.negatives.iter().next() {
                     let key = entry.key().clone();
@@ -111,7 +111,7 @@ impl KeyCache {
                 }
             }
 
-            // Random eviction for entries.
+            // Arbitrary-order eviction for entries.
             while self.negatives.len() + self.entries.len() > target && !self.entries.is_empty() {
                 if let Some(entry) = self.entries.iter().next() {
                     let key = entry.key().clone();

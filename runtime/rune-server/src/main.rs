@@ -400,7 +400,11 @@ async fn main() -> anyhow::Result<()> {
             relay: Arc::clone(&running.relay),
             resolver: Arc::clone(&running.resolver),
             session_mgr: Arc::clone(&running.session_mgr),
-            file_broker: Arc::new(init_file_broker(&config.gate.disk_spill_dir).await),
+            file_broker: Arc::new(
+                init_file_broker(&config.gate.disk_spill_dir)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("invalid gate.disk_spill_dir: {}", e))?,
+            ),
             max_upload_size_mb: config.gate.max_upload_size_mb,
             request_timeout: config.default_timeout(),
         },
@@ -657,12 +661,15 @@ async fn main() -> anyhow::Result<()> {
 
 /// Return an ISO-8601 timestamp for `days` days ago, used as a DELETE cutoff.
 /// Initialise the FileBroker with an optional disk spill directory.
-/// Defaults to `$TMPDIR/rune-uploads`; an empty string forces in-memory mode.
-async fn init_file_broker(disk_spill_dir: &Option<String>) -> gate::FileBroker {
+/// Defaults to `$TMPDIR/rune-uploads`. Returns an error for an empty
+/// string or an unwritable path so that configuration mistakes fail
+/// fast instead of silently falling back to in-memory mode.
+async fn init_file_broker(disk_spill_dir: &Option<String>) -> Result<gate::FileBroker, String> {
     let dir = if let Some(ref d) = disk_spill_dir {
         if d.is_empty() {
-            // empty string = force in-memory mode
-            return gate::FileBroker::new();
+            return Err(
+                "disk_spill_dir cannot be empty; omit the field or provide a valid path".into(),
+            );
         } else {
             Some(std::path::PathBuf::from(d))
         }
@@ -671,12 +678,15 @@ async fn init_file_broker(disk_spill_dir: &Option<String>) -> gate::FileBroker {
     };
 
     let Some(d) = dir else {
-        return gate::FileBroker::new();
+        return Ok(gate::FileBroker::new());
     };
 
     if let Err(e) = std::fs::create_dir_all(&d) {
-        tracing::warn!(path = %d.display(), error = %e, "failed to create disk_spill_dir");
-        return gate::FileBroker::new();
+        return Err(format!(
+            "failed to create disk_spill_dir {}: {}",
+            d.display(),
+            e
+        ));
     }
 
     // clean up orphaned files from previous runs (process crash).
@@ -697,7 +707,7 @@ async fn init_file_broker(disk_spill_dir: &Option<String>) -> gate::FileBroker {
     .await
     .ok();
 
-    gate::FileBroker::with_disk_dir(d)
+    Ok(gate::FileBroker::with_disk_dir(d))
 }
 
 fn chrono_days_ago(days: u32) -> String {

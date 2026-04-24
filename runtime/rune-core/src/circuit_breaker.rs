@@ -240,9 +240,11 @@ impl CircuitBreakerRegistry {
         self.breakers.remove(caster_id);
     }
 
-    /// Remove breakers that have been idle for longer than `max_idle` and are
-    /// not currently Open. Prevents unbounded memory growth when casters use
-    /// transient IDs or reconnect frequently.
+    /// Remove breakers that have been idle for longer than `max_idle`.
+    /// All states (Closed, Open, HalfOpen) are eligible — a zombie breaker
+    /// that has not seen any activity for hours should not keep eating memory.
+    /// When a HalfOpen breaker is removed, the next request will recreate it
+    /// as Closed (starting fresh with zero failure history).
     pub fn cleanup_stale(&self, max_idle: Duration) {
         self.breakers
             .retain(|_, breaker| !breaker.is_stale(max_idle));

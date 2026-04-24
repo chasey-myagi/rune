@@ -1666,14 +1666,13 @@ fn compute_backoff_ms(config: &crate::dag::RetryConfig, attempt: u32) -> u64 {
     }
     let delay = match config.backoff_strategy {
         BackoffStrategy::Fixed => base,
-        // attempt.min(32) prevents overflow while keeping delays reasonable:
-        // 1<<32 = ~4.3B; with a typical base of 100ms this caps at ~429M seconds
-        // (about 13 years), which saturating_mul will clamp to u64::MAX ms anyway.
+        // checked_shl guards against shift overflow (attempt >= 64 returns None);
+        // unwrap_or(u64::MAX) lets saturating_mul clamp to the maximum delay.
         BackoffStrategy::Exponential => {
             base.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX))
         }
         BackoffStrategy::ExponentialJitter => {
-            // Same 32-bit ceiling as Exponential to avoid shift overflow.
+            // Same checked_shl guard as Exponential to avoid shift overflow.
             let exp = base.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
             // ±25% random jitter to desynchronise concurrent retriers.
             let half_range = exp / 4;

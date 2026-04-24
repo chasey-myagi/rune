@@ -143,8 +143,8 @@ pub struct RetryConfig {
     pub backoff_strategy: BackoffStrategy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_delay_ms: Option<u64>,
-    /// 重试触发条件列表。省略该字段或显式指定 ["any"] 表示重试所有错误。
-    /// 空列表 [] 是无效的——请显式使用 ["any"] 或省略该字段。
+    /// 重试触发条件列表。省略该字段、显式指定 ["any"] 或空列表 []
+    /// 都表示重试所有错误（空列表保留为向后兼容）。
     #[serde(default = "retry_all")]
     pub retry_on: Vec<RetryCondition>,
 }
@@ -156,7 +156,7 @@ fn retry_all() -> Vec<RetryCondition> {
 impl RetryConfig {
     /// Returns true if the given error should trigger a retry according to
     /// `retry_on`. Containing `RetryCondition::Any` means "retry all errors".
-    /// An empty `retry_on` is invalid (validation rejects it) and will return false.
+    /// An empty `retry_on` is treated as "retry all" for backward compatibility.
     pub fn should_retry(&self, e: &RuneError) -> bool {
         // Backward compat: empty retry_on means "retry all" (same as [Any]).
         if self.retry_on.is_empty() || self.retry_on.contains(&RetryCondition::Any) {
