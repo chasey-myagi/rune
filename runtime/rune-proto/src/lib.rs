@@ -43,6 +43,7 @@ mod tests {
         let msg = SessionMessage {
             payload: Some(session_message::Payload::Attach(CasterAttach {
                 caster_id: "caster-1".into(),
+                protocol_version: String::new(),
                 runes: vec![RuneDeclaration {
                     name: "echo".into(),
                     version: "1.0.0".into(),
@@ -197,6 +198,7 @@ mod tests {
                 message: "out of memory".into(),
                 details: Vec::new(),
             }),
+            attachments: vec![],
         };
 
         let mut buf = Vec::new();

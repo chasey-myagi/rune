@@ -12,5 +12,5 @@ pub use crate::shutdown::ShutdownCoordinator;
 pub use crate::state::unique_request_id;
 pub use crate::state::{
     AdminState, AuthState, CreateKeyRequest, FlowState, GateState, LogQuery, RunParams, RuneState,
-    DEFAULT_REQUEST_TIMEOUT,
+    TrustedCidr, DEFAULT_REQUEST_TIMEOUT,
 };

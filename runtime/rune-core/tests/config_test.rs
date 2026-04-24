@@ -219,17 +219,19 @@ fn test_env_var_invalid_value_ignored() {
 }
 
 #[test]
-fn test_missing_file_uses_defaults() {
-    let config = AppConfig::from_file("/nonexistent/path/to/rune.toml").unwrap();
-    let default_config = AppConfig::default();
-
-    assert_eq!(config.server.grpc_port, default_config.server.grpc_port);
-    assert_eq!(config.server.http_port, default_config.server.http_port);
-    assert_eq!(config.auth.enabled, default_config.auth.enabled);
-    assert_eq!(config.log.level, default_config.log.level);
-    assert_eq!(
-        config.session.heartbeat_interval_secs,
-        default_config.session.heartbeat_interval_secs
+fn test_missing_file_returns_error() {
+    // from_path/from_file now return Err for missing files so that callers
+    // explicitly handle the case rather than silently falling back to defaults.
+    // Use AppConfig::load(None) to get defaults when no config file exists.
+    let result = AppConfig::from_file("/nonexistent/path/to/rune.toml");
+    assert!(
+        result.is_err(),
+        "from_file with missing path should return Err"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("rune.toml"),
+        "error should name the file, got: {msg}"
     );
 }
 
@@ -621,7 +623,6 @@ fn test_multiple_env_vars_all_take_effect() {
     std::env::set_var("RUNE_SERVER__GRPC_PORT", "9999");
     std::env::set_var("RUNE_SERVER__HTTP_HOST", "10.0.0.2");
     std::env::set_var("RUNE_SERVER__HTTP_PORT", "8888");
-    std::env::set_var("RUNE_SERVER__DEV_MODE", "true");
     std::env::set_var("RUNE_AUTH__ENABLED", "false");
     std::env::set_var("RUNE_STORE__DB_PATH", "/tmp/custom.db");
     std::env::set_var("RUNE_LOG__LEVEL", "warn");
@@ -660,7 +661,10 @@ fn test_multiple_env_vars_all_take_effect() {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
     );
     assert_eq!(config.server.http_port, 8888);
-    assert!(config.server.dev_mode);
+    // A27: dev_mode is intentionally NOT overridable via env var.
+    // It should remain false (default) even though RUNE_SERVER__DEV_MODE
+    // is no longer read.
+    assert!(!config.server.dev_mode);
     assert!(!config.auth.enabled);
     assert_eq!(config.store.db_path, "/tmp/custom.db");
     assert_eq!(config.log.level, "warn");
@@ -691,7 +695,6 @@ fn test_multiple_env_vars_all_take_effect() {
     std::env::remove_var("RUNE_SERVER__GRPC_PORT");
     std::env::remove_var("RUNE_SERVER__HTTP_HOST");
     std::env::remove_var("RUNE_SERVER__HTTP_PORT");
-    std::env::remove_var("RUNE_SERVER__DEV_MODE");
     std::env::remove_var("RUNE_AUTH__ENABLED");
     std::env::remove_var("RUNE_STORE__DB_PATH");
     std::env::remove_var("RUNE_LOG__LEVEL");

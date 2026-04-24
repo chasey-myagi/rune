@@ -280,9 +280,11 @@ fn build_guarantee_state() -> (GateState, Arc<Relay>, Arc<RuneStore>) {
 
     let state = GateState {
         auth: gate::AuthState {
+            trust_proxy: None,
             key_verifier,
             auth_enabled: false,
             exempt_routes: Arc::new(vec!["/health".to_string()]),
+            audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
         },
         rune: gate::RuneState {
             relay: Arc::clone(&relay),
@@ -295,7 +297,10 @@ fn build_guarantee_state() -> (GateState, Arc<Relay>, Arc<RuneStore>) {
             max_upload_size_mb: 1,
             request_timeout: Duration::from_secs(30),
         },
-        flow: gate::FlowState { flow_engine },
+        flow: gate::FlowState {
+            flow_engine,
+            task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        },
         admin: gate::AdminState {
             store: store.clone(),
             started_at: Instant::now(),

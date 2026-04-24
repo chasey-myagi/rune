@@ -184,6 +184,30 @@ impl RuneStore {
             CREATE INDEX IF NOT EXISTS idx_api_keys_type_active ON api_keys(key_type, revoked_at);
             ",
         )?;
+
+        // v1.3.1 migration: add audit columns to api_keys.
+        // We use a transaction + PRAGMA table_info + conditional ALTER.
+        // Within a single SQLite connection (single writer) this is atomic:
+        // no TOCTOU race because the connection serialises all access.
+        // Across multiple processes, the store pool's busy_timeout (5 s) causes
+        // concurrent starters to retry rather than fail with SQLITE_BUSY.
+        // We do NOT use "ADD COLUMN IF NOT EXISTS" — that requires SQLite
+        // 3.37.0+ and fails silently on older versions bundled with distros
+        // such as Ubuntu 20.04 LTS (SQLite 3.31.1).
+        conn.execute("BEGIN IMMEDIATE", [])?;
+        let existing_cols: std::collections::HashSet<String> = conn
+            .prepare("PRAGMA table_info(api_keys)")?
+            .query_map([], |row| row.get::<_, String>("name"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        if !existing_cols.contains("last_used_at") {
+            conn.execute("ALTER TABLE api_keys ADD COLUMN last_used_at TEXT", [])?;
+        }
+        if !existing_cols.contains("last_used_ip") {
+            conn.execute("ALTER TABLE api_keys ADD COLUMN last_used_ip  TEXT", [])?;
+        }
+        conn.execute("COMMIT", [])?;
+
         Ok(())
     }
 }

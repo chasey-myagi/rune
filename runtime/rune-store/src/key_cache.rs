@@ -1,6 +1,5 @@
 use crate::models::{ApiKey, KeyType};
 use dashmap::DashMap;
-use rand::Rng;
 use std::time::{Duration, Instant};
 
 struct CacheEntry {
@@ -95,59 +94,47 @@ impl KeyCache {
         self.negatives
             .retain(|_, inserted_at| inserted_at.elapsed() <= negative_ttl);
 
-        // Phase 2: if still over limit, randomly drop ~25% of entries
+        // Phase 2: if still over limit, evict arbitrarily.
+        // A true LRU (e.g. `lru` crate or a linked-list) would be better,
+        // but arbitrary-order eviction avoids the allocation/sort overhead
+        // of a "sort all keys" approach. See TODO below.
         let total = self.entries.len() + self.negatives.len();
         if total >= self.max_entries {
-            let mut rng = rand::rng();
-            // Keep ~75% — retain returns true to keep, false to drop
-            self.negatives.retain(|_, _| rng.random_ratio(3, 4));
-            // Only trim entries if negatives purge wasn't enough
-            if self.entries.len() + self.negatives.len() >= self.max_entries {
-                self.entries.retain(|_, _| rng.random_ratio(3, 4));
-            }
+            let target = self.max_entries.saturating_sub(1);
 
-            // Phase 3: hard cap — if probabilistic eviction left us over limit,
-            // remove excess items one-by-one (negatives first, then entries).
-            // We target max_entries - 1 to reserve one slot for the insert
-            // that triggered this eviction.
-            let mut over = (self.entries.len() + self.negatives.len())
-                .saturating_sub(self.max_entries.saturating_sub(1));
-            if over > 0 {
-                let neg_keys: Vec<String> = self
-                    .negatives
-                    .iter()
-                    .take(over)
-                    .map(|r| r.key().clone())
-                    .collect();
-                for k in neg_keys {
-                    self.negatives.remove(&k);
-                    over -= 1;
-                    if over == 0 {
-                        break;
-                    }
+            // Arbitrary-order eviction for negatives.
+            while self.negatives.len() + self.entries.len() > target && !self.negatives.is_empty() {
+                if let Some(entry) = self.negatives.iter().next() {
+                    // Clone the key before dropping the iter guard — holding the
+                    // guard across remove() would deadlock on the same shard.
+                    let key = entry.key().clone();
+                    drop(entry);
+                    self.negatives.remove(&key);
                 }
             }
-            if over > 0 {
-                let ent_keys: Vec<String> = self
-                    .entries
-                    .iter()
-                    .take(over)
-                    .map(|r| r.key().clone())
-                    .collect();
-                for k in ent_keys {
-                    self.entries.remove(&k);
-                    over -= 1;
-                    if over == 0 {
-                        break;
-                    }
+
+            // Arbitrary-order eviction for entries.
+            while self.negatives.len() + self.entries.len() > target && !self.entries.is_empty() {
+                if let Some(entry) = self.entries.iter().next() {
+                    // Clone the key before dropping the iter guard — holding the
+                    // guard across remove() would deadlock on the same shard.
+                    let key = entry.key().clone();
+                    drop(entry);
+                    self.entries.remove(&key);
                 }
             }
         }
+        // TODO: replace random eviction with a real LRU (e.g. `lru` crate)
+        // if cache hit ratio becomes a concern.
     }
 
-    pub fn invalidate_all(&self) {
-        self.entries.clear();
-        self.negatives.clear();
+    /// Remove all cache entries for a specific key hash (across all key types).
+    pub fn invalidate(&self, key_hash: &str) {
+        for key_type in [KeyType::Gate, KeyType::Admin, KeyType::Caster] {
+            let ck = cache_key(key_hash, key_type);
+            self.entries.remove(&ck);
+            self.negatives.remove(&ck);
+        }
     }
 }
 
@@ -168,6 +155,8 @@ mod tests {
             label: "test".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             revoked_at: None,
+            last_used_at: None,
+            last_used_ip: None,
         }
     }
 

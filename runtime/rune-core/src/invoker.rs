@@ -5,6 +5,14 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
+/// Invoker that executes a rune, either locally or remotely.
+///
+/// # Cancellation safety
+/// Implementations of `invoke_stream` MUST be cancellation-safe: when the
+/// returned `Future` is dropped (e.g. because the client disconnected), the
+/// handler must not leak resources or leave partial state behind. The runtime
+/// relies on `Future::drop` for cleanup; there is no explicit "cancel"
+/// signal.
 #[async_trait::async_trait]
 pub trait RuneInvoker: Send + Sync {
     async fn invoke_once(&self, ctx: RuneContext, input: Bytes) -> Result<Bytes, RuneError>;
@@ -37,7 +45,10 @@ impl RuneInvoker for LocalInvoker {
         ctx: RuneContext,
         input: Bytes,
     ) -> Result<mpsc::Receiver<Result<Bytes, RuneError>>, RuneError> {
-        // Fallback: call unary handler, wrap result as single-item stream
+        // Intentional fallback: this rune was registered with a unary handler,
+        // not a StreamRuneHandler. Callers routing stream requests here must
+        // accept single-chunk responses.
+        tracing::debug!(rune = %ctx.rune_name, "invoke_stream on unary handler — degrading to single-chunk stream");
         let result = (self.handler)(ctx, input).await;
         let (tx, rx) = mpsc::channel(1);
         let _ = tx.send(result).await;
@@ -59,13 +70,18 @@ impl LocalStreamInvoker {
 #[async_trait::async_trait]
 impl RuneInvoker for LocalStreamInvoker {
     async fn invoke_once(&self, ctx: RuneContext, input: Bytes) -> Result<Bytes, RuneError> {
-        // Collect stream into single response
         let mut rx = self.invoke_stream(ctx, input).await?;
         let mut collected = Vec::new();
         while let Some(chunk) = rx.recv().await {
             collected.push(chunk?);
         }
-        // Return last chunk or empty
+        // CONTRACT: stream handlers emit the *meaningful* result as their final
+        // chunk (e.g. tx.emit(data).await followed by tx.end().await). Earlier
+        // chunks are treated as intermediate and DISCARDED here.
+        //
+        // This is a convention, not enforced by the type system. If a handler
+        // places meaningful data in non-final chunks, that data is lost.
+        // Callers that need every chunk must use `invoke_stream` directly.
         Ok(collected.into_iter().last().unwrap_or_default())
     }
 
@@ -75,12 +91,17 @@ impl RuneInvoker for LocalStreamInvoker {
         input: Bytes,
     ) -> Result<mpsc::Receiver<Result<Bytes, RuneError>>, RuneError> {
         let (tx, rx) = mpsc::channel(32);
-        let sender = StreamSender::new(tx);
+        let sender = StreamSender::new(tx.clone());
         let handler = Arc::clone(&self.handler);
         tokio::spawn(async move {
-            if let Err(e) = handler.execute(ctx, input, sender).await {
-                // Error is dropped since channel may be closed
-                tracing::error!("stream handler error: {}", e);
+            tokio::select! {
+                result = handler.execute(ctx, input, sender) => {
+                    if let Err(e) = result {
+                        tracing::debug!("stream handler stopped: {}", e);
+                    }
+                }
+                // Cancel the handler if the receiver is dropped before completion.
+                _ = tx.closed() => {}
             }
         });
         Ok(rx)
@@ -159,6 +180,7 @@ mod tests {
             request_id: "r-1".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         }
     }
 
@@ -234,6 +256,7 @@ mod tests {
             request_id: "req-42".into(),
             context: Default::default(),
             timeout: Duration::from_secs(5),
+            disable_runtime_retry: false,
         };
         let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
         assert_eq!(result, Bytes::from("my_rune:req-42"));
@@ -291,6 +314,7 @@ mod tests {
                 request_id: format!("r-{}", i),
                 context: Default::default(),
                 timeout: Duration::from_secs(30),
+                disable_runtime_retry: false,
             };
             let payload = Bytes::from(format!("msg-{}", i));
             handles.push(tokio::spawn(
@@ -456,6 +480,7 @@ mod tests {
             request_id: "r-99".into(),
             context: Default::default(),
             timeout: Duration::from_secs(10),
+            disable_runtime_retry: false,
         };
         let mut rx = invoker
             .invoke_stream(ctx, Bytes::from("payload"))
@@ -513,6 +538,7 @@ mod tests {
                         request_id: "req-remote-1".into(),
                         context: Default::default(),
                         timeout: Duration::from_secs(30),
+                        disable_runtime_retry: false,
                     },
                     Bytes::from("remote_input"),
                 )
@@ -601,6 +627,7 @@ mod tests {
                         request_id: "req-stream-1".into(),
                         context: Default::default(),
                         timeout: Duration::from_secs(30),
+                        disable_runtime_retry: false,
                     },
                     Bytes::from("data"),
                 )

@@ -155,11 +155,11 @@ pub async fn parse_multipart(
             };
 
             // Store in broker
-            let file_id =
-                state
-                    .rune
-                    .file_broker
-                    .store(filename.clone(), mime_type.clone(), data, request_id);
+            let file_id = state
+                .rune
+                .file_broker
+                .store(filename.clone(), mime_type.clone(), data, request_id)
+                .await;
             file_ids.push(file_id.clone());
 
             files.push(FileMetadata {

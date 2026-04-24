@@ -169,9 +169,11 @@ fn build_test_state(auth_enabled: bool) -> (GateState, Arc<RuneStore>) {
 
     let state = GateState {
         auth: gate::AuthState {
+            trust_proxy: None,
             key_verifier,
             auth_enabled,
             exempt_routes: Arc::new(vec!["/health".to_string()]),
+            audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
         },
         rune: gate::RuneState {
             relay,
@@ -184,7 +186,10 @@ fn build_test_state(auth_enabled: bool) -> (GateState, Arc<RuneStore>) {
             max_upload_size_mb: 1, // 1MB for upload tests
             request_timeout: Duration::from_secs(30),
         },
-        flow: gate::FlowState { flow_engine },
+        flow: gate::FlowState {
+            flow_engine,
+            task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        },
         admin: gate::AdminState {
             store: store.clone(),
             started_at: Instant::now(),
@@ -1580,6 +1585,7 @@ async fn sf1_step_b_non_object_returns_error_not_panic() {
         request_id: "test-1".into(),
         context: Default::default(),
         timeout: Duration::from_secs(5),
+        disable_runtime_retry: false,
     };
     let result = invoker.invoke_once(ctx, Bytes::from("[1,2,3]")).await;
     assert!(
@@ -1593,6 +1599,7 @@ async fn sf1_step_b_non_object_returns_error_not_panic() {
         request_id: "test-2".into(),
         context: Default::default(),
         timeout: Duration::from_secs(5),
+        disable_runtime_retry: false,
     };
     let result2 = invoker.invoke_once(ctx2, Bytes::from(r#""hello""#)).await;
     assert!(result2.is_err(), "string JSON should return Err, not panic");
@@ -1603,6 +1610,7 @@ async fn sf1_step_b_non_object_returns_error_not_panic() {
         request_id: "test-3".into(),
         context: Default::default(),
         timeout: Duration::from_secs(5),
+        disable_runtime_retry: false,
     };
     let result3 = invoker.invoke_once(ctx3, Bytes::from(r#"{"x":1}"#)).await;
     assert!(result3.is_ok(), "object JSON should succeed");

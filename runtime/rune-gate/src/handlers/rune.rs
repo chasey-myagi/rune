@@ -5,7 +5,14 @@ use std::time::{Duration, Instant};
 
 /// Emit a single request's business metrics after execution completes.
 fn record_rune_metrics(rune_name: &str, mode: &'static str, status_code: i32, latency_ms: i64) {
-    let status: &'static str = if status_code < 400 { "ok" } else { "error" };
+    let status: &'static str = if status_code < 400 {
+        "ok"
+    } else if status_code == 499 {
+        // 499 Client Closed Request — client-side disconnect, not a server error.
+        "client_disconnect"
+    } else {
+        "error"
+    };
     let labels = vec![
         metrics::Label::new("rune", rune_name.to_owned()),
         metrics::Label::new("mode", mode),
@@ -14,7 +21,8 @@ fn record_rune_metrics(rune_name: &str, mode: &'static str, status_code: i32, la
     metrics::histogram!("rune_request_duration_seconds", labels.clone())
         .record(latency_ms.max(0) as f64 / 1000.0);
     metrics::counter!("rune_requests_total", labels).increment(1);
-    if status_code >= 400 {
+    // Exclude 499 from rune_errors_total: client disconnects are not server faults.
+    if status_code >= 400 && status_code != 499 {
         let err_labels = vec![
             metrics::Label::new("rune", rune_name.to_owned()),
             metrics::Label::new("mode", mode),
@@ -171,7 +179,16 @@ pub async fn dynamic_rune_handler(
         }
     };
 
-    let params: RunParams = serde_urlencoded::from_str(&query).unwrap_or_default();
+    let params: RunParams = match serde_urlencoded::from_str(&query) {
+        Ok(p) => p,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "invalid query parameters",
+            );
+        }
+    };
 
     execute_rune(ExecuteRequest {
         state: &state,
@@ -328,6 +345,7 @@ pub async fn execute_rune(req: ExecuteRequest<'_>) -> axum::response::Response {
         request_id: request_id.clone(),
         context,
         timeout: state.rune.request_timeout,
+        disable_runtime_retry: false,
     };
 
     // async mode
@@ -494,7 +512,9 @@ pub async fn sync_execute_multipart(
             } else {
                 match serde_json::from_slice::<serde_json::Value>(&output) {
                     Ok(json) => json,
-                    Err(_) => serde_json::json!({"output": String::from_utf8_lossy(&output)}),
+                    Err(_) => {
+                        serde_json::json!({"output": crate::handlers::encode_binary_output(&output)})
+                    }
                 }
             };
 
@@ -551,11 +571,13 @@ pub async fn stream_execute(
                     match chunk {
                         Ok(data) => {
                             output_size += data.len() as i64;
+                            // Non-UTF-8 binary output is encoded as "hex:<lowercase-hex>".
+                            // Clients should check for this prefix to recover the raw bytes.
                             let event = Event::default()
                                 .event("message")
-                                .data(String::from_utf8_lossy(&data));
+                                .data(crate::handlers::encode_binary_output(&data));
                             if tx.send(Ok(event)).await.is_err() {
-                                state_clone
+                                let _ = state_clone
                                     .rune
                                     .session_mgr
                                     .cancel_by_request_id(&req_id, "SSE client disconnected")
@@ -623,10 +645,7 @@ pub async fn async_execute(
     let trace_context = ctx.context.clone();
     let task_id = request_id.clone();
     let rune_name = ctx.rune_name.clone();
-    let input_str = match std::str::from_utf8(&body) {
-        Ok(s) => s.to_string(),
-        Err(_) => format!("hex:{}", hex::encode(&body)),
-    };
+    let input_str = crate::handlers::encode_binary_output(&body);
 
     // Insert task and mark it Running atomically.  A single transaction
     // prevents a crash between the two steps from leaving the task in
@@ -660,10 +679,7 @@ pub async fn async_execute(
         // Atomically complete the task only if it has not been cancelled (CAS).
         let (status, output_size) = match result {
             Ok(ref output) => {
-                let output_str = match std::str::from_utf8(output) {
-                    Ok(s) => s.to_string(),
-                    Err(_) => format!("hex:{}", hex::encode(output)),
-                };
+                let output_str = crate::handlers::encode_binary_output(output);
                 let size = output.len() as i64;
                 let updated = store
                     .complete_task_if_not_cancelled(

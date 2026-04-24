@@ -112,6 +112,19 @@ impl Default for SessionConfig {
 pub struct GateServerConfig {
     pub cors_origins: Vec<String>,
     pub max_upload_size_mb: u64,
+    /// Directory for spilling large uploads to disk.
+    ///
+    /// - `None` (default) → `$TMPDIR/rune-uploads`
+    /// - `Some(path)` → use the given directory
+    /// - `Some("")` → disabled; an error is raised at startup
+    #[serde(default)]
+    pub disk_spill_dir: Option<String>,
+    /// CIDR ranges of trusted reverse proxies (e.g. ["10.0.0.0/8", "172.16.0.0/12"]).
+    /// Only when the direct connection originates from one of these ranges will
+    /// the `X-Forwarded-For` header be used for `last_used_ip` audit logging.
+    /// If unset or empty, `X-Forwarded-For` is ignored and `last_used_ip` will be empty.
+    #[serde(default)]
+    pub trust_proxy: Option<Vec<String>>,
 }
 
 impl Default for GateServerConfig {
@@ -119,6 +132,8 @@ impl Default for GateServerConfig {
         Self {
             cors_origins: Vec::new(),
             max_upload_size_mb: 10,
+            disk_spill_dir: None,
+            trust_proxy: None,
         }
     }
 }
@@ -145,6 +160,10 @@ pub struct CircuitBreakerConfig {
     pub success_threshold: u32,
     pub reset_timeout_ms: u64,
     pub half_open_max_permits: u32,
+    /// Interval between periodic stale circuit-breaker cleanups (seconds).
+    pub cleanup_interval_secs: u64,
+    /// Idle timeout after which a circuit breaker is considered stale (seconds).
+    pub cleanup_idle_timeout_secs: u64,
 }
 
 impl Default for CircuitBreakerConfig {
@@ -155,10 +174,18 @@ impl Default for CircuitBreakerConfig {
             success_threshold: 2,
             reset_timeout_ms: 30_000,
             half_open_max_permits: 1,
+            cleanup_interval_secs: 3600,
+            cleanup_idle_timeout_secs: 7200,
         }
     }
 }
 
+/// Retry configuration for the **relay layer** (cross-caster RPC calls).
+///
+/// Controls how many times the runtime retries a failed remote execution
+/// before returning an error to the caller. This is distinct from
+/// `rune_flow::dag::RetryConfig` which governs per-step retries inside
+/// the flow engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RetryConfig {
@@ -239,10 +266,20 @@ impl Default for ScalingConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
     pub level: String,
+    #[serde(default)]
+    pub format: LogFormat,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 }
@@ -251,6 +288,7 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             level: "info".to_string(),
+            format: LogFormat::Text,
             file: None,
         }
     }
@@ -289,17 +327,13 @@ pub struct AppConfig {
 impl AppConfig {
     /// Load configuration from a TOML file (accepts any path type).
     ///
-    /// If the file does not exist, returns default configuration.
+    /// If the file does not exist, returns an error.
     /// If the file exists but contains invalid TOML, returns an error.
     pub fn from_path(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
-        match std::fs::read_to_string(path.as_ref()) {
-            Ok(content) => {
-                let config: AppConfig = toml::from_str(&content)?;
-                Ok(config)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
-        }
+        let content = std::fs::read_to_string(path.as_ref())
+            .map_err(|e| anyhow::anyhow!("config file '{}': {}", path.as_ref().display(), e))?;
+        let config: AppConfig = toml::from_str(&content)?;
+        Ok(config)
     }
 
     /// Load configuration from a TOML file path string.
@@ -312,9 +346,14 @@ impl AppConfig {
     /// Load configuration with default file search.
     ///
     /// Priority: explicit path > ./rune.toml > ~/.config/rune/rune.toml > defaults.
+    ///
+    /// When an explicit path is given, a missing file is an error (not a silent
+    /// fallback to defaults), preventing silent misconfiguration at deployment.
     pub fn load(path: Option<&str>) -> anyhow::Result<Self> {
         if let Some(p) = path {
-            return Self::from_file(p);
+            let content = std::fs::read_to_string(p)
+                .map_err(|e| anyhow::anyhow!("config file '{}': {}", p, e))?;
+            return Ok(toml::from_str(&content)?);
         }
 
         // Try ./rune.toml
@@ -330,7 +369,12 @@ impl AppConfig {
             }
         }
 
-        Ok(Self::default())
+        anyhow::bail!(
+            "no configuration file found. \
+             Expected ./rune.toml or ~/.config/rune/rune.toml. \
+             Create one or use --config <path> to specify a file, \
+             or use --dev to start with built-in defaults."
+        )
     }
 
     /// Serialize the current configuration to a TOML string.
@@ -352,6 +396,28 @@ impl AppConfig {
         anyhow::ensure!(
             self.rate_limit.window_secs > 0,
             "rate_limit.window_secs must be > 0"
+        );
+        anyhow::ensure!(
+            self.server.drain_timeout_secs > 0,
+            "server.drain_timeout_secs must be > 0"
+        );
+        anyhow::ensure!(
+            self.rate_limit.default_caster_max_concurrent > 0,
+            "rate_limit.default_caster_max_concurrent must be > 0"
+        );
+        anyhow::ensure!(
+            self.gate.max_upload_size_mb > 0,
+            "gate.max_upload_size_mb must be >= 1 MB"
+        );
+        anyhow::ensure!(
+            self.session.heartbeat_interval_secs > 0,
+            "session.heartbeat_interval_secs must be > 0"
+        );
+        anyhow::ensure!(
+            self.session.heartbeat_timeout_secs > self.session.heartbeat_interval_secs,
+            "session.heartbeat_timeout_secs ({}) must be > heartbeat_interval_secs ({})",
+            self.session.heartbeat_timeout_secs,
+            self.session.heartbeat_interval_secs,
         );
 
         if self.retry.enabled {
@@ -390,7 +456,12 @@ impl AppConfig {
                     match val.parse::<$ty>() {
                         Ok(parsed) => $field = parsed,
                         Err(e) => {
-                            tracing::warn!(env = $var, value = %val, error = %e, "failed to parse env override, using default");
+                            // Use eprintln because apply_env_overrides runs before
+                            // tracing is initialized — tracing::warn would be silently dropped.
+                            eprintln!(
+                                "WARNING: env var {} has invalid value '{}': {} — using default",
+                                $var, val, e
+                            );
                         }
                     }
                 }
@@ -410,7 +481,10 @@ impl AppConfig {
         env_override!("RUNE_SERVER__GRPC_PORT", self.server.grpc_port, u16);
         env_override!("RUNE_SERVER__HTTP_HOST", self.server.http_host, IpAddr);
         env_override!("RUNE_SERVER__HTTP_PORT", self.server.http_port, u16);
-        env_override!("RUNE_SERVER__DEV_MODE", self.server.dev_mode, bool);
+        // dev_mode is a security-sensitive flag. It can be set via
+        // config file or --dev CLI flag, but NOT via environment variable
+        // to prevent accidental production exposure (e.g. a stray env var
+        // in a CI/CD pipeline or container orchestrator).
         env_override!(
             "RUNE_SERVER__DRAIN_TIMEOUT_SECS",
             self.server.drain_timeout_secs,
@@ -544,6 +618,18 @@ impl AppConfig {
 
         // Log
         env_override_string!("RUNE_LOG__LEVEL", self.log.level);
+        if let Ok(val) = std::env::var("RUNE_LOG__FORMAT") {
+            match val.to_lowercase().as_str() {
+                "json" => self.log.format = LogFormat::Json,
+                "text" => self.log.format = LogFormat::Text,
+                // eprintln! used intentionally: apply_env_overrides runs before
+                // init_telemetry, so tracing is not yet initialized here.
+                _ => eprintln!(
+                    "WARN: unknown RUNE_LOG__FORMAT value '{}', using current setting",
+                    val
+                ),
+            }
+        }
         if let Ok(v) = std::env::var("RUNE_LOG__FILE") {
             self.log.file = if v.is_empty() { None } else { Some(v) };
         }
@@ -650,10 +736,19 @@ http_port = 19999
     }
 
     #[test]
-    fn test_fix_from_path_missing_file_returns_default() {
-        let config =
-            AppConfig::from_path("/tmp/rune_test_m5_nonexistent/does_not_exist.toml").unwrap();
-        assert_eq!(config.server.http_port, 50060); // default
+    fn test_fix_from_path_missing_file_returns_error() {
+        // from_path() now errors on NotFound; callers that want a default
+        // fallback should check for existence first (as AppConfig::load does).
+        let result = AppConfig::from_path("/tmp/rune_test_m5_nonexistent/does_not_exist.toml");
+        assert!(
+            result.is_err(),
+            "from_path with missing file should return Err"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("does_not_exist.toml"),
+            "error should name the file, got: {msg}"
+        );
     }
 
     #[test]
@@ -691,6 +786,80 @@ http_port = 19999
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.scaling.enabled);
         assert_eq!(config.scaling.eval_interval_secs, 12);
+    }
+
+    #[test]
+    fn test_log_format_default_is_text() {
+        let config = LogConfig::default();
+        assert_eq!(config.format, LogFormat::Text);
+    }
+
+    #[test]
+    fn test_log_format_deserialize_json() {
+        let toml_str = r#"
+        [log]
+        format = "json"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.log.format, LogFormat::Json);
+    }
+
+    #[test]
+    fn test_log_format_deserialize_text() {
+        let toml_str = r#"
+        [log]
+        format = "text"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.log.format, LogFormat::Text);
+    }
+
+    #[test]
+    fn validate_default_config_passes() {
+        let config = AppConfig::default();
+        assert!(
+            config.validate().is_ok(),
+            "default config must pass validation"
+        );
+    }
+
+    #[test]
+    fn validate_drain_timeout_zero_fails() {
+        let mut config = AppConfig::default();
+        config.server.drain_timeout_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_default_caster_max_concurrent_zero_fails() {
+        let mut config = AppConfig::default();
+        config.rate_limit.default_caster_max_concurrent = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_max_upload_size_zero_fails() {
+        let mut config = AppConfig::default();
+        config.gate.max_upload_size_mb = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_heartbeat_interval_zero_fails() {
+        let mut config = AppConfig::default();
+        config.session.heartbeat_interval_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_heartbeat_timeout_le_interval_fails() {
+        let mut config = AppConfig::default();
+        config.session.heartbeat_interval_secs = 30;
+        config.session.heartbeat_timeout_secs = 30; // must be > interval
+        assert!(config.validate().is_err());
+
+        config.session.heartbeat_timeout_secs = 31;
+        assert!(config.validate().is_ok());
     }
 
     #[test]

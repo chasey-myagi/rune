@@ -1,7 +1,8 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderValue, StatusCode},
     middleware::Next,
 };
@@ -10,6 +11,48 @@ use sha2::{Digest, Sha256};
 use crate::error::error_response;
 use crate::handlers::rune::parse_labels_header;
 use crate::state::GateState;
+
+use crate::state::TrustedCidr;
+
+/// Extract the client IP for audit logging.
+///
+/// If `trust_proxy` is configured **and** the direct TCP connection
+/// originates from an address inside one of the configured CIDR ranges,
+/// reads the first address from `X-Forwarded-For`. Otherwise falls back
+/// to the direct peer IP from `ConnectInfo`. This prevents attackers on
+/// untrusted networks from forging the audit field `last_used_ip` while
+/// still recording *some* IP when no proxy is in use.
+fn extract_client_ip(req: &axum::extract::Request, trust_proxy: Option<&[TrustedCidr]>) -> String {
+    let remote_addr = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.ip());
+
+    let trust_proxy = match trust_proxy {
+        Some(v) if !v.is_empty() => v,
+        // No trusted proxy configured — use the direct peer IP.
+        _ => return remote_addr.map(|a| a.to_string()).unwrap_or_default(),
+    };
+
+    // Verify the direct connection comes from a trusted proxy range.
+    let is_trusted =
+        remote_addr.is_some_and(|addr| trust_proxy.iter().any(|cidr| cidr.contains(&addr)));
+
+    if !is_trusted {
+        // Connection did not come from a trusted proxy — use direct peer IP
+        // rather than an empty string so the audit log is still useful.
+        return remote_addr.map(|a| a.to_string()).unwrap_or_default();
+    }
+
+    req.headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim())
+        .filter(|s| s.parse::<std::net::IpAddr>().is_ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| remote_addr.map(|a| a.to_string()).unwrap_or_default())
+}
 
 /// Append hardened security response headers to every reply.
 ///
@@ -117,6 +160,23 @@ fn rate_limited_response(retry_after: u64, scope: &str) -> axum::response::Respo
     response
 }
 
+/// Seconds a client should wait before retrying after receiving 503 capacity-exhausted.
+const CASTER_UNAVAILABLE_RETRY_AFTER_SECS: &str = "5";
+
+fn caster_unavailable_response() -> axum::response::Response {
+    let mut response = error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "SERVICE_UNAVAILABLE",
+        "all caster capacity exhausted",
+    );
+    // RFC 7231 §6.6.4: 503 SHOULD include Retry-After when the delay is known.
+    response.headers_mut().insert(
+        "retry-after",
+        axum::http::HeaderValue::from_static(CASTER_UNAVAILABLE_RETRY_AFTER_SECS),
+    );
+    response
+}
+
 fn resolve_rune_name_for_rate_limit(state: &GateState, method: &str, path: &str) -> Option<String> {
     debug_rune_name(path)
         .map(ToString::to_string)
@@ -177,6 +237,8 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
+    let client_ip = extract_client_ip(&req, state.auth.trust_proxy.as_ref().map(|v| v.as_slice()));
+
     let auth_header = req
         .headers()
         .get("authorization")
@@ -187,6 +249,46 @@ pub async fn auth_middleware(
     match auth_header {
         Some(key) => {
             if state.auth.key_verifier.verify_gate_key(&key).await {
+                // Fire-and-forget: update last_used_at / last_used_ip audit fields.
+                // Failure is silently logged at debug level and never blocks the response.
+                // Use key_prefix (first 19 chars of the raw key) to identify the row so
+                // the lookup works regardless of whether SHA-256 or HMAC-SHA256 is used.
+                // Only attempt the audit update for well-formed keys (rk_ + 16 hex = 19 chars).
+                // Non-standard keys have no matching row in api_keys; skip rather than
+                // passing the full raw key as a prefix (which would silently find nothing).
+                if key.starts_with("rk_") && key.len() >= rune_store::keys::KEY_PREFIX_LEN {
+                    let Some(key_prefix) = key.get(..rune_store::keys::KEY_PREFIX_LEN) else {
+                        tracing::warn!("malformed UTF-8 in API key; skipping audit update");
+                        return next.run(req).await;
+                    };
+                    let key_prefix = key_prefix.to_string();
+                    let store = state.admin.store.clone();
+                    let now = rune_core::time_utils::now_iso8601();
+                    let semaphore = state.auth.audit_semaphore.clone();
+                    tokio::spawn(async move {
+                        // Acquire a permit to prevent unbounded task spawning
+                        // under high QPS. If all permits are taken, drop the
+                        // audit update rather than queueing indefinitely.
+                        let _permit = match semaphore.try_acquire() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "audit log dropped: too many concurrent audit writes"
+                                );
+                                return;
+                            }
+                        };
+                        if let Err(e) = store
+                            .update_key_last_used(&key_prefix, &now, &client_ip)
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                "failed to update key last_used audit fields"
+                            );
+                        }
+                    });
+                }
                 next.run(req).await
             } else {
                 error_response(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "invalid api key")
@@ -273,7 +375,7 @@ pub async fn rate_limit_middleware(
         // to a different caster than the one the handler ultimately invokes.
         if let Some(selected_entry) = select_rune_entry(&state, &rune_name, &labels) {
             if caster_capacity_exhausted(&state.rune.session_mgr, &selected_entry) {
-                return rate_limited_response(1, "caster");
+                return caster_unavailable_response();
             }
             req.extensions_mut().insert(selected_entry);
         }

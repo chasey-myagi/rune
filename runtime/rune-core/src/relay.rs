@@ -30,7 +30,14 @@ pub struct Relay {
     /// Monotonic generation per caster — set during handle_attach, checked by
     /// remove_caster_if_gen to avoid deleting a reconnected session's entries.
     caster_generation: DashMap<String, u64>,
-    /// Serializes register/remove_caster to prevent race conditions on gate_path_index
+    /// Serializes multi-map writes (register/remove_caster).
+    /// Read paths do not acquire this lock — DashMap shard locks are sufficient.
+    ///
+    /// NOTE: This is intentionally a `Mutex<()>` rather than `RwLock` because
+    /// every caller that acquires it is a writer. There are no read-side users
+    /// of this lock, so `RwLock` would provide no benefit and would only add
+    /// tracking overhead. The commit message that claimed "upgrade to RwLock"
+    /// was incorrect — only the documentation was clarified.
     write_lock: Mutex<()>,
     local_key_counter: AtomicU64,
     circuit_breaker_registry: Option<Arc<CircuitBreakerRegistry>>,
@@ -73,6 +80,15 @@ impl Relay {
         invoker: Arc<dyn RuneInvoker>,
         caster_id: Option<String>,
     ) -> Result<(), String> {
+        if config.name.is_empty() {
+            return Err("rune name must not be empty".to_string());
+        }
+        if let Some(ref gate) = config.gate {
+            if gate.path.is_empty() {
+                return Err("gate.path must not be empty".to_string());
+            }
+        }
+
         let _guard = self.write_lock.lock();
 
         // Check gate.path conflict: different rune_name with same path+method is a hard error
@@ -317,7 +333,7 @@ impl Relay {
         Some(filtered.swap_remove(idx))
     }
 
-    /// Convenience: find + pick using a resolver
+    /// Convenience: find + pick using a resolver.
     pub fn resolve(
         &self,
         rune_name: &str,
@@ -412,6 +428,7 @@ mod tests {
             request_id: "r1".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
         let result = invoker
             .invoke_once(ctx, Bytes::from("hello"))
@@ -467,6 +484,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
         let r1 = relay
             .resolve("rr", &resolver)
@@ -1070,6 +1088,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
         let r1 = relay
             .resolve("shared_rune", &resolver)
@@ -1475,6 +1494,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         let mut results = std::collections::HashSet::new();
@@ -1705,6 +1725,7 @@ mod tests {
             request_id: "r1".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Request with env=prod should get prod caster
@@ -1881,6 +1902,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Should always pick the high-priority caster
@@ -1921,6 +1943,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Should fallback to low-priority caster
@@ -1958,6 +1981,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // With same priority, inner round-robin should alternate
@@ -2156,6 +2180,7 @@ mod tests {
             request_id: "r1".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
         let result = invoker.invoke_once(ctx, Bytes::new()).await.unwrap();
         assert_eq!(
@@ -2199,6 +2224,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Should pick the positive-priority candidate
@@ -2249,6 +2275,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Should always pick the highest priority (10)
@@ -2312,6 +2339,7 @@ mod tests {
             request_id: "r".into(),
             context: Default::default(),
             timeout: Duration::from_secs(30),
+            disable_runtime_retry: false,
         };
 
         // Should resolve to one of the high-priority candidates (a or b), never "low"

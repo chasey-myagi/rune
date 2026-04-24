@@ -11,7 +11,8 @@ RUN cargo build --release -p rune-server
 # === Runtime ===
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r rune && useradd -r -g rune rune
 
 COPY --from=builder /build/target/release/rune-server /usr/local/bin/rune-server
 
@@ -23,4 +24,5 @@ ENV RUNE_LOG__LEVEL=info
 
 EXPOSE 50060 50070
 
+USER rune
 ENTRYPOINT ["rune-server"]

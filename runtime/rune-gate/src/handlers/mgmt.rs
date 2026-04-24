@@ -47,7 +47,15 @@ async fn require_admin(state: &GateState, headers: &HeaderMap) -> Option<axum::r
     }
 }
 
-pub async fn health(State(state): State<GateState>) -> axum::response::Response {
+/// Liveness probe — always 200 as long as the process is alive.
+/// Use /ready for readiness (load-balancer routing).
+pub async fn health() -> axum::response::Response {
+    (StatusCode::OK, "ok").into_response()
+}
+
+/// Readiness probe — 503 during graceful drain so the load balancer stops
+/// sending new traffic. Healthy otherwise.
+pub async fn ready(State(state): State<GateState>) -> axum::response::Response {
     if state.shutdown.is_draining() {
         return (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response();
     }
@@ -183,7 +191,7 @@ pub async fn mgmt_logs(
     State(state): State<GateState>,
     Query(params): Query<LogQuery>,
 ) -> impl IntoResponse {
-    let limit = params.limit.unwrap_or(50).min(500);
+    let limit = params.limit.unwrap_or(50).clamp(0, 500);
     match state
         .admin
         .store

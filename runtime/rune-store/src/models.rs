@@ -13,6 +13,10 @@ pub struct ApiKey {
     pub label: String,
     pub created_at: String,
     pub revoked_at: Option<String>,
+    /// RFC3339 timestamp of the last successful authentication. `None` if never used.
+    pub last_used_at: Option<String>,
+    /// Source IP of the last successful authentication. `None` if never used.
+    pub last_used_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,24 +60,44 @@ pub struct TaskRecord {
     pub completed_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStatus {
     Pending,
     Running,
     Completed,
     Failed,
     Cancelled,
+    Unknown(String),
+}
+
+impl serde::Serialize for TaskStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TaskStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::from_db(&s))
+    }
 }
 
 impl TaskStatus {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             TaskStatus::Pending => "pending",
             TaskStatus::Running => "running",
             TaskStatus::Completed => "completed",
             TaskStatus::Failed => "failed",
             TaskStatus::Cancelled => "cancelled",
+            TaskStatus::Unknown(s) => s.as_str(),
         }
     }
 
@@ -86,6 +110,12 @@ impl TaskStatus {
             "cancelled" => Some(TaskStatus::Cancelled),
             _ => None,
         }
+    }
+
+    /// Parse a status string from the database. Unknown values are preserved
+    /// rather than silently downgraded to Pending.
+    pub fn from_db(s: &str) -> Self {
+        Self::parse(s).unwrap_or_else(|| TaskStatus::Unknown(s.to_string()))
     }
 }
 

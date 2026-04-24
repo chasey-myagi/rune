@@ -372,6 +372,7 @@ impl Caster {
                                             .into(),
                                         details: vec![],
                                     }),
+                                    attachments: vec![],
                                 })),
                             })
                             .await;
@@ -508,6 +509,7 @@ impl Caster {
                 max_concurrent: self.config.max_concurrent,
                 key: self.config.key.clone().unwrap_or_default(),
                 role: "caster".into(),
+                protocol_version: "1.2".into(),
             })),
         }
     }
@@ -611,6 +613,7 @@ async fn execute_handler(
                         message: format!("rune '{}' not found", req.rune_name),
                         details: vec![],
                     }),
+                    attachments: vec![],
                 })),
             })
             .await;
@@ -637,6 +640,7 @@ async fn execute_handler(
                         status: rune_proto::Status::Completed.into(),
                         output: output.to_vec(),
                         error: None,
+                        attachments: vec![],
                     })),
                 },
                 Err(e) => SessionMessage {
@@ -649,6 +653,7 @@ async fn execute_handler(
                             message: e.to_string(),
                             details: vec![],
                         }),
+                        attachments: vec![],
                     })),
                 },
             };
@@ -663,6 +668,7 @@ async fn execute_handler(
                         status: rune_proto::Status::Completed.into(),
                         output: output.to_vec(),
                         error: None,
+                        attachments: vec![],
                     })),
                 },
                 Err(e) => SessionMessage {
@@ -675,6 +681,7 @@ async fn execute_handler(
                             message: e.to_string(),
                             details: vec![],
                         }),
+                        attachments: vec![],
                     })),
                 },
             };
