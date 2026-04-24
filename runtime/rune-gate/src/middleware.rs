@@ -258,7 +258,11 @@ pub async fn auth_middleware(
                 // Non-standard keys have no matching row in api_keys; skip rather than
                 // passing the full raw key as a prefix (which would silently find nothing).
                 if key.starts_with("rk_") && key.len() >= rune_store::keys::KEY_PREFIX_LEN {
-                    let key_prefix = key[..rune_store::keys::KEY_PREFIX_LEN].to_string();
+                    let Some(key_prefix) = key.get(..rune_store::keys::KEY_PREFIX_LEN) else {
+                        tracing::warn!("malformed UTF-8 in API key; skipping audit update");
+                        return next.run(req).await;
+                    };
+                    let key_prefix = key_prefix.to_string();
                     let store = state.admin.store.clone();
                     let now = rune_core::time_utils::now_iso8601();
                     let semaphore = state.auth.audit_semaphore.clone();

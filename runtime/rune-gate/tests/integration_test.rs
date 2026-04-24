@@ -72,7 +72,10 @@ fn make_state(auth_enabled: bool) -> GateState {
             max_upload_size_mb: 10,
             request_timeout: std::time::Duration::from_secs(30),
         },
-        flow: gate::FlowState { flow_engine },
+        flow: gate::FlowState {
+            flow_engine,
+            task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        },
         admin: gate::AdminState {
             store,
             started_at: Instant::now(),
@@ -928,7 +931,10 @@ async fn test_mixed_sync_and_stream_runes() {
             max_upload_size_mb: 10,
             request_timeout: std::time::Duration::from_secs(30),
         },
-        flow: gate::FlowState { flow_engine },
+        flow: gate::FlowState {
+            flow_engine,
+            task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        },
         admin: gate::AdminState {
             store,
             started_at: std::time::Instant::now(),
@@ -1168,7 +1174,10 @@ async fn test_stats_accumulate_across_runes() {
             max_upload_size_mb: 10,
             request_timeout: std::time::Duration::from_secs(30),
         },
-        flow: gate::FlowState { flow_engine },
+        flow: gate::FlowState {
+            flow_engine,
+            task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        },
         admin: gate::AdminState {
             store,
             started_at: std::time::Instant::now(),

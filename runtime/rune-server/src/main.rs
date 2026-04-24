@@ -406,6 +406,7 @@ async fn main() -> anyhow::Result<()> {
         },
         flow: gate::FlowState {
             flow_engine: Arc::clone(&flow_engine),
+            task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         },
         admin: gate::AdminState {
             store: store.clone(),

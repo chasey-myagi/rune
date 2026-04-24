@@ -105,6 +105,12 @@ pub async fn delete_task(
             .into_response(),
         _ => {
             // running or pending — cancel
+            // First check the local async-flow registry (tasks spawned by
+            // run_flow_async are not in the session_mgr request index).
+            if let Some(handle) = state.flow.task_registry.write().await.remove(&id) {
+                handle.abort();
+                return mark_cancelled_in_store(&state.admin.store, &id, None).await;
+            }
             match state
                 .rune
                 .session_mgr

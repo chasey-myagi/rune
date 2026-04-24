@@ -186,7 +186,10 @@ fn build_test_state(auth_enabled: bool) -> (GateState, Arc<RuneStore>) {
             max_upload_size_mb: 1, // 1MB for upload tests
             request_timeout: Duration::from_secs(30),
         },
-        flow: gate::FlowState { flow_engine },
+        flow: gate::FlowState {
+            flow_engine,
+            task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        },
         admin: gate::AdminState {
             store: store.clone(),
             started_at: Instant::now(),

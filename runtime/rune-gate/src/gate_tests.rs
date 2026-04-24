@@ -103,7 +103,10 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState { flow_engine },
+            flow: FlowState {
+                flow_engine,
+                task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -1064,7 +1067,10 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState { flow_engine },
+            flow: FlowState {
+                flow_engine,
+                task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -1451,7 +1457,10 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState { flow_engine },
+            flow: FlowState {
+                flow_engine,
+                task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -2018,7 +2027,10 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState { flow_engine },
+            flow: FlowState {
+                flow_engine,
+                task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -2121,7 +2133,10 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState { flow_engine },
+            flow: FlowState {
+                flow_engine,
+                task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -2215,7 +2230,10 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState { flow_engine },
+            flow: FlowState {
+                flow_engine,
+                task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -4132,7 +4150,10 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState { flow_engine },
+            flow: FlowState {
+                flow_engine,
+                task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -6096,7 +6117,10 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState { flow_engine },
+            flow: FlowState {
+                flow_engine,
+                task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -6197,7 +6221,12 @@ mod tests {
                     max_upload_size_mb: 10,
                     request_timeout: DEFAULT_REQUEST_TIMEOUT,
                 },
-                flow: FlowState { flow_engine },
+                flow: FlowState {
+                    flow_engine,
+                    task_registry: Arc::new(tokio::sync::RwLock::new(
+                        std::collections::HashMap::new(),
+                    )),
+                },
                 admin: AdminState {
                     store,
                     started_at: Instant::now(),
@@ -6710,7 +6739,10 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState { flow_engine },
+            flow: FlowState {
+                flow_engine,
+                task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -6813,7 +6845,10 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState { flow_engine },
+            flow: FlowState {
+                flow_engine,
+                task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),
@@ -7565,7 +7600,10 @@ mod tests {
                 max_upload_size_mb: 10,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
             },
-            flow: FlowState { flow_engine },
+            flow: FlowState {
+                flow_engine,
+                task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            },
             admin: AdminState {
                 store,
                 started_at: Instant::now(),

@@ -689,10 +689,10 @@ impl SessionManager {
             self.default_caster_max_concurrent
         };
         tracing::info!(caster_id = %id, effective_max_concurrent = permits, "caster concurrency configured");
-        ctx.semaphore.add_permits(permits);
-
         let gen = self.next_generation();
         ctx.generation = Some(gen);
+        ctx.caster_id = Some(id.clone());
+
         self.sessions.insert(
             id.clone(),
             CasterState {
@@ -703,6 +703,7 @@ impl SessionManager {
                 generation: gen,
             },
         );
+        ctx.semaphore.add_permits(permits);
         self.health.insert(
             id.clone(),
             HealthEntry {
@@ -784,11 +785,10 @@ impl SessionManager {
             callback(&id, &configs);
         }
 
-        // Set caster_id BEFORE sending the ACK so that if the send fails,
-        // cleanup_session can find and remove all the state we just inserted
-        // (sessions, health, metadata, relay entries).
+        // Set state to Active before sending the ACK. If the send fails,
+        // cleanup_session can still find and remove all shared state via
+        // caster_id + generation — no rollback needed.
         ctx.state = SessionState::Active;
-        ctx.caster_id = Some(id);
 
         let ack = SessionMessage {
             payload: Some(session_message::Payload::AttachAck(AttachAck {
@@ -802,11 +802,8 @@ impl SessionManager {
             })),
         };
         if ctx.outbound_tx.send(ack).await.is_err() {
-            // Rollback: the attach was not successfully acknowledged.
-            // Revert state so that is_active() remains false and subsequent
-            // retry / cleanup paths see a consistent session.
-            ctx.state = SessionState::Attaching;
-            ctx.caster_id = None;
+            // ACK send failed, but shared state is already inserted and
+            // cleanup_session will reclaim it via heartbeat timeout.
             return false;
         }
         // Reset heartbeat timer after a successful attach so that the heartbeat

@@ -118,6 +118,10 @@ pub struct RuneState {
 #[derive(Clone)]
 pub struct FlowState {
     pub flow_engine: Arc<tokio::sync::RwLock<FlowEngine>>,
+    /// Abort handles for locally-running async flow tasks so that
+    /// DELETE /tasks/:id can actually cancel them.
+    pub task_registry:
+        Arc<tokio::sync::RwLock<std::collections::HashMap<String, tokio::task::AbortHandle>>>,
 }
 
 /// Administration / operational state.

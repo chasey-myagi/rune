@@ -441,10 +441,16 @@ pub async fn run_flow_async(
         }
     });
 
+    // Register abort handle so DELETE /tasks/:id can cancel local async work.
+    let abort_handle = exec_handle.abort_handle();
+    let registry = Arc::clone(&state.flow.task_registry);
+    registry.write().await.insert(task_id.clone(), abort_handle);
+
     // Panic monitor: if the exec task panics, the DB entry would otherwise be
     // permanently stuck in `running`. Detect the panic and mark as Failed.
     let store_mon = Arc::clone(&state.admin.store);
     let tid_mon = task_id.clone();
+    let registry_mon = Arc::clone(&state.flow.task_registry);
     tokio::spawn(async move {
         if let Err(e) = exec_handle.await {
             if e.is_panic() {
@@ -459,6 +465,7 @@ pub async fn run_flow_async(
                     .await;
             }
         }
+        registry_mon.write().await.remove(&tid_mon);
     });
 
     traced_response(

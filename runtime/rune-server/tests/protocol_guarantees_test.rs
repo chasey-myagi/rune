@@ -297,7 +297,10 @@ fn build_guarantee_state() -> (GateState, Arc<Relay>, Arc<RuneStore>) {
             max_upload_size_mb: 1,
             request_timeout: Duration::from_secs(30),
         },
-        flow: gate::FlowState { flow_engine },
+        flow: gate::FlowState {
+            flow_engine,
+            task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        },
         admin: gate::AdminState {
             store: store.clone(),
             started_at: Instant::now(),
