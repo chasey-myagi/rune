@@ -102,10 +102,10 @@ impl KeyCache {
         if total >= self.max_entries {
             let target = self.max_entries.saturating_sub(1);
 
-            // Arbitrary-order eviction for negatives — no allocations per removal.
+            // Arbitrary-order eviction for negatives.
             while self.negatives.len() + self.entries.len() > target && !self.negatives.is_empty() {
                 if let Some(entry) = self.negatives.iter().next() {
-                    let key = entry.key().clone();
+                    let key = entry.key().clone(); // clones the String key (alloc)
                     drop(entry);
                     self.negatives.remove(&key);
                 }
@@ -114,7 +114,7 @@ impl KeyCache {
             // Arbitrary-order eviction for entries.
             while self.negatives.len() + self.entries.len() > target && !self.entries.is_empty() {
                 if let Some(entry) = self.entries.iter().next() {
-                    let key = entry.key().clone();
+                    let key = entry.key().clone(); // clones the String key (alloc)
                     drop(entry);
                     self.entries.remove(&key);
                 }

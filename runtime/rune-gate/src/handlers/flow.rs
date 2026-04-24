@@ -564,9 +564,13 @@ pub async fn run_flow_stream(
         if let Err(e) = exec_handle.await {
             if e.is_panic() {
                 tracing::error!("stream flow task panicked");
-                let _ = panic_event_tx
+                if panic_event_tx
                     .send(Ok(Event::default().event("error").data("internal panic")))
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("client disconnected before panic event could be sent");
+                }
             }
         }
     });

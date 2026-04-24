@@ -112,9 +112,11 @@ impl Default for SessionConfig {
 pub struct GateServerConfig {
     pub cors_origins: Vec<String>,
     pub max_upload_size_mb: u64,
-    /// Directory for spilling large uploads to disk. If None, defaults to
-    /// `$TMPDIR/rune-uploads` at runtime. Set to an empty string to force
-    /// pure in-memory mode (not recommended for production with large files).
+    /// Directory for spilling large uploads to disk.
+    ///
+    /// - `None` (default) → `$TMPDIR/rune-uploads`
+    /// - `Some(path)` → use the given directory
+    /// - `Some("")` → disabled; an error is raised at startup
     #[serde(default)]
     pub disk_spill_dir: Option<String>,
     /// CIDR ranges of trusted reverse proxies (e.g. ["10.0.0.0/8", "172.16.0.0/12"]).

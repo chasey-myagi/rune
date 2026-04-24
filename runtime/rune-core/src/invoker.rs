@@ -5,6 +5,14 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
+/// Invoker that executes a rune, either locally or remotely.
+///
+/// # Cancellation safety
+/// Implementations of `invoke_stream` MUST be cancellation-safe: when the
+/// returned `Future` is dropped (e.g. because the client disconnected), the
+/// handler must not leak resources or leave partial state behind. The runtime
+/// relies on `Future::drop` for cleanup; there is no explicit "cancel"
+/// signal.
 #[async_trait::async_trait]
 pub trait RuneInvoker: Send + Sync {
     async fn invoke_once(&self, ctx: RuneContext, input: Bytes) -> Result<Bytes, RuneError>;
@@ -64,9 +72,13 @@ impl RuneInvoker for LocalStreamInvoker {
         while let Some(chunk) = rx.recv().await {
             collected.push(chunk?);
         }
-        // Return the last chunk: stream handlers emit the meaningful result as their
-        // final chunk (e.g. tx.emit(data).await followed by tx.end().await). Earlier
-        // chunks are intermediate. Callers that need all chunks must use invoke_stream.
+        // CONTRACT: stream handlers emit the *meaningful* result as their final
+        // chunk (e.g. tx.emit(data).await followed by tx.end().await). Earlier
+        // chunks are treated as intermediate and DISCARDED here.
+        //
+        // This is a convention, not enforced by the type system. If a handler
+        // places meaningful data in non-final chunks, that data is lost.
+        // Callers that need every chunk must use `invoke_stream` directly.
         Ok(collected.into_iter().last().unwrap_or_default())
     }
 
