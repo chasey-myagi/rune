@@ -803,7 +803,7 @@ impl SessionManager {
         };
         if ctx.outbound_tx.send(ack).await.is_err() {
             // ACK send failed, but shared state is already inserted and
-            // cleanup_session will reclaim it via heartbeat timeout.
+            // cleanup_session will reclaim it immediately when the session loop exits.
             return false;
         }
         // Reset heartbeat timer after a successful attach so that the heartbeat

@@ -105,7 +105,9 @@ impl KeyCache {
             // Arbitrary-order eviction for negatives.
             while self.negatives.len() + self.entries.len() > target && !self.negatives.is_empty() {
                 if let Some(entry) = self.negatives.iter().next() {
-                    let key = entry.key().clone(); // clones the String key (alloc)
+                    // Clone the key before dropping the iter guard — holding the
+                    // guard across remove() would deadlock on the same shard.
+                    let key = entry.key().clone();
                     drop(entry);
                     self.negatives.remove(&key);
                 }
@@ -114,7 +116,9 @@ impl KeyCache {
             // Arbitrary-order eviction for entries.
             while self.negatives.len() + self.entries.len() > target && !self.entries.is_empty() {
                 if let Some(entry) = self.entries.iter().next() {
-                    let key = entry.key().clone(); // clones the String key (alloc)
+                    // Clone the key before dropping the iter guard — holding the
+                    // guard across remove() would deadlock on the same shard.
+                    let key = entry.key().clone();
                     drop(entry);
                     self.entries.remove(&key);
                 }
