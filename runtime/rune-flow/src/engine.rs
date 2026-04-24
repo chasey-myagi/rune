@@ -1933,12 +1933,18 @@ mod tests {
         assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    /// retry_on=[] 时所有错误都重试，应达到 max_attempts 次调用
+    /// retry_on=[Any] 时所有错误都重试，应达到 max_attempts 次调用
     #[tokio::test]
     async fn retry_on_any_retries_all_errors() {
-        use crate::dag::BackoffStrategy;
+        use crate::dag::{BackoffStrategy, RetryCondition};
         use rune_core::rune::RuneError;
-        let cfg = make_retry(3, 0, BackoffStrategy::Fixed, None, vec![]);
+        let cfg = make_retry(
+            3,
+            0,
+            BackoffStrategy::Fixed,
+            None,
+            vec![RetryCondition::Any],
+        );
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
         let result = retry_op(

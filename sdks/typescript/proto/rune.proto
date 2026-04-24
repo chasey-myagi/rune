@@ -38,6 +38,7 @@ message CasterAttach {
     uint32 max_concurrent = 4;
     string key = 5;              // Caster 认证密钥（dev 模式下可省略）
     string role = 6;             // "caster" (default) | "pilot"
+    string protocol_version = 7; // Caster 声明的协议版本（为空则兼容旧版）
 }
 
 message AttachAck {
