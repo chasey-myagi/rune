@@ -145,6 +145,7 @@ fn make_attach_msg_with_key(caster_id: &str, key: &str) -> SessionMessage {
     SessionMessage {
         payload: Some(session_message::Payload::Attach(CasterAttach {
             caster_id: caster_id.into(),
+            protocol_version: String::new(),
             runes: vec![make_rune_decl("test_rune")],
             labels: Default::default(),
             max_concurrent: 5,

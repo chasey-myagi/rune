@@ -91,8 +91,14 @@ impl RuneStore {
                 Ok(TaskRecord {
                     task_id: row.get(0)?,
                     rune_name: row.get(1)?,
-                    status: TaskStatus::parse(&row.get::<_, String>(2)?)
-                        .unwrap_or(TaskStatus::Pending),
+                    status: {
+                        let s: String = row.get(2)?;
+                        let st = TaskStatus::from_db(&s);
+                        if matches!(st, TaskStatus::Unknown(_)) {
+                            tracing::warn!(status = %s, "unknown task status in db — preserving as Unknown");
+                        }
+                        st
+                    },
                     input: row.get(3)?,
                     output: row.get(4)?,
                     error: row.get(5)?,
@@ -138,7 +144,7 @@ impl RuneStore {
                         rusqlite::params![status.as_str(), output, error, now, task_id],
                     )?;
                 }
-                TaskStatus::Pending => {
+                TaskStatus::Pending | TaskStatus::Unknown(_) => {
                     conn.execute(
                         "UPDATE tasks SET status = ?1 WHERE task_id = ?2",
                         rusqlite::params![status.as_str(), task_id],
@@ -183,6 +189,8 @@ impl RuneStore {
         limit: i64,
         offset: i64,
     ) -> StoreResult<Vec<TaskRecord>> {
+        let limit = limit.clamp(0, 500);
+        let offset = offset.max(0);
         let pool = self.pool.clone();
         let rune_name = rune_name.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || {
@@ -211,8 +219,17 @@ impl RuneStore {
                     Ok(TaskRecord {
                         task_id: row.get(0)?,
                         rune_name: row.get(1)?,
-                        status: TaskStatus::parse(&row.get::<_, String>(2)?)
-                            .unwrap_or(TaskStatus::Pending),
+                        status: {
+                            let s: String = row.get(2)?;
+                            let st = TaskStatus::from_db(&s);
+                            if matches!(st, TaskStatus::Unknown(_)) {
+                                tracing::warn!(
+                                    status = %s,
+                                    "unknown task status in db (list_tasks) — preserving as Unknown"
+                                );
+                            }
+                            st
+                        },
                         input: row.get(3)?,
                         output: row.get(4)?,
                         error: row.get(5)?,

@@ -139,6 +139,8 @@ impl RetryInvoker {
     }
 
     fn backoff_delay_ms(&self, attempt: u32) -> u64 {
+        // attempt=1 (first retry after the initial failure) → exponent=0 → base_delay*1.
+        // .max(0) guards against u32→i32 wrap-around if attempt ever exceeds i32::MAX.
         let exponent = (attempt.saturating_sub(1)) as i32;
         let base_delay = (self.config.base_delay_ms as f64)
             * self.config.backoff_multiplier.powi(exponent.max(0));
@@ -161,6 +163,14 @@ impl RuneInvoker for RetryInvoker {
         if !self.config.enabled {
             return self.inner.invoke_once(ctx, input).await;
         }
+
+        // When the flow layer owns retries, limit to one attempt here so the
+        // circuit breaker still fires, but the retry loop does not run.
+        let effective_max_retries = if ctx.disable_runtime_retry {
+            0
+        } else {
+            self.config.max_retries
+        };
 
         let deadline = std::time::Instant::now() + ctx.timeout;
         let base_ctx = ctx.clone();
@@ -187,7 +197,7 @@ impl RuneInvoker for RetryInvoker {
                     }
 
                     let retryable = is_retryable(&err, &self.retryable);
-                    if attempt >= self.config.max_retries || !retryable {
+                    if attempt >= effective_max_retries || !retryable {
                         return Err(err);
                     }
 
@@ -298,6 +308,7 @@ mod tests {
             request_id: "r-1".into(),
             context: Default::default(),
             timeout: Duration::from_secs(5),
+            disable_runtime_retry: false,
         }
     }
 
@@ -315,6 +326,7 @@ mod tests {
                 success_threshold: 1,
                 reset_timeout_ms: 1,
                 half_open_max_permits: 1,
+                ..Default::default()
             },
         }
     }
@@ -482,6 +494,7 @@ mod tests {
                 success_threshold: 1,
                 reset_timeout_ms: 60_000,
                 half_open_max_permits: 1,
+                ..Default::default()
             },
             ..retry_config()
         };
@@ -514,6 +527,7 @@ mod tests {
                 success_threshold: 1,
                 reset_timeout_ms: 60_000,
                 half_open_max_permits: 1,
+                ..Default::default()
             },
             ..retry_config()
         };
@@ -561,6 +575,7 @@ mod tests {
                 success_threshold: 1,
                 reset_timeout_ms: 60_000,
                 half_open_max_permits: 1,
+                ..Default::default()
             },
             ..retry_config()
         };
@@ -599,6 +614,7 @@ mod tests {
                 success_threshold: 1,
                 reset_timeout_ms: 60_000,
                 half_open_max_permits: 1,
+                ..Default::default()
             },
             ..retry_config()
         };
@@ -679,6 +695,7 @@ mod tests {
             request_id: "overshoot-test".into(),
             context: Default::default(),
             timeout: Duration::from_millis(100),
+            disable_runtime_retry: false,
         };
 
         struct InstantFail {
@@ -748,6 +765,7 @@ mod tests {
             request_id: "deadline-test".into(),
             context: Default::default(),
             timeout: Duration::from_millis(50),
+            disable_runtime_retry: false,
         };
 
         // Inner invoker sleeps 30ms per call then fails — after 2 calls (60ms)
@@ -823,6 +841,7 @@ mod tests {
             request_id: "backoff-budget".into(),
             context: Default::default(),
             timeout: Duration::from_secs(5),
+            disable_runtime_retry: false,
         };
 
         struct TimedCapture {
@@ -907,6 +926,7 @@ mod tests {
             request_id: "budget-test".into(),
             context: Default::default(),
             timeout: Duration::from_secs(10),
+            disable_runtime_retry: false,
         };
 
         // Capture the timeout from each invocation
@@ -1027,6 +1047,7 @@ mod tests {
             success_threshold: 1,
             reset_timeout_ms: 1,
             half_open_max_permits: 1,
+            ..Default::default()
         };
         let breaker = Arc::new(CircuitBreaker::new("test-caster".into(), config.clone()));
         // Trip the breaker

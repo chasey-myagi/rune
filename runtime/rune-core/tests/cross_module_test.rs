@@ -44,6 +44,7 @@ fn test_ctx(rune_name: &str, request_id: &str) -> RuneContext {
         request_id: request_id.into(),
         context: Default::default(),
         timeout: Duration::from_secs(30),
+        disable_runtime_retry: false,
     }
 }
 
@@ -80,7 +81,7 @@ async fn app_register_echo_rune_full_chain() {
         out.extend_from_slice(&input);
         Ok(Bytes::from(out))
     });
-    app.rune(echo_config("echo"), handler);
+    app.rune(echo_config("echo"), handler).unwrap();
 
     let resolver = RoundRobinResolver::new();
     let invoker = app
@@ -103,7 +104,8 @@ async fn app_register_stream_rune_invoke_stream() {
     app.stream_rune(
         stream_config("streamer"),
         CountingStreamHandler { count: 3 },
-    );
+    )
+    .unwrap();
 
     let resolver = RoundRobinResolver::new();
     let invoker = app
@@ -132,8 +134,8 @@ async fn multiple_rune_round_robin_selection() {
     let h1 = make_handler(|_ctx, _input| async { Ok(Bytes::from("v1")) });
     let h2 = make_handler(|_ctx, _input| async { Ok(Bytes::from("v2")) });
 
-    app.rune(echo_config("rr"), h1);
-    app.rune(echo_config("rr"), h2);
+    app.rune(echo_config("rr"), h1).unwrap();
+    app.rune(echo_config("rr"), h2).unwrap();
 
     let resolver = RoundRobinResolver::new();
 
@@ -207,7 +209,7 @@ async fn full_chain_with_context_propagation() {
         );
         Ok(Bytes::from(output))
     });
-    app.rune(echo_config("ctx_rune"), handler);
+    app.rune(echo_config("ctx_rune"), handler).unwrap();
 
     let resolver = RoundRobinResolver::new();
     let invoker = app.relay.resolve("ctx_rune", &resolver).unwrap();
@@ -219,6 +221,7 @@ async fn full_chain_with_context_propagation() {
             .into_iter()
             .collect(),
         timeout: Duration::from_secs(10),
+        disable_runtime_retry: false,
     };
 
     let result = invoker.invoke_once(ctx, Bytes::from("data")).await.unwrap();
@@ -232,7 +235,8 @@ async fn app_build_returns_functional_components() {
     app.rune(
         echo_config("built"),
         make_handler(|_ctx, input| async move { Ok(input) }),
-    );
+    )
+    .unwrap();
     let running = app.build();
 
     let resolver = RoundRobinResolver::new();

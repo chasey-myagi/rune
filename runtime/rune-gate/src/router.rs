@@ -15,6 +15,7 @@ use crate::state::GateState;
 pub fn build_router(state: GateState, extra_routes: Option<Router<GateState>>) -> Router {
     let mut router = Router::new()
         .route("/health", get(handlers::mgmt::health))
+        .route("/ready", get(handlers::mgmt::ready))
         .route("/api/v1/runes", get(handlers::mgmt::list_runes))
         .route("/api/v1/runes/{name}/run", post(handlers::rune::run_rune))
         .route("/api/v1/tasks", get(handlers::task::list_tasks))

@@ -55,9 +55,11 @@ fn make_state(auth_enabled: bool) -> GateState {
     )));
     GateState {
         auth: gate::AuthState {
+            trust_proxy: None,
             key_verifier,
             auth_enabled,
             exempt_routes: Arc::new(vec!["/health".to_string()]),
+            audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
         },
         rune: gate::RuneState {
             relay,
@@ -70,7 +72,10 @@ fn make_state(auth_enabled: bool) -> GateState {
             max_upload_size_mb: 10,
             request_timeout: std::time::Duration::from_secs(30),
         },
-        flow: gate::FlowState { flow_engine },
+        flow: gate::FlowState {
+            flow_engine,
+            task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        },
         admin: gate::AdminState {
             store,
             started_at: Instant::now(),
@@ -909,9 +914,11 @@ async fn test_mixed_sync_and_stream_runes() {
     )));
     let state = GateState {
         auth: gate::AuthState {
+            trust_proxy: None,
             key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
             auth_enabled: false,
             exempt_routes: Arc::new(vec!["/health".to_string()]),
+            audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
         },
         rune: gate::RuneState {
             relay,
@@ -924,7 +931,10 @@ async fn test_mixed_sync_and_stream_runes() {
             max_upload_size_mb: 10,
             request_timeout: std::time::Duration::from_secs(30),
         },
-        flow: gate::FlowState { flow_engine },
+        flow: gate::FlowState {
+            flow_engine,
+            task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        },
         admin: gate::AdminState {
             store,
             started_at: std::time::Instant::now(),
@@ -1147,9 +1157,11 @@ async fn test_stats_accumulate_across_runes() {
     )));
     let state = GateState {
         auth: gate::AuthState {
+            trust_proxy: None,
             key_verifier: Arc::new(NoopVerifier) as Arc<dyn KeyVerifier>,
             auth_enabled: false,
             exempt_routes: Arc::new(vec!["/health".to_string()]),
+            audit_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
         },
         rune: gate::RuneState {
             relay,
@@ -1162,7 +1174,10 @@ async fn test_stats_accumulate_across_runes() {
             max_upload_size_mb: 10,
             request_timeout: std::time::Duration::from_secs(30),
         },
-        flow: gate::FlowState { flow_engine },
+        flow: gate::FlowState {
+            flow_engine,
+            task_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        },
         admin: gate::AdminState {
             store,
             started_at: std::time::Instant::now(),

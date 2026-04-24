@@ -38,6 +38,7 @@ message CasterAttach {
     uint32 max_concurrent = 4;
     string key = 5;              // Caster 认证密钥（dev 模式下可省略）
     string role = 6;             // "caster" (default) | "pilot"
+    string protocol_version = 7; // Caster 声明的协议版本（为空则兼容旧版）
 }
 
 message AttachAck {
@@ -69,6 +70,14 @@ message GateConfig {
     string method = 2;
 }
 
+// ── 文件附件 ──
+
+message FileAttachment {
+    string filename = 1;
+    bytes data = 2;
+    string mime_type = 3;
+}
+
 // ── 执行 ──
 
 message ExecuteRequest {
@@ -77,6 +86,7 @@ message ExecuteRequest {
     bytes input = 3;
     map<string, string> context = 4;
     uint32 timeout_ms = 5;
+    repeated FileAttachment attachments = 6;   // 文件附件
 }
 
 message CancelRequest {
@@ -102,6 +112,7 @@ message ExecuteResult {
     Status status = 2;
     bytes output = 3;
     ErrorDetail error = 4;
+    repeated FileAttachment attachments = 5;   // 返回文件附件
 }
 
 // ── 流式 ──

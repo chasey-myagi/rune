@@ -2363,6 +2363,111 @@ async fn test_concurrent_store_operations() {
 }
 
 // ============================================================
+// B7: API Key audit fields (last_used_at / last_used_ip)
+// ============================================================
+
+#[tokio::test]
+async fn test_api_key_audit_fields_null_on_create() {
+    let store = new_store();
+    let result = store.create_key(KeyType::Gate, "audit-test").await.unwrap();
+
+    // Newly created key: audit fields must be None
+    assert!(
+        result.api_key.last_used_at.is_none(),
+        "last_used_at should be None on creation"
+    );
+    assert!(
+        result.api_key.last_used_ip.is_none(),
+        "last_used_ip should be None on creation"
+    );
+
+    // Verify that list_keys also returns None audit fields
+    let keys = store.list_keys().await.unwrap();
+    assert_eq!(keys.len(), 1);
+    assert!(keys[0].last_used_at.is_none());
+    assert!(keys[0].last_used_ip.is_none());
+
+    // verify_key also returns None audit fields
+    let verified = store
+        .verify_key(&result.raw_key, KeyType::Gate)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(verified.last_used_at.is_none());
+    assert!(verified.last_used_ip.is_none());
+}
+
+#[tokio::test]
+async fn test_update_key_last_used() {
+    let store = new_store();
+    let result = store.create_key(KeyType::Gate, "used-key").await.unwrap();
+
+    // Use key_prefix (hash-algorithm-agnostic identifier) for the audit update.
+    let key_prefix = result.api_key.key_prefix.clone();
+
+    let used_at = "2026-04-23T12:00:00Z";
+    let used_ip = "192.0.2.1";
+
+    store
+        .update_key_last_used(&key_prefix, used_at, used_ip)
+        .await
+        .unwrap();
+
+    // Verify via list_keys
+    let keys = store.list_keys().await.unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].last_used_at.as_deref(), Some(used_at));
+    assert_eq!(keys[0].last_used_ip.as_deref(), Some(used_ip));
+
+    // Verify via verify_key (query_key_by_hash path)
+    let verified = store
+        .verify_key(&result.raw_key, KeyType::Gate)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(verified.last_used_at.as_deref(), Some(used_at));
+    assert_eq!(verified.last_used_ip.as_deref(), Some(used_ip));
+
+    // A second update should overwrite
+    let used_at2 = "2026-04-23T13:00:00Z";
+    let used_ip2 = "203.0.113.5";
+    store
+        .update_key_last_used(&key_prefix, used_at2, used_ip2)
+        .await
+        .unwrap();
+
+    let keys2 = store.list_keys().await.unwrap();
+    assert_eq!(keys2[0].last_used_at.as_deref(), Some(used_at2));
+    assert_eq!(keys2[0].last_used_ip.as_deref(), Some(used_ip2));
+}
+
+#[tokio::test]
+async fn test_schema_migration_idempotent() {
+    // Opening two stores backed by the same file calls run_migrations twice.
+    // The second run must not fail even though the audit columns already exist.
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("idempotent_migration.db");
+
+    let store1 = rune_store::RuneStore::open(&db_path).expect("first open should succeed");
+    // Columns exist now. Opening the same file again must succeed.
+    let store2 =
+        rune_store::RuneStore::open(&db_path).expect("second open (idempotent) should succeed");
+
+    // Both handles should be functional
+    store1
+        .create_key(KeyType::Gate, "store1-key")
+        .await
+        .unwrap();
+    let keys = store2.list_keys().await.unwrap();
+    assert_eq!(
+        keys.len(),
+        1,
+        "key created via store1 should be visible via store2"
+    );
+    assert!(keys[0].last_used_at.is_none());
+}
+
+// ============================================================
 // MF-3: KeyType::parse returns None for unknown values
 // ============================================================
 

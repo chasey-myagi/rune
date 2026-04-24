@@ -369,6 +369,7 @@ async fn run_pilot_session(
             max_concurrent: 1,
             key: std::env::var("RUNE_KEY").unwrap_or_default(),
             role: "pilot".into(),
+            protocol_version: "1.2".into(),
         })),
     })
     .await?;
@@ -720,22 +721,42 @@ pub fn pid_alive(pid_path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    struct HomeGuard(Option<std::ffi::OsString>);
+    // Serializes tests that mutate $HOME so they don't race with each other.
+    // Uses std::sync::Mutex (not tokio::sync::Mutex) because std::env::set_var
+    // is a thread-safety hazard, not an async one.
+    static HOME_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct HomeGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
 
     impl HomeGuard {
         fn set(path: &Path) -> Self {
+            let lock = HOME_MUTEX.lock().unwrap();
             let previous = std::env::var_os("HOME");
-            std::env::set_var("HOME", path);
-            Self(previous)
+            // SAFETY: std::env::set_var is deprecated due to thread-safety.
+            // We hold a std::sync::Mutex so only one thread reaches this point.
+            #[allow(deprecated)]
+            unsafe {
+                std::env::set_var("HOME", path);
+            }
+            Self {
+                previous,
+                _lock: lock,
+            }
         }
     }
 
     impl Drop for HomeGuard {
         fn drop(&mut self) {
-            if let Some(previous) = self.0.take() {
-                std::env::set_var("HOME", previous);
-            } else {
-                std::env::remove_var("HOME");
+            #[allow(deprecated)]
+            unsafe {
+                if let Some(previous) = self.previous.take() {
+                    std::env::set_var("HOME", previous);
+                } else {
+                    std::env::remove_var("HOME");
+                }
             }
         }
     }
