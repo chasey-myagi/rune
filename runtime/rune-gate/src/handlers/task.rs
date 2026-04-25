@@ -119,12 +119,16 @@ pub async fn delete_task(
             {
                 Ok(true) => mark_cancelled_in_store(&state.admin.store, &id, None).await,
                 Ok(false) => {
-                    // Request already gone from index — task likely finished just now.
-                    // Return current state so the client can see what happened.
+                    // Not in session index: either it finished just now, or the task
+                    // was never actively tracked (e.g. a pending orphan). Re-read the
+                    // store and cancel if still in a cancellable state.
                     match state.admin.store.get_task(&id).await {
-                        Ok(Some(task)) => {
-                            (StatusCode::OK, Json(serde_json::json!(task))).into_response()
-                        }
+                        Ok(Some(task)) => match task.status {
+                            TaskStatus::Pending | TaskStatus::Running => {
+                                mark_cancelled_in_store(&state.admin.store, &id, None).await
+                            }
+                            _ => (StatusCode::OK, Json(serde_json::json!(task))).into_response(),
+                        },
                         Ok(None) => {
                             error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "task not found")
                         }
