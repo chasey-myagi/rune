@@ -1,4 +1,5 @@
 use rune_core::config::PerRuneRateLimit;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -39,7 +40,7 @@ impl RateLimitState {
                 exact.insert(pattern, rule.max_requests);
             }
         }
-        wildcard.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        wildcard.sort_by_key(|e| Reverse(e.0.len()));
 
         Self {
             counters: Arc::new(DashMap::new()),

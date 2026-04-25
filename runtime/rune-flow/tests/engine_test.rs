@@ -3570,7 +3570,7 @@ async fn retry_rune_step_on_failure() {
                     backoff_ms: 0,
                     backoff_strategy: rune_flow::dag::BackoffStrategy::Fixed,
                     max_delay_ms: None,
-                    retry_on: vec![],
+                    retry_on: vec![rune_flow::dag::RetryCondition::Any],
                 }),
                 kind: StepKind::Rune(FlowRuneConfig {
                     rune: "flaky".into(),
@@ -3635,7 +3635,7 @@ async fn retry_exhausted_returns_error() {
                     backoff_ms: 0,
                     backoff_strategy: rune_flow::dag::BackoffStrategy::Fixed,
                     max_delay_ms: None,
-                    retry_on: vec![],
+                    retry_on: vec![rune_flow::dag::RetryCondition::Any],
                 }),
                 kind: StepKind::Rune(FlowRuneConfig {
                     rune: "always-fail".into(),
@@ -3707,7 +3707,7 @@ async fn retry_loop_step_on_failure() {
                     backoff_ms: 0,
                     backoff_strategy: rune_flow::dag::BackoffStrategy::Fixed,
                     max_delay_ms: None,
-                    retry_on: vec![],
+                    retry_on: vec![rune_flow::dag::RetryCondition::Any],
                 }),
                 kind: StepKind::Loop(rune_flow::dag::LoopConfig {
                     max_iterations: 1,
@@ -3939,7 +3939,7 @@ async fn per_step_timeout_with_retry_all_timeout() {
                     backoff_ms: 0,
                     backoff_strategy: rune_flow::dag::BackoffStrategy::Fixed,
                     max_delay_ms: None,
-                    retry_on: vec![],
+                    retry_on: vec![rune_flow::dag::RetryCondition::Any],
                 }),
                 kind: StepKind::Rune(FlowRuneConfig {
                     rune: "slow-always".into(),
@@ -4135,7 +4135,7 @@ async fn retry_backoff_adds_measurable_delay() {
                     backoff_ms: 80,
                     backoff_strategy: rune_flow::dag::BackoffStrategy::Fixed,
                     max_delay_ms: None,
-                    retry_on: vec![],
+                    retry_on: vec![rune_flow::dag::RetryCondition::Any],
                 }),
                 kind: StepKind::Rune(FlowRuneConfig {
                     rune: "always-err".into(),
